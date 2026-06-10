@@ -5,7 +5,7 @@
 //! - 监听 AssistantMessage 事件 → 发送回复到 Telegram
 
 use plugin_core::{
-    AgentEvent, HostContext, Plugin, PluginError, PluginMeta,
+    AgentEvent, EventType, HostContext, Plugin, PluginError, PluginMeta,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -80,6 +80,11 @@ impl Plugin for TgImPlugin {
                         if let Some(ref handle) = handle {
                             *handle.lock().await = Some(h);
                         }
+                        // 保持 runtime 运行，等待关闭信号
+                        // dispatcher 在后台 tokio::spawn 中运行
+                        // 这里用一个长期存在的 future 来阻止 block_on 返回
+                        let shutdown = bot::shutdown_signal();
+                        shutdown.await;
                     }
                     Err(e) => {
                         eprintln!("[tg-im] Bot 运行失败: {}", e);
@@ -121,8 +126,36 @@ impl Plugin for TgImPlugin {
     }
 
     fn on_event(&self, event: &AgentEvent) {
-        if let Some(ref ctx) = self.ctx {
-            ctx.log_debug("tg-im", &format!("收到事件: {:?}", event.event_type));
+        match event.event_type {
+            EventType::AssistantMessage => {
+                // 宿主回复 → 发送到 Telegram
+                let chat_id = event.data.get("chat_id").and_then(|v| v.as_i64());
+                let text = event.data.get("text").and_then(|v| v.as_str());
+
+                if let (Some(chat_id), Some(text)) = (chat_id, text) {
+                    if let Some(ref handle) = self.bot_handle {
+                        let handle = handle.clone();
+                        let text = text.to_string();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("无法创建 tokio runtime");
+                            rt.block_on(async {
+                                let guard = handle.lock().await;
+                                if let Some(ref h) = *guard {
+                                    let _ = h.send_message(chat_id, &text).await;
+                                }
+                            });
+                        });
+                    }
+                }
+            }
+            _ => {
+                if let Some(ref ctx) = self.ctx {
+                    ctx.log_debug("tg-im", &format!("收到事件: {:?}", event.event_type));
+                }
+            }
         }
     }
 

@@ -17,8 +17,6 @@ pub struct BotHandle {
 
 impl BotHandle {
     pub async fn shutdown(&self) {
-        // teloxide 的 Dispatcher 通过 drop 来停止
-        // 这里可以发送一条消息通知用户
         if let Some(chat_id) = self.chat_id {
             let _ = self
                 .bot
@@ -43,13 +41,41 @@ impl BotHandle {
     }
 }
 
+/// 构建带代理的 reqwest Client
+fn build_reqwest_client() -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder();
+
+    // 读取代理环境变量
+    let https_proxy = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok();
+    let all_proxy = std::env::var("ALL_PROXY")
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok();
+
+    if let Some(ref proxy_url) = all_proxy {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("代理配置失败: {}", e))?;
+        builder = builder.proxy(proxy);
+    } else if let Some(ref proxy_url) = https_proxy {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("代理配置失败: {}", e))?;
+        builder = builder.proxy(proxy);
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))
+}
+
 /// 启动 Telegram Bot
 pub async fn run_bot(
     token: &str,
     emitter: Arc<dyn plugin_core::EventEmitter>,
     logger: Option<Arc<dyn LogCallback>>,
 ) -> Result<BotHandle, String> {
-    let bot = Bot::new(token);
+    let client = build_reqwest_client()?;
+    let bot = Bot::with_client(token, client);
 
     // 获取 bot 信息并打印
     let me = bot.get_me().await.map_err(|e| format!("获取 Bot 信息失败: {}", e))?;
@@ -71,7 +97,6 @@ pub async fn run_bot(
         let logger = logger_clone.clone();
 
         async move {
-            // 只处理文本消息
             let text = match msg.text() {
                 Some(t) => t.to_string(),
                 None => return Ok::<(), teloxide::RequestError>(()),
@@ -92,7 +117,7 @@ pub async fn run_bot(
                 );
             }
 
-            // 发射 UserMessage 事件到宿主
+            // 发射 UserMessage 事件到宿主（LLM 回复会通过 AssistantMessage 事件发回）
             emitter.emit(AgentEvent::new(
                 EventType::UserMessage,
                 EventSource::Plugin("tg-im".into()),
@@ -104,14 +129,6 @@ pub async fn run_bot(
                 }),
             ));
 
-            // 发送确认回执
-            let _ = bot
-                .send_message(
-                    Recipient::Id(teloxide::types::ChatId(chat_id)),
-                    "收到，正在处理...",
-                )
-                .await;
-
             Ok(())
         }
     };
@@ -120,16 +137,20 @@ pub async fn run_bot(
     let mut dispatcher = Dispatcher::builder(bot_clone, Update::filter_message().branch(dptree::endpoint(handler)))
         .build();
 
-    // 在后台 spawn dispatcher
     let handle = BotHandle {
         bot: bot.clone(),
         chat_id: None,
     };
 
-    // dispatcher 需要被持续 poll，这里用 tokio::spawn
     tokio::spawn(async move {
         dispatcher.dispatch().await;
     });
 
     Ok(handle)
+}
+
+/// 等待关闭信号（用于保持 runtime 存活）
+pub async fn shutdown_signal() {
+    // 等待 Ctrl+C
+    let _ = tokio::signal::ctrl_c().await;
 }
