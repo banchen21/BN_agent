@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "bn-core",
+    "plugin-core",
+    "plugins/time-plugin",
+]
