@@ -3213,6 +3213,7 @@ dependencies = [
 name = "webrtc-plugin"
 version = "0.1.0"
 dependencies = [
+ "interceptor",
  "plugin-core",
  "serde",
  "serde_json",

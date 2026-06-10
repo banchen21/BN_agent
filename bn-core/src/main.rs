@@ -111,9 +111,13 @@ fn main() -> std::io::Result<()> {
                                 };
                                 let reply_event = match llm.send(req).await {
                                     Ok(Ok(resp)) => {
+                                        let preview: String = resp.content
+                                            .chars()
+                                            .take(80)
+                                            .collect();
                                         tracing::info!(
                                             "[LLM] 回复: {} | 缓存命中: {} tokens",
-                                            &resp.content[..resp.content.len().min(80)],
+                                            preview,
                                             resp.cache_hit_tokens,
                                         );
                                         AgentEvent::new(

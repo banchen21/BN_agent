@@ -7,7 +7,7 @@
 use plugin_core::{AgentEvent, EventSource, EventType, LogCallback};
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::Recipient;
+use teloxide::types::{ChatAction, Recipient};
 
 /// Bot 句柄，用于外部控制（如关闭）
 pub struct BotHandle {
@@ -37,6 +37,18 @@ impl BotHandle {
             )
             .await
             .map_err(|e| format!("发送消息失败: {}", e))?;
+        Ok(())
+    }
+
+    /// 发送"正在输入..."状态
+    pub async fn send_typing(&self, chat_id: i64) -> Result<(), String> {
+        self.bot
+            .send_chat_action(
+                Recipient::Id(teloxide::types::ChatId(chat_id)),
+                ChatAction::Typing,
+            )
+            .await
+            .map_err(|e| format!("发送状态失败: {}", e))?;
         Ok(())
     }
 }
@@ -116,6 +128,14 @@ pub async fn run_bot(
                     &format!("收到来自 @{} 的消息: {}", user_name, text),
                 );
             }
+
+            // 发送"正在输入..."状态
+            let _ = bot
+                .send_chat_action(
+                    Recipient::Id(teloxide::types::ChatId(chat_id)),
+                    ChatAction::Typing,
+                )
+                .await;
 
             // 发射 UserMessage 事件到宿主（LLM 回复会通过 AssistantMessage 事件发回）
             emitter.emit(AgentEvent::new(
