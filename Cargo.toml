@@ -4,4 +4,5 @@ members = [
     "bn-core",
     "plugin-core",
     "plugins/time-plugin",
+    "plugins/tg-im-plugin",
 ]
