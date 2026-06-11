@@ -21,8 +21,8 @@ pub trait Plugin: Send + Sync {
     /// 停止
     fn stop(&mut self) -> Result<(), crate::PluginError>;
 
-    /// 接收事件
-    fn on_event(&self, event: &crate::AgentEvent);
+    /// 接收事件。返回 `true` 继续传播，`false` 拦截（后续回调不再收到此事件）。
+    fn on_event(&self, event: &crate::AgentEvent) -> bool;
 
     /// 获取宿主上下文（用于清理资源）
     fn ctx(&self) -> Option<&crate::HostContext> { None }

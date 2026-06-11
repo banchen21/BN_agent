@@ -1,0 +1,20 @@
+[package]
+name = "webrtc-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+plugin-core = { path = "../../plugin-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+webrtc = "0.11"
+interceptor = "0.12"
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+base64 = "0.22"

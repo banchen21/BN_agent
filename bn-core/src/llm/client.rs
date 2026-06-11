@@ -1,32 +1,30 @@
-//! LLM Actor — 基于 actix 的 OpenAI 兼容 API 客户端
+//! LLM Actor — 基于 async-openai 的 OpenAI 兼容 API 客户端
 //!
 //! 支持：
 //! - 多轮对话（SQLite 持久化历史，利用 DeepSeek KV Cache）
+//! - Function Calling（tool calls）
 //! - JSON Output（response_format: json_object）
 
 use actix::prelude::*;
+use async_openai::{
+    config::OpenAIConfig,
+    types::{
+        ChatCompletionRequestAssistantMessageArgs,
+        ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs,
+        ChatCompletionTool,
+        ChatCompletionToolArgs,
+        ChatCompletionToolType,
+        CreateChatCompletionRequestArgs,
+        FunctionObject,
+        ResponseFormat,
+    },
+    Client,
+};
 use serde::{Deserialize, Serialize};
 
 use super::store::ChatStore;
-
-/// 聊天消息
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl ChatMessage {
-    pub fn system(content: &str) -> Self {
-        Self { role: "system".into(), content: content.into() }
-    }
-    pub fn user(content: &str) -> Self {
-        Self { role: "user".into(), content: content.into() }
-    }
-    pub fn assistant(content: &str) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
-    }
-}
 
 /// LLM 配置
 #[derive(Clone, Debug)]
@@ -35,7 +33,6 @@ pub struct LlmConfig {
     pub model: String,
     pub base_url: String,
     pub system_prompt: String,
-    /// 每个会话最多保留的历史轮数
     pub max_history_turns: usize,
 }
 
@@ -63,21 +60,21 @@ impl LlmConfig {
 
 // ── Actor 定义 ──
 
-/// LLM Actor — SQLite 持久化多轮对话
 pub struct LlmActor {
     config: LlmConfig,
-    client: reqwest::Client,
+    client: Client<OpenAIConfig>,
     store: ChatStore,
 }
 
 impl LlmActor {
     pub fn new(config: LlmConfig) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+        let openai_config = OpenAIConfig::new()
+            .with_api_base(config.base_url.trim_end_matches('/'))
+            .with_api_key(&config.api_key);
+
+        let client = Client::with_config(openai_config);
 
         let db_path = ChatStore::db_path();
-        // 确保 data 目录存在
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -87,18 +84,33 @@ impl LlmActor {
         Ok(Self { config, client, store })
     }
 
-    /// 从 SQLite 加载历史，构建消息列表
-    fn build_messages(&self, chat_id: i64, user_msg: &str) -> Vec<ChatMessage> {
-        let mut messages = vec![ChatMessage::system(&self.config.system_prompt)];
+    fn build_messages(&self, chat_id: i64, user_msg: &str) -> Vec<ChatCompletionRequestMessage> {
+        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(self.config.system_prompt.as_str())
+                .build()
+                .unwrap()
+                .into(),
+        ];
 
         let limit = self.config.max_history_turns * 2;
         match self.store.recent(chat_id, limit) {
             Ok(records) => {
                 for r in records {
-                    messages.push(ChatMessage {
-                        role: r.role,
-                        content: r.content,
-                    });
+                    let msg = match r.role.as_str() {
+                        "user" => ChatCompletionRequestUserMessageArgs::default()
+                            .content(r.content)
+                            .build()
+                            .unwrap()
+                            .into(),
+                        "assistant" => ChatCompletionRequestAssistantMessageArgs::default()
+                            .content(r.content)
+                            .build()
+                            .unwrap()
+                            .into(),
+                        _ => continue,
+                    };
+                    messages.push(msg);
                 }
             }
             Err(e) => {
@@ -106,57 +118,15 @@ impl LlmActor {
             }
         }
 
-        messages.push(ChatMessage::user(user_msg));
+        messages.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user_msg)
+                .build()
+                .unwrap()
+                .into(),
+        );
+
         messages
-    }
-
-    /// 执行 HTTP 请求
-    async fn do_chat(
-        client: &reqwest::Client,
-        config: &LlmConfig,
-        messages: &[ChatMessage],
-        json_mode: bool,
-    ) -> Result<(String, serde_json::Value), String> {
-        let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-
-        let mut body = serde_json::json!({
-            "model": config.model,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 2048,
-        });
-
-        if json_mode {
-            body["response_format"] = serde_json::json!({ "type": "json_object" });
-        }
-
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("请求失败: {}", e))?;
-
-        let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("API 错误 ({}): {}", text, status));
-        }
-
-        let json: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {}", e))?;
-
-        let content = json["choices"][0]["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("响应格式异常: {}", text))?;
-
-        let usage = json.get("usage").cloned().unwrap_or_default();
-
-        Ok((content, usage))
     }
 }
 
@@ -166,32 +136,34 @@ impl Actor for LlmActor {
 
 // ── 消息类型 ──
 
-/// 多轮对话请求（带 chat_id，SQLite 持久化历史）
 #[derive(Message)]
 #[rtype(result = "Result<LlmResponse, String>")]
 pub struct ChatRequest {
     pub chat_id: i64,
     pub message: String,
-    /// 是否启用 JSON Output
     pub json_mode: bool,
+    pub tools: Vec<serde_json::Value>,
 }
 
-/// LLM 响应
 #[derive(Clone, Debug)]
 pub struct LlmResponse {
     pub content: String,
-    /// 缓存命中 tokens
     pub cache_hit_tokens: u64,
-    /// 缓存未命中 tokens
     pub cache_miss_tokens: u64,
+    pub tool_calls: Vec<ToolCall>,
 }
 
-/// 清除指定会话
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct ClearSession(pub i64);
 
-/// 内部消息：追加历史记录到 SQLite
 #[derive(Message)]
 #[rtype(result = "()")]
 struct AppendHistory {
@@ -208,26 +180,97 @@ impl Handler<ChatRequest> for LlmActor {
     fn handle(&mut self, msg: ChatRequest, ctx: &mut Self::Context) -> Self::Result {
         let messages = self.build_messages(msg.chat_id, &msg.message);
         let client = self.client.clone();
-        let config = self.config.clone();
+        let model = self.config.model.clone();
         let json_mode = msg.json_mode;
+        let tools = msg.tools;
         let chat_id = msg.chat_id;
         let user_msg = msg.message.clone();
         let self_addr = ctx.address();
 
         Box::pin(async move {
-            let (content, usage) = LlmActor::do_chat(&client, &config, &messages, json_mode).await?;
+            let mut request_builder = CreateChatCompletionRequestArgs::default();
+            request_builder.model(&model);
+            request_builder.messages(messages);
+            request_builder.temperature(0.7);
+            request_builder.max_tokens(2048u32);
 
-            let cache_hit = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
-            let cache_miss = usage["prompt_cache_miss_tokens"].as_u64().unwrap_or(0);
+            if json_mode {
+                request_builder.response_format(ResponseFormat::JsonObject);
+            }
 
-            // 追加历史记录到 SQLite
+            if !tools.is_empty() {
+                let openai_tools: Vec<ChatCompletionToolArgs> = tools
+                    .iter()
+                    .filter_map(|t| {
+                        let func = t.get("function")?;
+                        let name = func.get("name")?.as_str()?;
+                        let desc = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                        let params = func.get("parameters").cloned();
+
+                        let fo = FunctionObject {
+                            name: name.to_string(),
+                            description: Some(desc.to_string()),
+                            parameters: params,
+                            strict: None,
+                        };
+
+                        Some(ChatCompletionToolArgs::default()
+                            .r#type(ChatCompletionToolType::Function)
+                            .function(fo)
+                            .clone())
+                    })
+                    .collect();
+
+                if !openai_tools.is_empty() {
+                    let tools: Vec<ChatCompletionTool> = openai_tools
+                        .into_iter()
+                        .map(|t| t.build().unwrap())
+                        .collect();
+                    request_builder.tools(tools);
+                }
+            }
+
+            let request = request_builder.build().map_err(|e| format!("构建请求失败: {}", e))?;
+
+            let response = client.chat().create(request).await
+                .map_err(|e| format!("LLM 调用失败: {}", e))?;
+
+            let choice = response.choices.first()
+                .ok_or_else(|| "LLM 返回空 choices".to_string())?;
+
+            let content = choice.message.content.clone().unwrap_or_default();
+
+            let cache_hit = response.usage
+                .as_ref()
+                .and_then(|u| u.prompt_tokens_details.as_ref())
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0) as u64;
+
+            let tool_calls: Vec<ToolCall> = choice.message.tool_calls.as_ref()
+                .map(|tc_list| {
+                    tc_list.iter().filter_map(|tc| {
+                        let id = tc.id.clone();
+                        let name = tc.function.name.clone();
+                        let arguments: serde_json::Value = serde_json::from_str(
+                            &tc.function.arguments
+                        ).unwrap_or(serde_json::Value::Null);
+                        Some(ToolCall { id, name, arguments })
+                    }).collect()
+                })
+                .unwrap_or_default();
+
             let _ = self_addr.send(AppendHistory {
                 chat_id,
                 user_msg,
                 assistant_msg: content.clone(),
             }).await;
 
-            Ok(LlmResponse { content, cache_hit_tokens: cache_hit, cache_miss_tokens: cache_miss })
+            Ok(LlmResponse {
+                content,
+                cache_hit_tokens: cache_hit,
+                cache_miss_tokens: 0,
+                tool_calls,
+            })
         })
     }
 }

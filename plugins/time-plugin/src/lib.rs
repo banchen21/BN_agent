@@ -51,10 +51,11 @@ impl Plugin for TimePlugin {
         Ok(())
     }
 
-    fn on_event(&self, event: &AgentEvent) {
+    fn on_event(&self, event: &AgentEvent) -> bool {
         if let Some(ref ctx) = self.ctx {
             ctx.log_debug("time", &format!("收到事件: {:?}", event.event_type));
         }
+        true
     }
 
     fn ctx(&self) -> Option<&HostContext> {

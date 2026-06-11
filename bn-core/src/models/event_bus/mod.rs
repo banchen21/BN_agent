@@ -4,7 +4,10 @@ use actix::prelude::*;
 use plugin_core::AgentEvent;
 use std::sync::Arc;
 
-type EventCallback = Arc<dyn Fn(&AgentEvent) + Send + Sync>;
+type EventCallback = Arc<dyn Fn(&AgentEvent) -> bool + Send + Sync>;
+//                                              ^^^^
+//  true  = 继续传播给下一个回调
+//  false = 拦截，停止传播
 
 pub struct EventBus {
     callbacks: Vec<EventCallback>,
@@ -40,7 +43,10 @@ impl Handler<EmitEvent> for EventBus {
     type Result = ();
     fn handle(&mut self, msg: EmitEvent, _: &mut Self::Context) {
         for cb in &self.callbacks {
-            cb(&msg.0);
+            if !cb(&msg.0) {
+                // 回调返回 false → 拦截，停止传播
+                break;
+            }
         }
     }
 }

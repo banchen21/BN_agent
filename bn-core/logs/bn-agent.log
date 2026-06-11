@@ -1,0 +1,56 @@
+2026-06-11T03:07:56.370828Z  INFO bn_agent: BN Agent 启动
+2026-06-11T03:07:56.371061Z  INFO bn_agent: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
+2026-06-11T03:07:56.380497Z  INFO bn_agent::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
+2026-06-11T03:07:56.451351Z  INFO bn_agent: AsrTtsPlugin 初始化完成 target="asr-tts"
+2026-06-11T03:07:56.451590Z  INFO bn_agent: AsrTtsPlugin 已启动 target="asr-tts"
+2026-06-11T03:07:56.452402Z  INFO bn_agent: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://api.xiaomimimo.com/v1 target="asr-tts"
+2026-06-11T03:07:56.459224Z  INFO bn_agent: 已注册工具: tts target="asr-tts"
+2026-06-11T03:07:56.459404Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
+2026-06-11T03:07:56.469208Z  INFO bn_agent: TgImPlugin 初始化完成 target="tg-im"
+2026-06-11T03:07:56.475061Z  INFO bn_agent: TgImPlugin 已启动 target="tg-im"
+2026-06-11T03:07:56.484379Z  INFO bn_agent: 已注册工具: send_voice target="tg-im"
+2026-06-11T03:07:56.487974Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
+2026-06-11T03:07:56.488906Z  INFO bn_agent: TimePlugin 初始化完成 target="time"
+2026-06-11T03:07:56.489050Z  INFO bn_agent: TimePlugin 已启动 target="time"
+2026-06-11T03:07:56.489279Z  INFO bn_agent: 已注册工具: get_time target="time"
+2026-06-11T03:07:56.489367Z  INFO bn_agent::models::plugin_loader: 已加载插件: time-plugin
+2026-06-11T03:07:56.503076Z  INFO bn_agent: 配置代理: http://127.0.0.1:10808 target="tg-im"
+2026-06-11T03:07:57.646446Z  INFO bn_agent: WebrtcPlugin 初始化完成 target="webrtc"
+2026-06-11T03:07:57.647189Z  INFO bn_agent: 已注册 5 个 WebRTC 工具 target="webrtc"
+2026-06-11T03:07:57.649069Z  INFO bn_agent: WebrtcPlugin 已启动 target="webrtc"
+2026-06-11T03:07:57.649494Z  INFO bn_agent::models::plugin_loader: 已加载插件: webrtc-plugin
+2026-06-11T03:07:57.649887Z  INFO bn_agent: 已加载 4 个插件
+2026-06-11T03:07:57.650056Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
+2026-06-11T03:07:57.650537Z DEBUG bn_agent: [EventBus] 收到事件: SystemEvent
+2026-06-11T03:07:57.652773Z DEBUG bn_agent: 收到事件: PluginNotification target="time"
+2026-06-11T03:07:57.653394Z DEBUG bn_agent: 收到事件: PluginNotification target="tg-im"
+2026-06-11T03:07:57.653677Z  INFO bn_agent: 内置信令服务器已启动: ws://127.0.0.1:9876 target="webrtc-signaling"
+2026-06-11T03:07:57.653958Z  INFO bn_agent: BN Agent 运行中，按 Ctrl+C 退出...
+2026-06-11T03:07:58.569624Z  INFO bn_agent: Bot @Qiyue20_Bot 已连接 target="tg-im"
+2026-06-11T03:07:59.423390Z  INFO bn_agent: 收到来自 @unknown 的消息: 能发语音消息吗 target="tg-im"
+2026-06-11T03:07:59.874108Z  INFO bn_agent: 收到来自 @unknown 的消息: 在吗 target="tg-im"
+2026-06-11T03:07:59.875712Z  INFO bn_agent: [MSG] @unknown: 能发语音消息吗
+2026-06-11T03:07:59.882083Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T03:07:59.890808Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T03:07:59.899693Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T03:08:00.317683Z  INFO bn_agent: [MSG] @unknown: 在吗
+2026-06-11T03:08:00.319415Z  INFO bn_agent: 收到来自 @unknown 的消息: 在吗 target="tg-im"
+2026-06-11T03:08:00.320431Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T03:08:00.324480Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T03:08:00.337105Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T03:08:00.759861Z  INFO bn_agent: 收到来自 @unknown 的消息: 在吗 target="tg-im"
+2026-06-11T03:08:00.760966Z  INFO bn_agent: [MSG] @unknown: 在吗
+2026-06-11T03:08:00.762592Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T03:08:00.766995Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T03:08:00.790884Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T03:08:01.208247Z  INFO bn_agent: [MSG] @unknown: 在吗
+2026-06-11T03:08:01.208357Z  INFO bn_agent: 收到来自 @unknown 的消息: 在吗 target="tg-im"
+2026-06-11T03:08:01.210136Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T03:08:01.215006Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T03:08:01.223274Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T03:08:01.652243Z  INFO bn_agent: [MSG] @unknown: 在吗
+2026-06-11T03:08:01.654118Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T03:08:01.658485Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T03:08:01.669031Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T03:08:04.844856Z DEBUG hyper_util::client::legacy::pool: pooling idle connection for ("https", api.deepseek.com)
+2026-06-11T03:08:04.869834Z  INFO bn_agent: [LLM] 工具调用: send_voice

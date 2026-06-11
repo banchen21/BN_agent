@@ -89,7 +89,10 @@ impl Handler<BroadcastEvent> for PluginManager {
     type Result = ();
     fn handle(&mut self, msg: BroadcastEvent, _: &mut Self::Context) {
         for (_, (_, plugin)) in &self.loaded {
-            plugin.on_event(&msg.0);
+            if !plugin.on_event(&msg.0) {
+                // 插件返回 false → 拦截，不再广播给后续插件
+                break;
+            }
         }
     }
 }

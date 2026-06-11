@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音频桥接客户端</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; display: flex; justify-content: center; align-items: center; }
+  .container { background: #16213e; border-radius: 12px; padding: 24px; width: 420px; box-shadow: 0 8px 32px rgba(0,0,0,.4); }
+  h1 { font-size: 1.3em; margin-bottom: 16px; color: #e94560; }
+  .row { margin-bottom: 12px; }
+  label { display: block; font-size: .85em; color: #aaa; margin-bottom: 4px; }
+  input, select { width: 100%; padding: 8px 12px; border: 1px solid #333; border-radius: 6px; background: #0f3460; color: #eee; font-size: .9em; }
+  button { width: 100%; padding: 10px; border: none; border-radius: 6px; font-size: 1em; cursor: pointer; margin-top: 8px; }
+  .btn-connect { background: #e94560; color: #fff; }
+  .btn-connect:hover { background: #d63851; }
+  .btn-disconnect { background: #555; color: #fff; }
+  .btn-disconnect:hover { background: #666; }
+  .status { margin-top: 12px; padding: 10px; border-radius: 6px; font-size: .85em; text-align: center; }
+  .status.idle { background: #333; }
+  .status.connecting { background: #e9a820; color: #000; }
+  .status.connected { background: #27ae60; }
+  .status.error { background: #c0392b; }
+  .log { margin-top: 12px; max-height: 150px; overflow-y: auto; font-size: .75em; background: #0a0a1a; padding: 8px; border-radius: 6px; }
+  .log div { padding: 2px 0; border-bottom: 1px solid #1a1a2e; }
+  .log .info { color: #aaa; }
+  .log .warn { color: #e9a820; }
+  .log .ok { color: #27ae60; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎙️ 音频桥接客户端</h1>
+
+  <div class="row">
+    <label>信令服务器</label>
+    <input id="signalingUrl" value="ws://127.0.0.1:9876" placeholder="ws://host:port">
+  </div>
+  <div class="row">
+    <label>房间号</label>
+    <input id="roomId" value="default" placeholder="room name">
+  </div>
+  <div class="row">
+    <label>音频捕获设备</label>
+    <select id="audioDevice"></select>
+  </div>
+
+  <button id="btnConnect" class="btn-connect" onclick="connect()">连接</button>
+  <button id="btnDisconnect" class="btn-disconnect" onclick="disconnect()" style="display:none">断开</button>
+
+  <div id="status" class="status idle">未连接</div>
+  <div id="log" class="log"></div>
+</div>
+
+<script>
+let ws, localStream, audioContext, processor, mediaStreamSource;
+let audioQueue = [];
+let isPlaying = false;
+
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const btnConnect = document.getElementById('btnConnect');
+const btnDisconnect = document.getElementById('btnDisconnect');
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = 'status ' + cls;
+}
+
+function addLog(msg, cls = 'info') {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function enumDevices() {
+  const select = document.getElementById('audioDevice');
+  select.innerHTML = '';
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    for (const d of devices) {
+      if (d.kind === 'audioinput') {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `设备 ${d.deviceId.slice(0, 8)}`;
+        select.appendChild(opt);
+      }
+    }
+    if (select.options.length === 0) {
+      select.innerHTML = '<option>未找到音频设备</option>';
+    }
+  } catch (e) {
+    addLog('枚举设备失败: ' + e.message, 'warn');
+  }
+}
+enumDevices();
+navigator.mediaDevices.addEventListener('devicechange', enumDevices);
+
+async function connect() {
+  const signalingUrl = document.getElementById('signalingUrl').value.trim();
+  const roomId = document.getElementById('roomId').value.trim();
+  const deviceId = document.getElementById('audioDevice').value;
+
+  if (!signalingUrl) { addLog('请输入信令服务器地址', 'warn'); return; }
+
+  setStatus('连接中...', 'connecting');
+  btnConnect.style.display = 'none';
+  btnDisconnect.style.display = 'block';
+
+  try {
+    // 1. 获取麦克风 (16kHz mono)
+    const constraints = {
+      audio: deviceId
+        ? { deviceId: { exact: deviceId }, sampleRate: 16000, channelCount: 1, echoCancellation: false, noiseSuppression: false }
+        : { sampleRate: 16000, channelCount: 1, echoCancellation: false, noiseSuppression: false },
+      video: false
+    };
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    addLog('麦克风已启动: ' + (localStream.getAudioTracks()[0]?.label || '默认设备'), 'ok');
+
+    // 2. 连接 WebSocket
+    const wsUrl = signalingUrl + '/ws?room=' + encodeURIComponent(roomId) + '&role=answer';
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    addLog('连接: ' + wsUrl);
+
+    ws.onopen = () => {
+      addLog('已连接', 'ok');
+      setStatus('已连接', 'connected');
+      startAudioCapture();
+    };
+
+    ws.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        playAudio(new Int16Array(e.data));
+      } else {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'tts_audio') {
+            const binary = atob(msg.data);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            playAudio(new Int16Array(bytes.buffer));
+          }
+        } catch (err) {}
+      }
+    };
+
+    ws.onerror = () => addLog('连接错误', 'warn');
+    ws.onclose = () => {
+      addLog('连接已关闭');
+      setStatus('未连接', 'idle');
+      stopAudioCapture();
+    };
+
+  } catch (err) {
+    setStatus('错误: ' + err.message, 'error');
+    addLog('连接失败: ' + err.message, 'warn');
+    btnConnect.style.display = 'block';
+    btnDisconnect.style.display = 'none';
+  }
+}
+
+function startAudioCapture() {
+  audioContext = new AudioContext({ sampleRate: 16000 });
+  mediaStreamSource = audioContext.createMediaStreamSource(localStream);
+
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const i16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      i16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
+    }
+    ws.send(i16.buffer);
+  };
+
+  mediaStreamSource.connect(processor);
+  processor.connect(audioContext.destination);
+  addLog('音频捕获已启动 (16kHz mono)', 'ok');
+}
+
+function stopAudioCapture() {
+  if (processor) { processor.disconnect(); processor = null; }
+  if (mediaStreamSource) { mediaStreamSource.disconnect(); mediaStreamSource = null; }
+  if (audioContext) { audioContext.close(); audioContext = null; }
+}
+
+function playAudio(samples) {
+  audioQueue.push(samples);
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  if (audioQueue.length === 0) { isPlaying = false; return; }
+  isPlaying = true;
+  const samples = audioQueue.shift();
+  const ctx = new AudioContext({ sampleRate: 24000 });
+  const buf = ctx.createBuffer(1, samples.length, 24000);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) {
+    data[i] = samples[i] / 32768;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.onended = () => { ctx.close(); playNext(); };
+  src.start();
+}
+
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+  if (localStream) {
+    localStream.getTracks().forEach(t => t.stop());
+    localStream = null;
+  }
+  stopAudioCapture();
+  setStatus('未连接', 'idle');
+  addLog('已断开');
+  btnConnect.style.display = 'block';
+  btnDisconnect.style.display = 'none';
+}
+</script>
+</body>
+</html>

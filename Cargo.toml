@@ -5,5 +5,5 @@ members = [
     "plugin-core",
     "plugins/time-plugin",
     "plugins/tg-im-plugin",
-    "plugins/webrtc-plugin",
+    "plugins/asr-tts-plugin"
 ]
