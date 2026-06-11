@@ -31,7 +31,7 @@ impl TimePlugin {
     pub fn new() -> Self {
         Self {
             meta: PluginMeta {
-                name: "time-plugin".into(),
+                name: "time".into(),
                 version: "0.1.0".into(),
                 description: "时间插件（被动上下文 + API）".into(),
                 author: "BN Team".into(),

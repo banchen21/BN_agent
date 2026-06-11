@@ -362,8 +362,9 @@ fn main() -> std::io::Result<()> {
         // 启动 HTTP API server（后台）
         let api_pm = plugin_manager.clone();
         let api_tr = tool_registry.clone();
+        let api_llm = llm_addr.clone().unwrap_or_else(|| panic!("LLM 未初始化"));
         let _server_handle = actix_rt::spawn(async move {
-            if let Err(e) = api::start_server(api_pm, api_tr).await {
+            if let Err(e) = api::start_server(api_pm, api_llm, api_tr).await {
                 tracing::error!("API server 错误: {}", e);
             }
         });
