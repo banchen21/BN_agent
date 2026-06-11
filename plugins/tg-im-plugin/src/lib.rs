@@ -86,6 +86,10 @@ impl Plugin for TgImPlugin {
             .ok_or_else(|| PluginError::InitError("EventEmitter 未注入".into()))?;
         let logger = ctx.logger.clone();
         let ctx_logger = ctx.logger.clone();
+        let tool_registry_for_bot = ctx
+            .tool_registry
+            .clone()
+            .ok_or_else(|| PluginError::InitError("ToolRegistry 未注入".into()))?;
 
         // 在后台线程启动 bot
         std::thread::spawn(move || {
@@ -95,7 +99,7 @@ impl Plugin for TgImPlugin {
                 .expect("无法创建 tokio runtime");
 
             rt.block_on(async {
-                match bot::run_bot(&token, emitter, logger).await {
+                match bot::run_bot(&token, emitter, logger, tool_registry_for_bot).await {
                     Ok(h) => {
                         if let Some(ref handle) = handle {
                             *handle.lock().await = Some(h);

@@ -113,7 +113,28 @@ impl Plugin for AsrTtsPlugin {
                         tts_voice_desc,
                         logger,
                     }));
-                ctx.log_info("asr-tts", "已注册工具: tts");
+                ctx.log_info("asr-tts", "已注册工具: tts_synthesize");
+
+                // 注册 asr 工具
+                let asr_http_client = self.http_client.clone();
+                let asr_base_url = self.asr_base_url.clone();
+                let asr_model = self.asr_model.clone();
+                let asr_api_key = self.asr_api_key.clone();
+                let asr_language = std::env::var("ASR_LANGUAGE").unwrap_or_else(|_| "zh".into());
+                let asr_logger = ctx.logger.clone();
+
+                registry
+                    .lock()
+                    .map_err(|e| PluginError::InitError(format!("{}", e)))?
+                    .register(Arc::new(AsrTool {
+                        http_client: asr_http_client,
+                        asr_base_url,
+                        asr_model,
+                        asr_api_key,
+                        asr_language,
+                        logger: asr_logger,
+                    }));
+                ctx.log_info("asr-tts", "已注册工具: asr_transcribe");
             }
         }
         Ok(())
@@ -197,6 +218,8 @@ impl AsrTtsPlugin {
         let asr_api_key = self.asr_api_key.clone();
         let asr_base_url = self.asr_base_url.clone();
         let asr_model = self.asr_model.clone();
+        let mime = "audio/opus";
+        let lang = std::env::var("ASR_LANGUAGE").unwrap_or_else(|_| "zh".into());
         let emitter = match self.emitter() {
             Some(e) => Arc::clone(e),
             None => return,
@@ -206,7 +229,7 @@ impl AsrTtsPlugin {
         let source_owned = source.to_string();
 
         tokio::spawn(async move {
-            match do_asr(&client, &asr_base_url, &asr_model, &asr_api_key, &audio_data).await {
+            match do_asr(&client, &asr_base_url, &asr_model, &asr_api_key, &audio_data, mime, &lang).await {
                 Ok(text) => {
                     if text.trim().is_empty() {
                         return;
@@ -319,7 +342,14 @@ impl AsrTtsPlugin {
     }
 }
 
-// ─── ASR：使用 OpenAI Whisper API ───
+// ─── ASR：使用 MiMo Chat Completions API（input_audio 格式） ───
+///
+/// MiMo ASR 通过 Chat Completions 接口实现：
+/// - endpoint: /v1/chat/completions
+/// - model: mimo-v2.5-asr
+/// - messages: [{role:"user", content:[{type:"input_audio", input_audio:{data:"data:{mime};base64,..."}}]}]
+/// - asr_options: {language: "zh"|"en"|"auto"}
+/// - 响应: choices[0].message.content (文本)
 
 async fn do_asr(
     client: &reqwest::Client,
@@ -327,46 +357,62 @@ async fn do_asr(
     model: &str,
     api_key: &str,
     audio_data: &[u8],
+    mime_type: &str,
+    language: &str,
 ) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("ASR_API_KEY 未配置".into());
     }
 
-    let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-    // 构建 multipart form
-    let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
-        .file_name("audio.opus")
-        .mime_str("audio/opus")
-        .map_err(|e| format!("构建 multipart 失败: {}", e))?;
+    let audio_b64 = base64_encode(audio_data);
+    let data_url = format!("data:{};base64,{}", mime_type, audio_b64);
 
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model", model.to_string())
-        .text("language", "zh");
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": data_url
+                        }
+                    }
+                ]
+            }
+        ],
+        "asr_options": {
+            "language": language
+        }
+    });
 
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .multipart(form)
+        .header("api-key", api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("ASR 请求失败: {}", e))?;
 
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读取 ASR 响应失败: {}", e))?;
+    let resp_body = resp.text().await.map_err(|e| format!("读取 ASR 响应失败: {}", e))?;
 
     if !status.is_success() {
-        return Err(format!("ASR API 错误 ({}): {}", status, body));
+        return Err(format!("ASR API 错误 ({}): {}", status, resp_body));
     }
 
     let json: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("解析 ASR 响应失败: {}", e))?;
+        serde_json::from_str(&resp_body).map_err(|e| format!("解析 ASR 响应失败: {}", e))?;
 
-    json["text"]
+    // MiMo Chat Completions 响应格式: choices[0].message.content
+    json["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("ASR 响应格式异常: {}", body))
+        .ok_or_else(|| format!("ASR 响应格式异常: {}", resp_body))
 }
 
 // ─── TTS：使用 MiMo Chat Completions API（非标准 /audio/speech） ───
@@ -469,6 +515,109 @@ async fn do_tts(
 
     // base64 解码音频数据
     base64_decode(audio_b64)
+}
+
+// ─── asr 工具（供其他插件通过 ToolRegistry 调用） ───
+
+struct AsrTool {
+    http_client: reqwest::Client,
+    asr_base_url: String,
+    asr_model: String,
+    asr_api_key: String,
+    asr_language: String,
+    logger: Option<Arc<dyn plugin_core::LogCallback>>,
+}
+
+impl ToolExecutor for AsrTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+            name: "asr_transcribe".into(),
+            description: "将音频数据转为文字，接收 base64 编码的音频和 MIME 类型，返回识别出的文本。".into(),
+            internal: true,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "audio_base64": {
+                        "type": "string",
+                        "description": "base64 编码的音频数据"
+                    },
+                    "mime_type": {
+                        "type": "string",
+                        "description": "音频 MIME 类型，如 audio/wav、audio/mp3、audio/ogg"
+                    }
+                },
+                "required": ["audio_base64"]
+            }),
+        });
+        &DEF
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let audio_b64 = match args.get("audio_base64").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return ToolResult::err("缺少参数: audio_base64"),
+        };
+
+        if audio_b64.is_empty() {
+            return ToolResult::err("audio_base64 不能为空");
+        }
+
+        let mime_type = args
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("audio/ogg")
+            .to_string();
+
+        let audio_data = match base64_decode(&audio_b64) {
+            Ok(d) => d,
+            Err(e) => return ToolResult::err(&format!("base64 解码失败: {}", e)),
+        };
+
+        let http_client = self.http_client.clone();
+        let asr_base_url = self.asr_base_url.clone();
+        let asr_model = self.asr_model.clone();
+        let asr_api_key = self.asr_api_key.clone();
+        let asr_language = self.asr_language.clone();
+        let logger = self.logger.clone();
+
+        // 同步执行 ASR
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("无法创建 tokio runtime");
+
+            rt.block_on(async {
+                match do_asr(&http_client, &asr_base_url, &asr_model, &asr_api_key, &audio_data, &mime_type, &asr_language).await {
+                    Ok(text) => {
+                        if let Some(ref log) = logger {
+                            log.log(
+                                plugin_core::LogLevel::Info,
+                                "asr-tts",
+                                &format!("ASR 工具完成: {}", text),
+                            );
+                        }
+                        ToolResult::ok(&text)
+                    }
+                    Err(e) => {
+                        if let Some(ref log) = logger {
+                            log.log(
+                                plugin_core::LogLevel::Warn,
+                                "asr-tts",
+                                &format!("ASR 工具失败: {}", e),
+                            );
+                        }
+                        ToolResult::err(&format!("ASR 识别失败: {}", e))
+                    }
+                }
+            })
+        });
+
+        match result.join() {
+            Ok(r) => r,
+            Err(e) => ToolResult::err(&format!("执行线程 panic: {:?}", e)),
+        }
+    }
 }
 
 // ─── tts 工具（供其他插件通过 ToolRegistry 调用） ───
