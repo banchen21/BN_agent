@@ -382,7 +382,7 @@ pub async fn run_bot(
                                                             "platform": "telegram",
                                                             "chat_id": chat_id,
                                                             "user_name": user_name,
-                                                            "text": text,
+                                                            "text": format!("[Telegram]: {}", text),
                                                         }),
                                                     ));
                                                 }
@@ -457,7 +457,7 @@ pub async fn run_bot(
                                 "platform": "telegram",
                                 "chat_id": chat_id,
                                 "user_name": user_name,
-                                "text": text,
+                                "text": format!("[Telegram]: {}", text),
                             }),
                         ));
 
