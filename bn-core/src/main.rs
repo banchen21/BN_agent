@@ -6,9 +6,10 @@ mod models {
 }
 mod llm;
 mod api;
+mod core_loop;
 
 use actix::prelude::*;
-use llm::client::{ChatRequest, LlmActor, LlmConfig};
+use llm::client::{LlmActor, LlmConfig};
 use models::event_bus::{BusEmitter, EventBus, EmitEvent, RegisterCallback};
 use models::plugin_loader::{BroadcastEvent, PluginManager, RefreshSnapshots, ScanAndLoad, SetToolRegistry, StopAll};
 use plugin_core::{
@@ -119,15 +120,15 @@ fn main() -> std::io::Result<()> {
         let llm_for_cb = llm_addr.clone();
         let pm_for_cb = plugin_manager.clone();
         let tool_registry_for_cb = tool_registry.clone();
-        let api_snap = snapshots_for_cb.clone(); // ← 必须在 event_bus.send move 之前
+        let api_snap = snapshots_for_cb.clone();
         event_bus
             .send(RegisterCallback(Arc::new(move |event: &AgentEvent| -> bool {
                 match event.event_type {
                     EventType::UserMessage => {
-                        let text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let chat_id = event.data.get("chat_id").and_then(|v| v.as_i64());
                         let user_name = event.data.get("user_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                        let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
                         tracing::info!("[MSG] @{}: {}", user_name, text);
 
@@ -135,187 +136,16 @@ fn main() -> std::io::Result<()> {
                             let llm = llm.clone();
                             let emitter = emitter_for_cb.clone();
                             let pm = pm_for_cb.clone();
-                            let text = text.to_string();
-                            let source = source.to_string();
                             let tool_registry = tool_registry_for_cb.clone();
                             let snapshots = snapshots_for_cb.clone();
 
                             actix::spawn(async move {
-                                // 刷新被动上下文快照
                                 let _ = pm.send(RefreshSnapshots).await;
-
-                                // 读取最新快照
                                 let contexts: Vec<String> = snapshots.lock().unwrap().clone();
-
-                                // 从 ToolRegistry 获取工具定义（只暴露给 LLM 非 internal 工具）
-                                let tools: Vec<serde_json::Value> = {
-                                    match tool_registry.lock() {
-                                        Ok(reg) => reg.all_defs().iter()
-                                            .filter(|d| !d.internal)
-                                            .map(|d| {
-                                            serde_json::json!({
-                                                "type": "function",
-                                                "function": {
-                                                    "name": d.name,
-                                                    "description": d.description,
-                                                    "parameters": d.parameters,
-                                                }
-                                            })
-                                        }).collect(),
-                                        Err(_) => vec![],
-                                    }
-                                };
-
-                                // 第一次 LLM 调用（原生 tool calling，不需要 json_mode）
-                                let req = ChatRequest {
-                                    chat_id: chat_id.unwrap_or(0),
-                                    message: text.clone(),
-                                    json_mode: false,
-                                    tools: tools.clone(),
-                                    skip_store: false,
-                                    contexts,
-                                };
-
-                                let resp = match llm.send(req).await {
-                                    Ok(Ok(r)) => r,
-                                    Ok(Err(e)) => {
-                                        tracing::error!("[LLM] 调用失败: {}", e);
-                                        let reply = AgentEvent::new(
-                                            EventType::AssistantMessage,
-                                            EventSource::System,
-                                            serde_json::json!({
-                                                "chat_id": chat_id,
-                                                "text": format!("抱歉，出错了: {}", e),
-                                                "source": source,
-                                            }),
-                                        );
-                                        emitter.emit(reply.clone());
-                                        let _ = pm.send(BroadcastEvent(reply)).await;
-                                        return;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("[LLM] Actor 通信失败: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                // 检查是否有 tool_calls
-                                if !resp.tool_calls.is_empty() {
-                                    tracing::info!(
-                                        "[LLM] 工具调用: {}",
-                                        resp.tool_calls.iter()
-                                            .map(|tc| tc.name.clone())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
-
-                                    // 先收集工具执行器（克隆 Arc 后释放锁），再执行。
-                                    // 避免跨插件工具调用（如 send_voice → tts）时发生 Mutex 死锁。
-                                    // 同时把真实的 chat_id 注入工具参数，LLM 不需要知道 chat_id
-                                    let real_chat_id = chat_id.unwrap_or(0);
-                                    let executors: Vec<(String, Arc<dyn plugin_core::ToolExecutor>, serde_json::Value)> = {
-                                        match tool_registry.lock() {
-                                            Ok(reg) => resp.tool_calls.iter().filter_map(|tc| {
-                                                reg.get_executor(&tc.name).map(|e| {
-                                                    // 注入真实 chat_id
-                                                    let mut args = tc.arguments.clone();
-                                                    if let serde_json::Value::Object(ref mut map) = args {
-                                                        map.entry("chat_id")
-                                                            .or_insert(serde_json::json!(real_chat_id));
-                                                    }
-                                                    (tc.id.clone(), e, args)
-                                                })
-                                            }).collect(),
-                                            Err(_) => vec![],
-                                        }
-                                    };
-
-                                    let tool_results: Vec<(String, String)> = executors.into_iter().map(
-                                        |(id, executor, args)| {
-                                            let name = executor.def().name.clone();
-                                            tracing::info!("[LLM] 执行工具: {} (id={})", name, id);
-                                            let result = executor.execute(&args);
-                                            let text = if result.success {
-                                                tracing::info!("[LLM] 工具完成: {} → {}", name, result.content);
-                                                result.content
-                                            } else {
-                                                let err = format!("错误: {}", result.error.as_deref().unwrap_or("未知错误"));
-                                                tracing::warn!("[LLM] 工具失败: {} → {}", name, err);
-                                                err
-                                            };
-                                            (id, text)
-                                        }
-                                    ).collect();
-
-                                    // 构建 tool 结果消息，再次调用 LLM
-                                    // 注意：这里简化处理，不维护完整的消息历史用于 tool calling
-                                    // 直接让 LLM 基于工具结果生成最终回复
-                                    let mut tool_result_text = String::from("工具执行结果：\n");
-                                    for (id, result) in &tool_results {
-                                        tool_result_text.push_str(&format!("[{}] {}\n", id, result));
-                                    }
-
-                                    let followup_req = ChatRequest {
-                                        chat_id: chat_id.unwrap_or(0),
-                                        message: format!(
-                                            "用户原始消息: {}\n\n{}",
-                                            text, tool_result_text
-                                        ),
-                                        json_mode: false,
-                                        tools: vec![], // 不再传工具，避免循环
-                                        skip_store: true,
-                                        contexts: vec![],
-                                    };
-
-                                    match llm.send(followup_req).await {
-                                        Ok(Ok(followup_resp)) => {
-                                            let preview: String = followup_resp.content
-                                                .chars()
-                                                .take(80)
-                                                .collect();
-                                            tracing::info!("[LLM] 工具后回复: {}", preview);
-                                            let reply = AgentEvent::new(
-                                                EventType::AssistantMessage,
-                                                EventSource::System,
-                                                serde_json::json!({
-                                                    "chat_id": chat_id,
-                                                    "text": followup_resp.content,
-                                                    "source": source,
-                                                }),
-                                            );
-                                            emitter.emit(reply.clone());
-                                            let _ = pm.send(BroadcastEvent(reply)).await;
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::error!("[LLM] 工具后调用失败: {}", e);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("[LLM] 工具后 Actor 通信失败: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    // 无工具调用，直接回复
-                                    let preview: String = resp.content
-                                        .chars()
-                                        .take(80)
-                                        .collect();
-                                    tracing::info!(
-                                        "[LLM] 回复: {} | 缓存命中: {} tokens",
-                                        preview,
-                                        resp.cache_hit_tokens,
-                                    );
-                                    let reply = AgentEvent::new(
-                                        EventType::AssistantMessage,
-                                        EventSource::System,
-                                        serde_json::json!({
-                                            "chat_id": chat_id,
-                                            "text": resp.content,
-                                            "source": source,
-                                        }),
-                                    );
-                                    emitter.emit(reply.clone());
-                                    let _ = pm.send(BroadcastEvent(reply)).await;
-                                }
+                                core_loop::handle_user_message(
+                                    &text, chat_id, &source, &llm, &emitter, &pm,
+                                    &tool_registry, &snapshots, contexts,
+                                ).await;
                             });
                         } else {
                             let reply = AgentEvent::new(
@@ -331,9 +161,7 @@ fn main() -> std::io::Result<()> {
                             let _ = pm_for_cb.send(BroadcastEvent(reply));
                         }
                     }
-                    _ => {
-                        tracing::debug!("[EventBus] 收到事件: {:?}", event.event_type);
-                    }
+                    _ => tracing::debug!("[EventBus] 收到事件: {:?}", event.event_type),
                 }
                 true
             })))
