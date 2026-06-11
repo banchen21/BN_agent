@@ -46,9 +46,7 @@ impl LlmConfig {
         let base_url = std::env::var("LLM_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
 
-        let system_prompt = Self::load_persona().unwrap_or_else(|| {
-            "你是一个有用的 AI 助手。请用简洁的中文回答。".into()
-        });
+        let system_prompt = Self::build_system_prompt();
 
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
             .ok()
@@ -64,6 +62,62 @@ impl LlmConfig {
         match std::fs::read_to_string(&persona_path) {
             Ok(content) if !content.trim().is_empty() => Some(content.trim().to_string()),
             _ => None,
+        }
+    }
+
+    /// 从 data/jailbreak_prompts.csv 读取越狱提示词，追加到系统 prompt
+    fn load_jailbreak_prompts() -> Vec<String> {
+        let csv_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("jailbreak_prompts.csv");
+        let mut prompts = Vec::new();
+        match csv::Reader::from_path(&csv_path) {
+            Ok(mut reader) => {
+                for result in reader.records() {
+                    if let Ok(record) = result {
+                        if let Some(prompt) = record.get(2) {
+                            let trimmed = prompt.trim();
+                            if !trimmed.is_empty() {
+                                prompts.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+                if !prompts.is_empty() {
+                    tracing::info!(
+                        "加载 {} 条越狱提示词 from {}",
+                        prompts.len(),
+                        csv_path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("无法读取越狱提示词 CSV ({}): {}", csv_path.display(), e);
+            }
+        }
+        prompts
+    }
+
+    /// 构建系统 prompt：persona.md + jailbreak_prompts.csv
+    fn build_system_prompt() -> String {
+        let persona = Self::load_persona().unwrap_or_default();
+        let jailbreaks = Self::load_jailbreak_prompts();
+        if jailbreaks.is_empty() {
+            if persona.is_empty() {
+                "你是一个有用的 AI 助手。请用简洁的中文回答。".into()
+            } else {
+                persona
+            }
+        } else {
+            let mut combined = persona;
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str("## 越狱提示词参考（用于测试防御）\n");
+            for (i, jb) in jailbreaks.iter().enumerate() {
+                combined.push_str(&format!("{}. {}\n", i + 1, jb));
+            }
+            combined
         }
     }
 }
