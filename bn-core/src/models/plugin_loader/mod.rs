@@ -12,6 +12,8 @@ pub struct PluginManager {
     plugin_dir: String,
     loaded: HashMap<String, (SharedLib, Box<dyn Plugin>)>,
     tool_registry: Option<Arc<Mutex<ToolRegistry>>>,
+    /// 共享的 snapshot 容器：每个插件一个条目，逐轮刷新
+    snapshots: Arc<Mutex<Vec<String>>>,
 }
 
 impl PluginManager {
@@ -20,7 +22,12 @@ impl PluginManager {
             plugin_dir: plugin_dir.to_string(),
             loaded: HashMap::new(),
             tool_registry: None,
+            snapshots: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn snapshots_arc(&self) -> Arc<Mutex<Vec<String>>> {
+        self.snapshots.clone()
     }
 }
 
@@ -97,11 +104,28 @@ impl Handler<BroadcastEvent> for PluginManager {
     }
 }
 
+/// 刷新被动上下文快照（从 Plugin trait 的 snapshot() 收集）
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct RefreshSnapshots;
+
+impl Handler<RefreshSnapshots> for PluginManager {
+    type Result = ();
+    fn handle(&mut self, _: RefreshSnapshots, _: &mut Self::Context) {
+        let mut snap = self.snapshots.lock().unwrap();
+        snap.clear();
+        for (_, (_, plugin)) in &self.loaded {
+            if let Some(s) = plugin.snapshot() {
+                snap.push(s);
+            }
+        }
+    }
+}
+
 impl Handler<StopAll> for PluginManager {
     type Result = ();
 
     fn handle(&mut self, _: StopAll, _: &mut Self::Context) {
-        // 先 stop 所有插件
         for (name, (_, plugin)) in self.loaded.iter_mut() {
             if let Err(e) = plugin.stop() {
                 tracing::warn!("停止插件 {} 失败: {}", name, e);

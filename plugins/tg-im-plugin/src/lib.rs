@@ -100,11 +100,8 @@ impl Plugin for TgImPlugin {
                         if let Some(ref handle) = handle {
                             *handle.lock().await = Some(h);
                         }
-                        // 保持 runtime 运行，等待关闭信号
-                        // dispatcher 在后台 tokio::spawn 中运行
-                        // 这里用一个长期存在的 future 来阻止 block_on 返回
-                        let shutdown = bot::shutdown_signal();
-                        shutdown.await;
+                        // 保持 runtime 存活，不监听 Ctrl+C（主线程负责退出）
+                        std::future::pending::<()>().await;
                     }
                     Err(e) => {
                         eprintln!("[tg-im] Bot 启动失败:\n{}", e);
@@ -203,8 +200,9 @@ struct SendVoiceTool {
 impl ToolExecutor for SendVoiceTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "send_voice".into(),
+            name: "tg_send_voice".into(),
             description: "通过 TTS 将文本转为语音，然后发送语音消息到 Telegram 聊天。适用于用户要求语音回复的场景。".into(),
+            internal: false,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -241,7 +239,7 @@ impl ToolExecutor for SendVoiceTool {
                 Ok(r) => r,
                 Err(e) => return ToolResult::err(&format!("ToolRegistry 锁失败: {}", e)),
             };
-            match registry.get_executor("tts") {
+            match registry.get_executor("tts_synthesize") {
                 Some(e) => e,
                 None => return ToolResult::err("tts 工具未注册，请确保 asr-tts-plugin 已加载"),
             }

@@ -277,12 +277,6 @@ pub async fn run_bot(
     Err(error_msg)
 }
 
-/// 等待关闭信号（用于保持 runtime 存活）
-pub async fn shutdown_signal() {
-    // 等待 Ctrl+C
-    let _ = tokio::signal::ctrl_c().await;
-}
-
 #[cfg(test)]
 mod tests {
     

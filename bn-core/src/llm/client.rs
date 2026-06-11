@@ -91,7 +91,7 @@ impl LlmActor {
         Ok(Self { config, client, store })
     }
 
-    fn build_messages(&self, chat_id: i64, user_msg: &str) -> Vec<ChatCompletionRequestMessage> {
+    fn build_messages(&self, chat_id: i64, user_msg: &str, contexts: &[String]) -> Vec<ChatCompletionRequestMessage> {
         let mut messages: Vec<ChatCompletionRequestMessage> = vec![
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(self.config.system_prompt.as_str())
@@ -125,6 +125,17 @@ impl LlmActor {
             }
         }
 
+        // 插件实时上下文（不存 DB，临时注入）
+        for ctx in contexts {
+            messages.push(
+                ChatCompletionRequestAssistantMessageArgs::default()
+                    .content(ctx.as_str())
+                    .build()
+                    .unwrap()
+                    .into(),
+            );
+        }
+
         messages.push(
             ChatCompletionRequestUserMessageArgs::default()
                 .content(user_msg)
@@ -150,6 +161,10 @@ pub struct ChatRequest {
     pub message: String,
     pub json_mode: bool,
     pub tools: Vec<serde_json::Value>,
+    /// 跳过存储：工具调用中间请求不存聊天记录
+    pub skip_store: bool,
+    /// 插件实时上下文：不存 DB，临时注入到 messages 中
+    pub contexts: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -185,7 +200,7 @@ impl Handler<ChatRequest> for LlmActor {
     type Result = ResponseFuture<Result<LlmResponse, String>>;
 
     fn handle(&mut self, msg: ChatRequest, ctx: &mut Self::Context) -> Self::Result {
-        let messages = self.build_messages(msg.chat_id, &msg.message);
+        let messages = self.build_messages(msg.chat_id, &msg.message, &msg.contexts);
         let client = self.client.clone();
         let model = self.config.model.clone();
         let json_mode = msg.json_mode;
@@ -239,6 +254,7 @@ impl Handler<ChatRequest> for LlmActor {
 
             let request = request_builder.build().map_err(|e| format!("构建请求失败: {}", e))?;
 
+            tracing::debug!("LLM 请求: {:#?}", request.messages);
             let response = client.chat().create(request).await
                 .map_err(|e| format!("LLM 调用失败: {}", e))?;
 

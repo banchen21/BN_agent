@@ -26,6 +26,10 @@ pub trait Plugin: Send + Sync {
 
     /// 获取宿主上下文（用于清理资源）
     fn ctx(&self) -> Option<&crate::HostContext> { None }
+
+    /// 被动上下文：每次 LLM 请求前调用，返回临时注入到 messages 的内容。
+    /// 格式应为 `【plugin_name】详情`，不存入聊天记录。
+    fn snapshot(&self) -> Option<String> { None }
 }
 
 /// 插件构造函数签名（FFI 导出）

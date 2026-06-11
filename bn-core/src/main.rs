@@ -9,7 +9,7 @@ mod llm;
 use actix::prelude::*;
 use llm::client::{ChatRequest, LlmActor, LlmConfig};
 use models::event_bus::{BusEmitter, EventBus, EmitEvent, RegisterCallback};
-use models::plugin_loader::{BroadcastEvent, PluginManager, ScanAndLoad, SetToolRegistry, StopAll};
+use models::plugin_loader::{BroadcastEvent, PluginManager, RefreshSnapshots, ScanAndLoad, SetToolRegistry, StopAll};
 use plugin_core::{
     AgentEvent, EventEmitter, EventSource, EventType, HostContext, LogCallback, LogLevel, ToolRegistry,
 };
@@ -81,7 +81,9 @@ fn main() -> std::io::Result<()> {
         // 从 cargo build 输出目录加载 DLL，避免手动复制
         let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug");
         let plugin_dir_str = plugin_dir.to_str().unwrap_or("./plugins");
-        let plugin_manager = PluginManager::new(plugin_dir_str).start();
+        let plugin_manager = PluginManager::new(plugin_dir_str);
+        let snapshots_for_cb = plugin_manager.snapshots_arc();
+        let plugin_manager = plugin_manager.start();
         let tool_registry = Arc::new(Mutex::new(ToolRegistry::new()));
 
         plugin_manager.send(SetToolRegistry(tool_registry.clone())).await.ok();
@@ -134,12 +136,21 @@ fn main() -> std::io::Result<()> {
                             let text = text.to_string();
                             let source = source.to_string();
                             let tool_registry = tool_registry_for_cb.clone();
+                            let snapshots = snapshots_for_cb.clone();
 
                             actix::spawn(async move {
-                                // 从 ToolRegistry 获取工具定义
+                                // 刷新被动上下文快照
+                                let _ = pm.send(RefreshSnapshots).await;
+
+                                // 读取最新快照
+                                let contexts: Vec<String> = snapshots.lock().unwrap().clone();
+
+                                // 从 ToolRegistry 获取工具定义（只暴露给 LLM 非 internal 工具）
                                 let tools: Vec<serde_json::Value> = {
                                     match tool_registry.lock() {
-                                        Ok(reg) => reg.all_defs().iter().map(|d| {
+                                        Ok(reg) => reg.all_defs().iter()
+                                            .filter(|d| !d.internal)
+                                            .map(|d| {
                                             serde_json::json!({
                                                 "type": "function",
                                                 "function": {
@@ -159,6 +170,8 @@ fn main() -> std::io::Result<()> {
                                     message: text.clone(),
                                     json_mode: false,
                                     tools: tools.clone(),
+                                    skip_store: false,
+                                    contexts,
                                 };
 
                                 let resp = match llm.send(req).await {
@@ -248,6 +261,8 @@ fn main() -> std::io::Result<()> {
                                         ),
                                         json_mode: false,
                                         tools: vec![], // 不再传工具，避免循环
+                                        skip_store: true,
+                                        contexts: vec![],
                                     };
 
                                     match llm.send(followup_req).await {

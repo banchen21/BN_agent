@@ -7,6 +7,8 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// 内部工具：不暴露给 LLM，仅供其他插件通过 ToolRegistry 调用
+    pub internal: bool,
 }
 
 /// 工具执行结果

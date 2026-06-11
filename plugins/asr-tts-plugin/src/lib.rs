@@ -486,8 +486,9 @@ struct TtsTool {
 impl ToolExecutor for TtsTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "tts".into(),
-            description: "将文本转为语音，返回 base64 编码的 OPUS 音频数据。".into(),
+            name: "tts_synthesize".into(),
+            description: "将文本转为语音，返回 base64 编码的音频数据。".into(),
+            internal: true,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

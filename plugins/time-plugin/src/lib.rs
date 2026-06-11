@@ -1,9 +1,8 @@
-//! Time Plugin — 时间工具插件
+//! Time Plugin — 时间插件（仅被动上下文上报，不注册工具）
 
 use plugin_core::{
-    AgentEvent, HostContext, Plugin, PluginError, PluginMeta, ToolDef, ToolExecutor, ToolResult,
+    AgentEvent, HostContext, Plugin, PluginError, PluginMeta,
 };
-use std::sync::Arc;
 
 pub struct TimePlugin {
     meta: PluginMeta,
@@ -16,7 +15,7 @@ impl TimePlugin {
             meta: PluginMeta {
                 name: "time-plugin".into(),
                 version: "0.1.0".into(),
-                description: "时间工具插件".into(),
+                description: "时间插件（被动上下文）".into(),
                 author: "BN Team".into(),
                 min_host_version: "0.1.0".into(),
             },
@@ -29,7 +28,7 @@ impl Plugin for TimePlugin {
     fn meta(&self) -> &PluginMeta { &self.meta }
 
     fn init(&mut self, ctx: &HostContext) -> Result<(), PluginError> {
-        ctx.log_info("time", "TimePlugin 初始化完成");
+        ctx.log_info("time", "TimePlugin 初始化（仅被动上下文）");
         self.ctx = Some(ctx.clone());
         Ok(())
     }
@@ -37,11 +36,6 @@ impl Plugin for TimePlugin {
     fn start(&mut self) -> Result<(), PluginError> {
         if let Some(ref ctx) = self.ctx {
             ctx.log_info("time", "TimePlugin 已启动");
-            if let Some(ref registry) = ctx.tool_registry {
-                registry.lock().map_err(|e| PluginError::InitError(format!("{}", e)))?
-                    .register(Arc::new(GetTimeTool));
-                ctx.log_info("time", "已注册工具: get_time");
-            }
         }
         Ok(())
     }
@@ -61,23 +55,10 @@ impl Plugin for TimePlugin {
     fn ctx(&self) -> Option<&HostContext> {
         self.ctx.as_ref()
     }
-}
 
-struct GetTimeTool;
-
-impl ToolExecutor for GetTimeTool {
-    fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "get_time".into(),
-            description: "获取当前系统时间".into(),
-            parameters: serde_json::json!({"type": "object", "properties": {}}),
-        });
-        &DEF
-    }
-
-    fn execute(&self, _args: &serde_json::Value) -> ToolResult {
-        let now = chrono::Local::now();
-        ToolResult::ok(&format!("当前时间: {}", now.format("%Y-%m-%d %H:%M:%S")))
+    fn snapshot(&self) -> Option<String> {
+        Some(format!("【time_plugin】当前系统时间: {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")))
     }
 }
 
