@@ -57,7 +57,7 @@ impl Plugin for TgImPlugin {
 
         ctx.log_info("tg-im", "TgImPlugin 已启动");
 
-        // 注册 send_voice 工具（通过 ToolRegistry 调用 asr-tts-plugin 的 tts 工具）
+        // 注册 send_voice 工具
         if let Some(ref registry) = ctx.tool_registry {
             let bot_handle = self.bot_handle.clone();
             let tool_registry = registry.clone();
@@ -71,7 +71,19 @@ impl Plugin for TgImPlugin {
                     tool_registry,
                     logger,
                 }));
-            ctx.log_info("tg-im", "已注册工具: send_voice");
+            ctx.log_info("tg-im", "已注册工具: tg_send_voice");
+
+            // 注册 send_message 工具
+            let bot_handle2 = self.bot_handle.clone();
+            let logger2 = ctx.logger.clone();
+            registry
+                .lock()
+                .map_err(|e| PluginError::InitError(format!("{}", e)))?
+                .register(Arc::new(SendMessageTool {
+                    bot_handle: bot_handle2,
+                    logger: logger2,
+                }));
+            ctx.log_info("tg-im", "已注册工具: tg_send_message");
         }
 
         // 从环境变量读取配置
@@ -303,6 +315,85 @@ impl ToolExecutor for SendVoiceTool {
                             text
                         )),
                         Err(e) => ToolResult::err(&format!("发送语音失败: {}", e)),
+                    },
+                    None => ToolResult::err("Bot 未启动"),
+                }
+            })
+        });
+
+        match result.join() {
+            Ok(r) => r,
+            Err(e) => ToolResult::err(&format!("执行线程 panic: {:?}", e)),
+        }
+    }
+}
+
+// ─── send_message 工具（LLM 可调用发送文字消息到 Telegram） ───
+
+struct SendMessageTool {
+    bot_handle: Option<Arc<Mutex<Option<bot::BotHandle>>>>,
+    logger: Option<Arc<dyn plugin_core::LogCallback>>,
+}
+
+impl ToolExecutor for SendMessageTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+            name: "tg_send_message".into(),
+            description: "发送文字消息到 Telegram 聊天。当用户要求文字回复时调用。".into(),
+            internal: false,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "要发送的文字内容"
+                    }
+                },
+                "required": ["text"]
+            }),
+        });
+        &DEF
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+            Some(id) => id,
+            None => return ToolResult::err("缺少参数: chat_id"),
+        };
+        let text = match args.get("text").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return ToolResult::err("缺少参数: text"),
+        };
+
+        if text.is_empty() {
+            return ToolResult::err("text 不能为空");
+        }
+
+        let bot_handle = match self.bot_handle.clone() {
+            Some(h) => h,
+            None => return ToolResult::err("Bot 未启动"),
+        };
+
+        if let Some(ref log) = self.logger {
+            log.log(
+                plugin_core::LogLevel::Debug,
+                "tg-im",
+                &format!("发送消息: {}", &text[..text.len().min(60)]),
+            );
+        }
+
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("无法创建 tokio runtime");
+
+            rt.block_on(async {
+                let guard = bot_handle.lock().await;
+                match *guard {
+                    Some(ref h) => match h.send_message(chat_id, &text).await {
+                        Ok(()) => ToolResult::ok(&format!("消息已发送: {}", text)),
+                        Err(e) => ToolResult::err(&format!("发送消息失败: {}", e)),
                     },
                     None => ToolResult::err("Bot 未启动"),
                 }
