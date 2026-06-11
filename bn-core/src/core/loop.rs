@@ -66,7 +66,7 @@ pub async fn handle_user_message(
         }
     };
 
-    // 有工具调用 → 执行工具 → 二次 LLM
+    // 有工具调用 → 执行工具 → 不二次 LLM 追问（工具本身已完成回复）
     if !resp.tool_calls.is_empty() {
         tracing::info!("[LLM] 工具调用: {}",
             resp.tool_calls.iter().map(|tc| tc.name.clone()).collect::<Vec<_>>().join(", "));
@@ -87,45 +87,19 @@ pub async fn handle_user_message(
             }
         };
 
-        let tool_results: Vec<(String, String)> = executors.into_iter().map(|(id, executor, args)| {
+        for (id, executor, args) in executors {
             let name = executor.def().name.clone();
             tracing::info!("[LLM] 执行工具: {} (id={})", name, id);
             let result = executor.execute(&args);
-            let text = if result.success {
+            if result.success {
                 tracing::info!("[LLM] 工具完成: {} → {}", name, result.content);
-                result.content
             } else {
-                let err = format!("错误: {}", result.error.as_deref().unwrap_or("未知错误"));
-                tracing::warn!("[LLM] 工具失败: {} → {}", name, err);
-                err
-            };
-            (id, text)
-        }).collect();
-
-        // 二次 LLM 调用：汇总工具结果
-        let mut tool_result_text = String::from("工具执行结果：\n");
-        for (id, result) in &tool_results {
-            tool_result_text.push_str(&format!("[{}] {}\n", id, result));
-        }
-
-        let followup_req = ChatRequest {
-            chat_id: cid,
-            message: format!("用户原始消息: {}\n\n{}", text, tool_result_text),
-            json_mode: false,
-            tools: vec![],
-            skip_store: true,
-            contexts: vec![],
-        };
-
-        match llm.send(followup_req).await {
-            Ok(Ok(followup_resp)) => {
-                let preview: String = followup_resp.content.chars().take(80).collect();
-                tracing::info!("[LLM] 工具后回复: {}", preview);
-                emit_reply(cid, &followup_resp.content, source, emitter, pm).await;
+                tracing::warn!("[LLM] 工具失败: {} → {}", name,
+                    result.error.as_deref().unwrap_or("未知错误"));
             }
-            Ok(Err(e)) => tracing::error!("[LLM] 工具后调用失败: {}", e),
-            Err(e) => tracing::error!("[LLM] 工具后 Actor 通信失败: {}", e),
         }
+        // 工具调用后不再请求 LLM 追问，工具本身已负责回复
+        // 如需文字回复，LLM 应显式调用 tg_send_message 等工具
     } else {
         // 无工具调用，直接回复
         let preview: String = resp.content.chars().take(80).collect();
