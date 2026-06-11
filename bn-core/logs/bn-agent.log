@@ -1,31 +1,60 @@
-2026-06-11T08:50:51.828239Z  INFO bn_agent::runtime: BN Agent 启动
-2026-06-11T08:50:51.828613Z  INFO bn_agent::runtime: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
-2026-06-11T08:50:51.834757Z  INFO bn_agent::models::llm::client: 聊天记录已清空
-2026-06-11T08:50:51.834877Z  INFO bn_agent::models::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
-2026-06-11T08:50:51.837307Z  INFO bn_agent::runtime: AsrTtsPlugin 初始化完成 target="asr-tts"
-2026-06-11T08:50:51.837453Z  INFO bn_agent::runtime: AsrTtsPlugin 已启动 target="asr-tts"
-2026-06-11T08:50:51.837590Z  INFO bn_agent::runtime: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
-2026-06-11T08:50:51.837913Z  INFO bn_agent::runtime: 已注册工具: tts_synthesize target="asr-tts"
-2026-06-11T08:50:51.838043Z  INFO bn_agent::runtime: 已注册工具: tts_set_voice target="asr-tts"
-2026-06-11T08:50:51.838268Z  INFO bn_agent::runtime: 已注册工具: asr_transcribe target="asr-tts"
-2026-06-11T08:50:51.838409Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
-2026-06-11T08:50:51.839237Z  INFO bn_agent::runtime: TgImPlugin 初始化完成 target="tg-im"
-2026-06-11T08:50:51.839389Z  INFO bn_agent::runtime: TgImPlugin 已启动 target="tg-im"
-2026-06-11T08:50:51.839926Z  INFO bn_agent::runtime: 已注册工具: tg_send_voice target="tg-im"
-2026-06-11T08:50:51.840099Z  INFO bn_agent::runtime: 已注册工具: tg_send_message target="tg-im"
-2026-06-11T08:50:51.840326Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
-2026-06-11T08:50:51.840768Z  INFO bn_agent::runtime: TimePlugin 初始化 (API: GET /v1/time) target="time"
-2026-06-11T08:50:51.840865Z  INFO bn_agent::runtime: 配置代理: http://127.0.0.1:10808 target="tg-im"
-2026-06-11T08:50:51.840951Z  INFO bn_agent::runtime: TimePlugin 已启动 target="time"
-2026-06-11T08:50:51.841048Z  INFO bn_agent::models::plugin_loader: 已加载插件: time
-2026-06-11T08:50:51.841394Z  INFO bn_agent::runtime: 已加载 3 个插件
-2026-06-11T08:50:51.841543Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
-2026-06-11T08:50:51.841784Z DEBUG bn_agent::runtime: [EventBus] 收到事件: SystemEvent
-2026-06-11T08:50:51.841996Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="tg-im"
-2026-06-11T08:50:51.842169Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="time"
-2026-06-11T08:50:51.842357Z  INFO bn_agent::runtime: BN Agent 运行中，按 Ctrl+C 退出...
-2026-06-11T08:50:51.842553Z  INFO bn_agent::models::api_server: HTTP API 启动: http://0.0.0.0:3000/v1
-2026-06-11T08:50:51.844348Z  INFO actix_server::builder: starting 16 workers
-2026-06-11T08:50:51.844610Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
-2026-06-11T08:50:51.844781Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:3000", workers: 16, listening on: 0.0.0.0:3000
-2026-06-11T08:50:52.744241Z  INFO bn_agent::runtime: Bot @Qiyue20_Bot 已连接 target="tg-im"
+2026-06-11T11:23:04.190262Z  INFO bn_agent::runtime: BN Agent 启动
+2026-06-11T11:23:04.190694Z  INFO bn_agent::runtime: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
+2026-06-11T11:23:04.203689Z  INFO bn_agent::models::llm::client: 聊天记录已清空
+2026-06-11T11:23:04.203984Z  INFO bn_agent::models::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
+2026-06-11T11:23:04.209521Z  INFO bn_agent::runtime: AsrTtsPlugin 初始化完成 target="asr-tts"
+2026-06-11T11:23:04.209913Z  INFO bn_agent::runtime: AsrTtsPlugin 已启动 target="asr-tts"
+2026-06-11T11:23:04.210338Z  INFO bn_agent::runtime: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
+2026-06-11T11:23:04.210832Z  INFO bn_agent::runtime: 已注册工具: tts_synthesize target="asr-tts"
+2026-06-11T11:23:04.211030Z  INFO bn_agent::runtime: 已注册工具: asr_transcribe target="asr-tts"
+2026-06-11T11:23:04.211278Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
+2026-06-11T11:23:04.212716Z  INFO bn_agent::runtime: TgImPlugin 初始化完成 target="tg-im"
+2026-06-11T11:23:04.213323Z  INFO bn_agent::runtime: TgImPlugin 已启动 target="tg-im"
+2026-06-11T11:23:04.213668Z  INFO bn_agent::runtime: 已注册工具: tg_send_voice target="tg-im"
+2026-06-11T11:23:04.213846Z  INFO bn_agent::runtime: 已注册工具: tg_send_message target="tg-im"
+2026-06-11T11:23:04.214119Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
+2026-06-11T11:23:04.214827Z  INFO bn_agent::runtime: TimePlugin 初始化 (API: GET /v1/time) target="time"
+2026-06-11T11:23:04.215488Z  INFO bn_agent::runtime: TimePlugin 已启动 target="time"
+2026-06-11T11:23:04.215668Z  INFO bn_agent::models::plugin_loader: 已加载插件: time
+2026-06-11T11:23:04.215940Z  INFO bn_agent::runtime: 配置代理: http://127.0.0.1:10808 target="tg-im"
+2026-06-11T11:23:04.216236Z  INFO bn_agent::runtime: 已加载 3 个插件
+2026-06-11T11:23:04.216511Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
+2026-06-11T11:23:04.216890Z DEBUG bn_agent::runtime: [EventBus] 收到事件: SystemEvent
+2026-06-11T11:23:04.217499Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="tg-im"
+2026-06-11T11:23:04.217650Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="time"
+2026-06-11T11:23:04.217850Z  INFO bn_agent::runtime: BN Agent 运行中，按 Ctrl+C 退出...
+2026-06-11T11:23:04.218021Z  INFO bn_agent::models::api_server: HTTP API 启动: http://0.0.0.0:3000/v1
+2026-06-11T11:23:04.219806Z  INFO actix_server::builder: starting 16 workers
+2026-06-11T11:23:04.220507Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
+2026-06-11T11:23:04.220677Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:3000", workers: 16, listening on: 0.0.0.0:3000
+2026-06-11T11:23:05.095170Z  INFO bn_agent::runtime: Bot @Qiyue20_Bot 已连接 target="tg-im"
+2026-06-11T11:23:09.376896Z  INFO bn_agent::runtime: 收到来自 @unknown 的消息: 在吗 target="tg-im"
+2026-06-11T11:23:09.851426Z  INFO bn_agent::runtime: [MSG] @unknown: [Telegram]: 在吗
+2026-06-11T11:23:09.859792Z DEBUG reqwest::connect: starting new connection: https://api.deepseek.com/
+2026-06-11T11:23:09.895532Z DEBUG hyper_util::client::legacy::connect::http: connecting to 123.148.116.102:443
+2026-06-11T11:23:09.905642Z DEBUG hyper_util::client::legacy::connect::http: connected to 123.148.116.102:443
+2026-06-11T11:23:12.135027Z DEBUG hyper_util::client::legacy::pool: pooling idle connection for ("https", api.deepseek.com)
+2026-06-11T11:23:12.147304Z  INFO bn_agent::core::r#loop: [LLM] 回复: 来啦来啦～在呢在呢！有啥事找我呀？😊 | 缓存命中: 512 tokens
+2026-06-11T11:23:12.147551Z DEBUG bn_agent::runtime: [EventBus] 收到事件: AssistantMessage
+2026-06-11T11:23:12.148163Z DEBUG bn_agent::runtime: 收到事件: AssistantMessage target="time"
+2026-06-11T11:23:17.072225Z  INFO bn_agent::runtime: 收到来自 @unknown 的消息: 语音回复我 target="tg-im"
+2026-06-11T11:23:17.548700Z  INFO bn_agent::runtime: [MSG] @unknown: [Telegram]: 语音回复我
+2026-06-11T11:23:17.549558Z DEBUG hyper_util::client::legacy::pool: reuse idle connection for ("https", api.deepseek.com)
+2026-06-11T11:23:20.933222Z DEBUG hyper_util::client::legacy::pool: pooling idle connection for ("https", api.deepseek.com)
+2026-06-11T11:23:20.933823Z  INFO bn_agent::core::r#loop: [LLM] 工具调用: tg_send_voice
+2026-06-11T11:23:20.933970Z  INFO bn_agent::core::r#loop: [LLM] 执行工具: tg_send_voice (id=call_00_HbKhKxBlJDgAkcjvg8CE1432)
+2026-06-11T11:23:24.132646Z DEBUG bn_agent::runtime: TTS 工具完成: 445484 bytes target="asr-tts"
+2026-06-11T11:23:24.141796Z DEBUG bn_agent::runtime: TTS 完成: 445484 bytes target="tg-im"
+2026-06-11T11:23:27.082882Z  INFO bn_agent::core::r#loop: [LLM] 工具完成: tg_send_voice → 语音消息已发送: 来啦来啦～听到我的声音了吗？嘻嘻，我是小月呀，有啥想聊的尽管说，我这儿听着呢！
+2026-06-11T11:23:29.357246Z  INFO bn_agent::runtime: 收到来自 @unknown 的消息: 你能做什么？ target="tg-im"
+2026-06-11T11:23:29.795222Z  INFO bn_agent::runtime: [MSG] @unknown: [Telegram]: 你能做什么？
+2026-06-11T11:23:29.797208Z DEBUG hyper_util::client::legacy::pool: reuse idle connection for ("https", api.deepseek.com)
+2026-06-11T11:23:33.392938Z DEBUG hyper_util::client::legacy::pool: pooling idle connection for ("https", api.deepseek.com)
+2026-06-11T11:23:33.410015Z  INFO bn_agent::core::r#loop: [LLM] 回复: 哈哈，我能做的事情还挺多的呢～
+
+✨ 陪你聊天解闷，啥话题都行
+🎙️ 发语音消息给你，想要我说话就告诉我
+⏰ 帮你看看时间
+💡 回答各种问题，生活、学习、小知识 | 缓存命中: 640 tokens
+2026-06-11T11:23:33.410233Z DEBUG bn_agent::runtime: [EventBus] 收到事件: AssistantMessage
+2026-06-11T11:23:33.410426Z DEBUG bn_agent::runtime: 收到事件: AssistantMessage target="time"
