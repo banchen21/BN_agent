@@ -11,5 +11,5 @@ pub mod tool;
 pub use context::{HostContext, LogCallback, LogLevel};
 pub use error::PluginError;
 pub use event::{AgentEvent, EventEmitter, EventSource, EventType};
-pub use plugin::{Plugin, PluginMeta};
+pub use plugin::{Plugin, PluginApi, PluginMeta};
 pub use tool::{ToolDef, ToolExecutor, ToolRegistry, ToolResult};

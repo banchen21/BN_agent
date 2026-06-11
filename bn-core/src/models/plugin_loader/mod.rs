@@ -1,7 +1,7 @@
 //! 插件加载器 Actor — 基于 actix + libloading 的动态插件管理
 
 use actix::prelude::*;
-use plugin_core::{AgentEvent, HostContext, Plugin, ToolRegistry};
+use plugin_core::{AgentEvent, HostContext, Plugin, PluginApi, ToolRegistry};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -119,6 +119,25 @@ impl Handler<RefreshSnapshots> for PluginManager {
                 snap.push(s);
             }
         }
+    }
+}
+
+/// 插件 API 请求（来自 HTTP 路由）
+#[derive(Message)]
+#[rtype(result = "Option<(u16, String)>")]
+pub struct ApiRequest {
+    pub plugin: String,
+    pub method: String,
+    pub path: String,
+    pub body: Option<String>,
+}
+
+impl Handler<ApiRequest> for PluginManager {
+    type Result = Option<(u16, String)>;
+    fn handle(&mut self, msg: ApiRequest, _: &mut Self::Context) -> Self::Result {
+        let (_, plugin) = self.loaded.get(&msg.plugin)?;
+        let api = plugin.api_handler()?;
+        api.handle_api(&msg.method, &msg.path, msg.body.as_deref())
     }
 }
 

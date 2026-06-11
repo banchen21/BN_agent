@@ -5,6 +5,7 @@ mod models {
     pub mod plugin_loader;
 }
 mod llm;
+mod api;
 
 use actix::prelude::*;
 use llm::client::{ChatRequest, LlmActor, LlmConfig};
@@ -357,6 +358,15 @@ fn main() -> std::io::Result<()> {
             .ok();
 
         tracing::info!("BN Agent 运行中，按 Ctrl+C 退出...");
+
+        // 启动 HTTP API server（后台）
+        let api_pm = plugin_manager.clone();
+        let api_tr = tool_registry.clone();
+        let _server_handle = actix_rt::spawn(async move {
+            if let Err(e) = api::start_server(api_pm, api_tr).await {
+                tracing::error!("API server 错误: {}", e);
+            }
+        });
 
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("收到退出信号");

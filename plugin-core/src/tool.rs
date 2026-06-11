@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 工具定义
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
