@@ -46,8 +46,9 @@ impl LlmConfig {
         let base_url = std::env::var("LLM_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
 
-        let system_prompt = std::env::var("LLM_SYSTEM_PROMPT")
-            .unwrap_or_else(|_| "你是一个有用的 AI 助手。请用简洁的中文回答。".into());
+        let system_prompt = Self::load_persona().unwrap_or_else(|| {
+            "你是一个有用的 AI 助手。请用简洁的中文回答。".into()
+        });
 
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
             .ok()
@@ -55,6 +56,15 @@ impl LlmConfig {
             .unwrap_or(20);
 
         Ok(Self { api_key, model, base_url, system_prompt, max_history_turns })
+    }
+
+    /// 从 persona.md 读取人格设定，找不到则返回 None
+    fn load_persona() -> Option<String> {
+        let persona_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("persona.md");
+        match std::fs::read_to_string(&persona_path) {
+            Ok(content) if !content.trim().is_empty() => Some(content.trim().to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -254,7 +264,6 @@ impl Handler<ChatRequest> for LlmActor {
 
             let request = request_builder.build().map_err(|e| format!("构建请求失败: {}", e))?;
 
-            tracing::debug!("LLM 请求: {:#?}", request.messages);
             let response = client.chat().create(request).await
                 .map_err(|e| format!("LLM 调用失败: {}", e))?;
 
