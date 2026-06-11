@@ -8,7 +8,7 @@ use plugin_core::{
     AgentEvent, EventSource, EventType, HostContext, Plugin, PluginError, PluginMeta,
     ToolDef, ToolExecutor, ToolResult,
 };
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 pub struct AsrTtsPlugin {
     meta: PluginMeta,
@@ -23,8 +23,8 @@ pub struct AsrTtsPlugin {
     tts_api_key: String,
     /// TTS 预置音色名（mimo-v2.5-tts 模式）
     tts_voice: String,
-    /// TTS 音色描述 / 角色提示词（运行时可变，LLM 可调用工具修改）
-    tts_voice_desc: Arc<RwLock<String>>,
+    /// TTS 音色描述 / 角色提示词（user message 风格控制）
+    tts_voice_desc: String,
     http_client: reqwest::Client,
 }
 
@@ -44,10 +44,8 @@ impl AsrTtsPlugin {
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
         let tts_model = std::env::var("TTS_MODEL").unwrap_or_else(|_| "tts-1".into());
         let tts_voice = std::env::var("TTS_VOICE").unwrap_or_else(|_| "mimo_default".into());
-        let tts_voice_desc = Arc::new(RwLock::new(
-            std::env::var("TTS_VOICE_DESC")
-                .unwrap_or_else(|_| "你是小月，一个元气满满的 AI 助手。声音干净明亮。".into())
-        ));
+        let tts_voice_desc = std::env::var("TTS_VOICE_DESC")
+            .unwrap_or_else(|_| "你是小月，一个元气满满的 AI 助手。声音干净明亮。".into());
 
         Self {
             meta: PluginMeta {
@@ -115,18 +113,6 @@ impl Plugin for AsrTtsPlugin {
                         logger,
                     }));
                 ctx.log_info("asr-tts", "已注册工具: tts_synthesize");
-
-                // 注册 set_voice 工具（LLM 可调用修改音色描述）
-                let voice_desc_arc = self.tts_voice_desc.clone();
-                let set_logger = ctx.logger.clone();
-                registry
-                    .lock()
-                    .map_err(|e| PluginError::InitError(format!("{}", e)))?
-                    .register(Arc::new(SetVoiceTool {
-                        voice_desc: voice_desc_arc,
-                        logger: set_logger,
-                    }));
-                ctx.log_info("asr-tts", "已注册工具: tts_set_voice");
 
                 // 注册 asr 工具
                 let asr_http_client = self.http_client.clone();
@@ -295,7 +281,7 @@ impl AsrTtsPlugin {
         let tts_model = self.tts_model.clone();
         let tts_api_key = self.tts_api_key.clone();
         let tts_voice = self.tts_voice.clone();
-        let tts_voice_desc = self.tts_voice_desc.read().unwrap().clone();
+        let tts_voice_desc = self.tts_voice_desc.clone();
         let emitter = match self.emitter() {
             Some(e) => Arc::clone(e),
             None => return,
@@ -530,57 +516,6 @@ async fn do_tts(
     base64_decode(audio_b64)
 }
 
-// ─── set_voice 工具（LLM 可调用修改音色描述） ───
-
-struct SetVoiceTool {
-    voice_desc: Arc<RwLock<String>>,
-    logger: Option<Arc<dyn plugin_core::LogCallback>>,
-}
-
-impl ToolExecutor for SetVoiceTool {
-    fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "tts_set_voice".into(),
-            description: "设置 TTS 音色描述/角色人设。调用后所有后续语音合成都会使用新的音色。用于用户想改变 AI 说话的风格、语气、性别等。".into(),
-            internal: false,
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "voice_desc": {
-                        "type": "string",
-                        "description": "音色描述，如'一位低沉稳重的男声，语速缓慢'、'活泼可爱的少女音'等"
-                    }
-                },
-                "required": ["voice_desc"]
-            }),
-        });
-        &DEF
-    }
-
-    fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let new_desc = match args.get("voice_desc").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return ToolResult::err("缺少参数: voice_desc"),
-        };
-
-        if new_desc.is_empty() {
-            return ToolResult::err("voice_desc 不能为空");
-        }
-
-        match self.voice_desc.write() {
-            Ok(mut guard) => {
-                *guard = new_desc.clone();
-                if let Some(ref log) = self.logger {
-                    log.log(plugin_core::LogLevel::Info, "asr-tts",
-                        &format!("音色描述已更新: {}", &new_desc[..new_desc.len().min(60)]));
-                }
-                ToolResult::ok(&format!("音色已设置为: {}", new_desc))
-            }
-            Err(e) => ToolResult::err(&format!("设置音色失败: {}", e)),
-        }
-    }
-}
-
 // ─── asr 工具（供其他插件通过 ToolRegistry 调用） ───
 
 struct AsrTool {
@@ -692,7 +627,7 @@ struct TtsTool {
     tts_model: String,
     tts_api_key: String,
     tts_voice: String,
-    tts_voice_desc: Arc<RwLock<String>>,
+    tts_voice_desc: String,
     logger: Option<Arc<dyn plugin_core::LogCallback>>,
 }
 
@@ -742,7 +677,7 @@ impl ToolExecutor for TtsTool {
         let tts_model = self.tts_model.clone();
         let tts_api_key = self.tts_api_key.clone();
         let tts_voice = self.tts_voice.clone();
-        let default_desc = self.tts_voice_desc.read().unwrap().clone();
+        let default_desc = self.tts_voice_desc.clone();
         let logger = self.logger.clone();
 
         // 同步执行 TTS（工具调用是同步的，内部用 block_on）
