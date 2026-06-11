@@ -225,6 +225,10 @@ impl ToolExecutor for SendVoiceTool {
                     "text": {
                         "type": "string",
                         "description": "要转为语音并发送的文本内容"
+                    },
+                    "voice_desc": {
+                        "type": "string",
+                        "description": "可选：音色描述/风格指令，不传则使用默认音色"
                     }
                 },
                 "required": ["text"]
@@ -249,7 +253,13 @@ impl ToolExecutor for SendVoiceTool {
 
         // 1. 通过 ToolRegistry 调用 asr-tts-plugin 的 tts 工具
         //    先获取 executor 克隆再释放锁，避免与 main.rs 死锁
-        let tts_args = serde_json::json!({ "text": text });
+        let mut tts_args = serde_json::json!({ "text": text });
+        // 可选透传 voice_desc
+        if let Some(vd) = args.get("voice_desc").and_then(|v| v.as_str()) {
+            if !vd.is_empty() {
+                tts_args["voice_desc"] = serde_json::json!(vd);
+            }
+        }
         let tts_executor = {
             let registry = match self.tool_registry.lock() {
                 Ok(r) => r,

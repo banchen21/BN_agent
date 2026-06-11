@@ -292,7 +292,7 @@ impl AsrTtsPlugin {
         let source_owned = source.to_string();
 
         tokio::spawn(async move {
-            match do_tts(&client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, &tts_voice_desc).await {
+            match do_tts(&client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, Some(&tts_voice_desc)).await {
                 Ok(audio_data) => {
                     if let Some(ref log) = logger {
                         log.log(plugin_core::LogLevel::Debug, "asr-tts",
@@ -432,7 +432,7 @@ async fn do_tts(
     api_key: &str,
     text: &str,
     voice: &str,
-    voice_desc: &str,
+    voice_desc: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     if api_key.is_empty() {
         return Err("TTS_API_KEY 未配置".into());
@@ -452,14 +452,14 @@ async fn do_tts(
     //   - preset 模式：用角色提示词控制风格（参照 mc-ai-buddy 的做法）
     //   - voicedesign 模式：用描述文本设计音色
     //   - voiceclone 模式：可为空（音色由音频样本决定）
-    let voice_desc = if is_preset || is_voicedesign {
-        voice_desc
+    let voice_desc_content = if is_preset || is_voicedesign {
+        voice_desc.unwrap_or("")
     } else {
         ""
     };
     messages.push(serde_json::json!({
         "role": "user",
-        "content": voice_desc
+        "content": voice_desc_content
     }));
 
     // assistant message: 要合成的文本
@@ -644,6 +644,10 @@ impl ToolExecutor for TtsTool {
                     "text": {
                         "type": "string",
                         "description": "要转为语音的文本内容"
+                    },
+                    "voice_desc": {
+                        "type": "string",
+                        "description": "可选：音色描述/风格指令，不传则使用默认音色"
                     }
                 },
                 "required": ["text"]
@@ -662,12 +666,19 @@ impl ToolExecutor for TtsTool {
             return ToolResult::err("text 不能为空");
         }
 
+        // voice_desc 可选：传了就用，没传用默认
+        let custom_voice_desc: Option<String> = args
+            .get("voice_desc")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         let http_client = self.http_client.clone();
         let tts_base_url = self.tts_base_url.clone();
         let tts_model = self.tts_model.clone();
         let tts_api_key = self.tts_api_key.clone();
         let tts_voice = self.tts_voice.clone();
-        let tts_voice_desc = self.tts_voice_desc.clone();
+        let default_desc = self.tts_voice_desc.clone();
         let logger = self.logger.clone();
 
         // 同步执行 TTS（工具调用是同步的，内部用 block_on）
@@ -678,7 +689,8 @@ impl ToolExecutor for TtsTool {
                 .expect("无法创建 tokio runtime");
 
             rt.block_on(async {
-                match do_tts(&http_client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, &tts_voice_desc).await {
+                let final_desc = custom_voice_desc.as_deref().unwrap_or(&default_desc);
+                match do_tts(&http_client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, Some(final_desc)).await {
                     Ok(audio_data) => {
                         if let Some(ref log) = logger {
                             log.log(
