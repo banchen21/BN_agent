@@ -91,10 +91,8 @@ fn build_reqwest_client(logger: &Option<Arc<dyn LogCallback>>) -> Result<reqwest
     if let Some(ref url) = tg_proxy {
         let msg = format!("配置代理: {}", url);
         log(plugin_core::LogLevel::Info, &msg);
-        eprintln!("[tg-im] {}", msg);
     } else {
         log(plugin_core::LogLevel::Warn, "未配置代理，使用直连");
-        eprintln!("[tg-im] 未配置代理，使用直连");
     }
 
     let mut builder = reqwest::Client::builder()
@@ -272,8 +270,7 @@ pub async fn run_bot(
     );
     
     log(plugin_core::LogLevel::Error, &error_msg);
-    eprintln!("[tg-im] {}", error_msg);
-    
+
     Err(error_msg)
 }
 
