@@ -4,7 +4,7 @@ use actix::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use crate::api_server;
-use super::r#loop as core_loop;
+use crate::core::r#loop as core_loop;
 use crate::llm::client::{LlmActor, LlmConfig};
 use crate::models::event_bus::{BusEmitter, EventBus, EmitEvent, RegisterCallback};
 use crate::models::plugin_loader::{
