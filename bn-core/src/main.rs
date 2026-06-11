@@ -1,9 +1,8 @@
 //! BN Agent 主程序
 
-mod models { pub mod event_bus; pub mod llm; pub mod plugin_loader; }
+mod models { pub mod api_server; pub mod event_bus; pub mod llm; pub mod plugin_loader; }
 mod core;
 mod runtime;
-mod api_server;
 mod logger;
 
 fn main() -> std::io::Result<()> {

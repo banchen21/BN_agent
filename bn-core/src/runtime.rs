@@ -3,7 +3,7 @@
 use actix::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::api_server;
+use crate::models::api_server;
 use crate::core::r#loop as core_loop;
 use crate::models::llm::client::{LlmActor, LlmConfig};
 use crate::models::event_bus::{BusEmitter, EventBus, EmitEvent, RegisterCallback};

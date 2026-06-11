@@ -1,28 +1,26 @@
-2026-06-11T07:20:38.599987Z  INFO bn_agent::core::runtime: BN Agent 启动
-2026-06-11T07:20:38.600406Z  INFO bn_agent::core::runtime: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
-2026-06-11T07:20:38.610145Z  INFO bn_agent::llm::client: 聊天记录已清空
-2026-06-11T07:20:38.610328Z  INFO bn_agent::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
-2026-06-11T07:20:38.612187Z  INFO bn_agent::core::runtime: AsrTtsPlugin 初始化完成 target="asr-tts"
-2026-06-11T07:20:38.612293Z  INFO bn_agent::core::runtime: AsrTtsPlugin 已启动 target="asr-tts"
-2026-06-11T07:20:38.612456Z  INFO bn_agent::core::runtime: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
-2026-06-11T07:20:38.612710Z  INFO bn_agent::core::runtime: 已注册工具: tts target="asr-tts"
-2026-06-11T07:20:38.613040Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
-2026-06-11T07:20:38.614496Z  INFO bn_agent::core::runtime: TgImPlugin 初始化完成 target="tg-im"
-2026-06-11T07:20:38.615730Z  INFO bn_agent::core::runtime: TgImPlugin 已启动 target="tg-im"
-2026-06-11T07:20:38.616173Z  INFO bn_agent::core::runtime: 已注册工具: send_voice target="tg-im"
-2026-06-11T07:20:38.616530Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
-2026-06-11T07:20:38.616815Z  INFO bn_agent::core::runtime: 配置代理: http://127.0.0.1:10808 target="tg-im"
-2026-06-11T07:20:38.617096Z  INFO bn_agent::core::runtime: TimePlugin 初始化 (API: GET /v1/time) target="time"
-2026-06-11T07:20:38.617199Z  INFO bn_agent::core::runtime: TimePlugin 已启动 target="time"
-2026-06-11T07:20:38.617361Z  INFO bn_agent::models::plugin_loader: 已加载插件: time
-2026-06-11T07:20:38.618129Z  INFO bn_agent::core::runtime: 已加载 3 个插件
-2026-06-11T07:20:38.621104Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
-2026-06-11T07:20:38.621956Z DEBUG bn_agent::core::runtime: [EventBus] 收到事件: SystemEvent
-2026-06-11T07:20:38.622553Z DEBUG bn_agent::core::runtime: 收到事件: PluginNotification target="tg-im"
-2026-06-11T07:20:38.622694Z DEBUG bn_agent::core::runtime: 收到事件: PluginNotification target="time"
-2026-06-11T07:20:38.622912Z  INFO bn_agent::core::runtime: BN Agent 运行中，按 Ctrl+C 退出...
-2026-06-11T07:20:38.625965Z  INFO bn_agent::api_server: HTTP API 启动: http://0.0.0.0:3000/v1
-2026-06-11T07:20:38.627305Z  INFO actix_server::builder: starting 16 workers
-2026-06-11T07:20:38.628187Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
-2026-06-11T07:20:38.628633Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:3000", workers: 16, listening on: 0.0.0.0:3000
-2026-06-11T07:20:39.590242Z  INFO bn_agent::core::runtime: Bot @Qiyue20_Bot 已连接 target="tg-im"
+2026-06-11T07:27:48.679341Z  INFO bn_agent::runtime: BN Agent 启动
+2026-06-11T07:27:48.679654Z  INFO bn_agent::runtime: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
+2026-06-11T07:27:48.686183Z  INFO bn_agent::models::llm::client: 聊天记录已清空
+2026-06-11T07:27:48.686289Z  INFO bn_agent::models::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
+2026-06-11T07:27:48.687705Z  INFO bn_agent::runtime: AsrTtsPlugin 初始化完成 target="asr-tts"
+2026-06-11T07:27:48.687835Z  INFO bn_agent::runtime: AsrTtsPlugin 已启动 target="asr-tts"
+2026-06-11T07:27:48.687968Z  INFO bn_agent::runtime: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
+2026-06-11T07:27:48.688159Z  INFO bn_agent::runtime: 已注册工具: tts target="asr-tts"
+2026-06-11T07:27:48.688279Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
+2026-06-11T07:27:48.689085Z  INFO bn_agent::runtime: TgImPlugin 初始化完成 target="tg-im"
+2026-06-11T07:27:48.689232Z  INFO bn_agent::runtime: TgImPlugin 已启动 target="tg-im"
+2026-06-11T07:27:48.689425Z  INFO bn_agent::runtime: 已注册工具: send_voice target="tg-im"
+2026-06-11T07:27:48.689645Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
+2026-06-11T07:27:48.690087Z  INFO bn_agent::runtime: 配置代理: http://127.0.0.1:10808 target="tg-im"
+2026-06-11T07:27:48.690154Z  INFO bn_agent::runtime: TimePlugin 初始化 (API: GET /v1/time) target="time"
+2026-06-11T07:27:48.690220Z  INFO bn_agent::runtime: TimePlugin 已启动 target="time"
+2026-06-11T07:27:48.690270Z  INFO bn_agent::models::plugin_loader: 已加载插件: time
+2026-06-11T07:27:48.690476Z  INFO bn_agent::runtime: 已加载 3 个插件
+2026-06-11T07:27:48.690610Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
+2026-06-11T07:27:48.690788Z DEBUG bn_agent::runtime: [EventBus] 收到事件: SystemEvent
+2026-06-11T07:27:48.691083Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="tg-im"
+2026-06-11T07:27:48.691238Z DEBUG bn_agent::runtime: 收到事件: PluginNotification target="time"
+2026-06-11T07:27:48.691420Z  INFO bn_agent::runtime: BN Agent 运行中，按 Ctrl+C 退出...
+2026-06-11T07:27:48.691543Z  INFO bn_agent::api_server: HTTP API 启动: http://0.0.0.0:3000/v1
+2026-06-11T07:27:48.695404Z ERROR bn_agent::runtime: API server 错误: 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。 (os error 10048)
+2026-06-11T07:27:49.566610Z  INFO bn_agent::runtime: Bot @Qiyue20_Bot 已连接 target="tg-im"
