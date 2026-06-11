@@ -11,7 +11,7 @@ use plugin_core::ToolRegistry;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-use super::llm::client::{ChatRequest, LlmActor};
+use super::models::llm::client::{ChatRequest, LlmActor};
 use super::models::plugin_loader::{ApiRequest, PluginManager, RefreshSnapshots};
 
 /// 聊天请求
