@@ -9,9 +9,10 @@ use actix::Addr;
 use actix_web::{web, HttpRequest, HttpResponse};
 use plugin_core::ToolRegistry;
 use serde::Deserialize;
+use std::sync::{Arc, Mutex};
 
 use crate::llm::client::{ChatRequest, LlmActor};
-use crate::models::plugin_loader::{ApiRequest, PluginManager};
+use crate::models::plugin_loader::{ApiRequest, PluginManager, RefreshSnapshots};
 
 /// 聊天请求
 #[derive(Deserialize)]
@@ -47,10 +48,16 @@ async fn tools(tool_registry: web::Data<std::sync::Arc<std::sync::Mutex<ToolRegi
 
 /// POST /v1/chat — LLM 对话（带工具调用）
 async fn chat(
+    pm: web::Data<Addr<PluginManager>>,
     llm: web::Data<Addr<LlmActor>>,
-    tool_registry: web::Data<std::sync::Arc<std::sync::Mutex<ToolRegistry>>>,
+    tool_registry: web::Data<Arc<Mutex<ToolRegistry>>>,
+    snapshots: web::Data<Arc<Mutex<Vec<String>>>>,
     payload: web::Json<ChatPayload>,
 ) -> HttpResponse {
+    // 刷新被动上下文快照
+    let _ = pm.send(RefreshSnapshots).await;
+    let contexts: Vec<String> = snapshots.lock().unwrap().clone();
+
     let tools: Vec<serde_json::Value> = match tool_registry.lock() {
         Ok(reg) => reg.all_defs().iter()
             .filter(|d| !d.internal)
@@ -72,7 +79,7 @@ async fn chat(
         json_mode: false,
         tools,
         skip_store: false,
-        contexts: vec![],
+        contexts,
     };
 
     match llm.send(req).await {
@@ -151,7 +158,8 @@ async fn plugin_proxy(
 pub async fn start_server(
     pm: Addr<PluginManager>,
     llm: Addr<LlmActor>,
-    tool_registry: std::sync::Arc<std::sync::Mutex<ToolRegistry>>,
+    tool_registry: Arc<Mutex<ToolRegistry>>,
+    snapshots: Arc<Mutex<Vec<String>>>,
 ) -> std::io::Result<()> {
     let port: u16 = std::env::var("API_PORT")
         .ok()
@@ -165,6 +173,7 @@ pub async fn start_server(
             .app_data(web::Data::new(pm.clone()))
             .app_data(web::Data::new(llm.clone()))
             .app_data(web::Data::new(tool_registry.clone()))
+            .app_data(web::Data::new(snapshots.clone()))
             // Core
             .route("/v1/health", web::get().to(health))
             .route("/v1/tools", web::get().to(tools))

@@ -1,28 +1,28 @@
-2026-06-11T06:31:20.742280Z  INFO bn_agent: BN Agent 启动
-2026-06-11T06:31:20.742801Z  INFO bn_agent: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
-2026-06-11T06:31:20.754702Z  INFO bn_agent::llm::client: 聊天记录已清空
-2026-06-11T06:31:20.754895Z  INFO bn_agent::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
-2026-06-11T06:31:20.757322Z  INFO bn_agent: AsrTtsPlugin 初始化完成 target="asr-tts"
-2026-06-11T06:31:20.757475Z  INFO bn_agent: AsrTtsPlugin 已启动 target="asr-tts"
-2026-06-11T06:31:20.757616Z  INFO bn_agent: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
-2026-06-11T06:31:20.757891Z  INFO bn_agent: 已注册工具: tts target="asr-tts"
-2026-06-11T06:31:20.758012Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
-2026-06-11T06:31:20.760082Z  INFO bn_agent: TgImPlugin 初始化完成 target="tg-im"
-2026-06-11T06:31:20.760266Z  INFO bn_agent: TgImPlugin 已启动 target="tg-im"
-2026-06-11T06:31:20.760653Z  INFO bn_agent: 已注册工具: send_voice target="tg-im"
-2026-06-11T06:31:20.760948Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
-2026-06-11T06:31:20.761466Z  INFO bn_agent: 配置代理: http://127.0.0.1:10808 target="tg-im"
-2026-06-11T06:31:20.761584Z  INFO bn_agent: TimePlugin 初始化 (API: GET /v1/time) target="time"
-2026-06-11T06:31:20.761716Z  INFO bn_agent: TimePlugin 已启动 target="time"
-2026-06-11T06:31:20.761843Z  INFO bn_agent::models::plugin_loader: 已加载插件: time-plugin
-2026-06-11T06:31:20.762155Z  INFO bn_agent: 已加载 3 个插件
-2026-06-11T06:31:20.762396Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
-2026-06-11T06:31:20.762846Z DEBUG bn_agent: [EventBus] 收到事件: SystemEvent
-2026-06-11T06:31:20.763083Z DEBUG bn_agent: 收到事件: PluginNotification target="tg-im"
-2026-06-11T06:31:20.763281Z DEBUG bn_agent: 收到事件: PluginNotification target="time"
-2026-06-11T06:31:20.763456Z  INFO bn_agent: BN Agent 运行中，按 Ctrl+C 退出...
-2026-06-11T06:31:20.763704Z  INFO bn_agent::api: HTTP API 启动: http://0.0.0.0:3000/v1
-2026-06-11T06:31:20.765832Z  INFO actix_server::builder: starting 16 workers
-2026-06-11T06:31:20.766030Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
-2026-06-11T06:31:20.766196Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:3000", workers: 16, listening on: 0.0.0.0:3000
-2026-06-11T06:31:21.652467Z  INFO bn_agent: Bot @Qiyue20_Bot 已连接 target="tg-im"
+2026-06-11T06:40:18.190822Z  INFO bn_agent: BN Agent 启动
+2026-06-11T06:40:18.191116Z  INFO bn_agent: LLM 模型: deepseek-v4-pro @ https://api.deepseek.com
+2026-06-11T06:40:18.203376Z  INFO bn_agent::llm::client: 聊天记录已清空
+2026-06-11T06:40:18.203559Z  INFO bn_agent::llm::client: 聊天记录数据库: E:\BN_agent\bn-core\data\chat_history.db
+2026-06-11T06:40:18.207165Z  INFO bn_agent: AsrTtsPlugin 初始化完成 target="asr-tts"
+2026-06-11T06:40:18.207328Z  INFO bn_agent: AsrTtsPlugin 已启动 target="asr-tts"
+2026-06-11T06:40:18.207480Z  INFO bn_agent: TTS: model=mimo-v2.5-tts-voicedesign, base_url=https://token-plan-cn.xiaomimimo.com/v1 target="asr-tts"
+2026-06-11T06:40:18.207714Z  INFO bn_agent: 已注册工具: tts target="asr-tts"
+2026-06-11T06:40:18.207853Z  INFO bn_agent::models::plugin_loader: 已加载插件: asr-tts-plugin
+2026-06-11T06:40:18.210376Z  INFO bn_agent: TgImPlugin 初始化完成 target="tg-im"
+2026-06-11T06:40:18.211513Z  INFO bn_agent: TgImPlugin 已启动 target="tg-im"
+2026-06-11T06:40:18.211951Z  INFO bn_agent: 已注册工具: send_voice target="tg-im"
+2026-06-11T06:40:18.212216Z  INFO bn_agent::models::plugin_loader: 已加载插件: tg-im-plugin
+2026-06-11T06:40:18.212637Z  INFO bn_agent: 配置代理: http://127.0.0.1:10808 target="tg-im"
+2026-06-11T06:40:18.212939Z  INFO bn_agent: TimePlugin 初始化 (API: GET /v1/time) target="time"
+2026-06-11T06:40:18.213205Z  INFO bn_agent: TimePlugin 已启动 target="time"
+2026-06-11T06:40:18.213345Z  INFO bn_agent::models::plugin_loader: 已加载插件: time
+2026-06-11T06:40:18.213705Z  INFO bn_agent: 已加载 3 个插件
+2026-06-11T06:40:18.213860Z  INFO bn_agent::models::event_bus: 已注册回调 (共 1 个)
+2026-06-11T06:40:18.214118Z DEBUG bn_agent: [EventBus] 收到事件: SystemEvent
+2026-06-11T06:40:18.214368Z DEBUG bn_agent: 收到事件: PluginNotification target="tg-im"
+2026-06-11T06:40:18.214541Z DEBUG bn_agent: 收到事件: PluginNotification target="time"
+2026-06-11T06:40:18.214702Z  INFO bn_agent: BN Agent 运行中，按 Ctrl+C 退出...
+2026-06-11T06:40:18.214904Z  INFO bn_agent::api: HTTP API 启动: http://0.0.0.0:3000/v1
+2026-06-11T06:40:18.216539Z  INFO actix_server::builder: starting 16 workers
+2026-06-11T06:40:18.216890Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
+2026-06-11T06:40:18.217093Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:3000", workers: 16, listening on: 0.0.0.0:3000
+2026-06-11T06:40:19.071643Z  INFO bn_agent: Bot @Qiyue20_Bot 已连接 target="tg-im"

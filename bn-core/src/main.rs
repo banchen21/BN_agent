@@ -119,6 +119,7 @@ fn main() -> std::io::Result<()> {
         let llm_for_cb = llm_addr.clone();
         let pm_for_cb = plugin_manager.clone();
         let tool_registry_for_cb = tool_registry.clone();
+        let api_snap = snapshots_for_cb.clone(); // ← 必须在 event_bus.send move 之前
         event_bus
             .send(RegisterCallback(Arc::new(move |event: &AgentEvent| -> bool {
                 match event.event_type {
@@ -364,7 +365,7 @@ fn main() -> std::io::Result<()> {
         let api_tr = tool_registry.clone();
         let api_llm = llm_addr.clone().unwrap_or_else(|| panic!("LLM 未初始化"));
         let _server_handle = actix_rt::spawn(async move {
-            if let Err(e) = api::start_server(api_pm, api_llm, api_tr).await {
+            if let Err(e) = api::start_server(api_pm, api_llm, api_tr, api_snap).await {
                 tracing::error!("API server 错误: {}", e);
             }
         });
