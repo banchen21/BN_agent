@@ -80,6 +80,13 @@ impl LlmActor {
         }
         let store = ChatStore::open(db_path.to_str().unwrap_or("data/chat_history.db"))?;
 
+        // TODO: 未发布版本前保留,启动时清空历史聊天记录
+        if let Err(e) = store.clear_all() {
+            tracing::warn!("清空聊天记录失败: {}", e);
+        } else {
+            tracing::info!("聊天记录已清空");
+        }
+
         tracing::info!("聊天记录数据库: {}", db_path.display());
         Ok(Self { config, client, store })
     }

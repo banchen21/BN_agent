@@ -21,9 +21,9 @@ pub struct AsrTtsPlugin {
     tts_base_url: String,
     tts_model: String,
     tts_api_key: String,
-    /// TTS voice reference 音频文件路径（base64 编码后传给 API）
-    tts_voice_ref_b64: Option<String>,
-    /// TTS 音色描述（voicedesign 模型使用）
+    /// TTS 预置音色名（mimo-v2.5-tts 模式）
+    tts_voice: String,
+    /// TTS 音色描述 / 角色提示词（user message 风格控制）
     tts_voice_desc: String,
     http_client: reqwest::Client,
 }
@@ -43,23 +43,9 @@ impl AsrTtsPlugin {
             .or_else(|_| std::env::var("LLM_BASE_URL"))
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
         let tts_model = std::env::var("TTS_MODEL").unwrap_or_else(|_| "tts-1".into());
+        let tts_voice = std::env::var("TTS_VOICE").unwrap_or_else(|_| "mimo_default".into());
         let tts_voice_desc = std::env::var("TTS_VOICE_DESC")
-            .unwrap_or_else(|_| "用自然流畅的中文女声播报，语速适中，声音清晰温暖。".into());
-
-        // 读取 voice reference 音频文件并 base64 编码
-        let tts_voice_ref_b64 = std::env::var("TTS_VOICE_REF").ok().and_then(|path| {
-            match std::fs::read(&path) {
-                Ok(data) => {
-                    let b64 = base64_encode(&data);
-                    eprintln!("[asr-tts] 已加载 voice_ref: {} ({} bytes)", path, data.len());
-                    Some(b64)
-                }
-                Err(e) => {
-                    eprintln!("[asr-tts] 警告: 无法读取 TTS_VOICE_REF '{}': {}", path, e);
-                    None
-                }
-            }
-        });
+            .unwrap_or_else(|_| "你是小月，一个元气满满的 AI 助手。声音干净明亮。".into());
 
         Self {
             meta: PluginMeta {
@@ -76,7 +62,7 @@ impl AsrTtsPlugin {
             tts_base_url,
             tts_model,
             tts_api_key,
-            tts_voice_ref_b64,
+            tts_voice,
             tts_voice_desc,
             http_client: reqwest::Client::builder().build().unwrap_or_default(),
         }
@@ -111,7 +97,7 @@ impl Plugin for AsrTtsPlugin {
                 let tts_base_url = self.tts_base_url.clone();
                 let tts_model = self.tts_model.clone();
                 let tts_api_key = self.tts_api_key.clone();
-                let tts_voice_ref_b64 = self.tts_voice_ref_b64.clone();
+                let tts_voice = self.tts_voice.clone();
                 let tts_voice_desc = self.tts_voice_desc.clone();
                 let logger = ctx.logger.clone();
 
@@ -123,7 +109,7 @@ impl Plugin for AsrTtsPlugin {
                         tts_base_url,
                         tts_model,
                         tts_api_key,
-                        tts_voice_ref_b64,
+                        tts_voice,
                         tts_voice_desc,
                         logger,
                     }));
@@ -272,7 +258,7 @@ impl AsrTtsPlugin {
         let tts_base_url = self.tts_base_url.clone();
         let tts_model = self.tts_model.clone();
         let tts_api_key = self.tts_api_key.clone();
-        let tts_voice_ref = self.tts_voice_ref_b64.clone();
+        let tts_voice = self.tts_voice.clone();
         let tts_voice_desc = self.tts_voice_desc.clone();
         let emitter = match self.emitter() {
             Some(e) => Arc::clone(e),
@@ -283,7 +269,7 @@ impl AsrTtsPlugin {
         let source_owned = source.to_string();
 
         tokio::spawn(async move {
-            match do_tts(&client, &tts_base_url, &tts_model, &tts_api_key, &text, tts_voice_ref.as_deref(), &tts_voice_desc).await {
+            match do_tts(&client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, &tts_voice_desc).await {
                 Ok(audio_data) => {
                     if let Some(ref log) = logger {
                         log.log(plugin_core::LogLevel::Debug, "asr-tts",
@@ -399,7 +385,7 @@ async fn do_tts(
     model: &str,
     api_key: &str,
     text: &str,
-    voice_ref_b64: Option<&str>,
+    voice: &str,
     voice_desc: &str,
 ) -> Result<Vec<u8>, String> {
     if api_key.is_empty() {
@@ -411,19 +397,18 @@ async fn do_tts(
     // 检测模型类型
     let is_voiceclone = model.contains("voiceclone");
     let is_voicedesign = model.contains("voicedesign");
+    let is_preset = !is_voiceclone && !is_voicedesign;
 
     // 构建 messages
     let mut messages = Vec::new();
 
     // user message: 音色描述或风格指令
-    let voice_desc = if is_voiceclone {
-        // voiceclone 模式：user message 可为空（音色由音频样本决定）
-        ""
-    } else if is_voicedesign {
-        // voicedesign 模式：使用配置的音色描述
+    //   - preset 模式：用角色提示词控制风格（参照 mc-ai-buddy 的做法）
+    //   - voicedesign 模式：用描述文本设计音色
+    //   - voiceclone 模式：可为空（音色由音频样本决定）
+    let voice_desc = if is_preset || is_voicedesign {
         voice_desc
     } else {
-        // 预置音色模式：user message 可选，用于风格控制
         ""
     };
     messages.push(serde_json::json!({
@@ -437,22 +422,19 @@ async fn do_tts(
         "content": text
     }));
 
-    // 构建 audio 参数（根据模型类型决定是否设置 voice 字段）
+    // 构建 audio 参数
     let mut audio = serde_json::json!({
-        "format": "opus",
+        "format": "wav",
     });
 
     if is_voiceclone {
-        if let Some(ref ref_b64) = voice_ref_b64 {
-            audio["voice"] = serde_json::json!(format!("data:audio/wav;base64,{}", ref_b64));
-        } else {
-            return Err("voiceclone 模型需要 TTS_VOICE_REF 音频参考文件".into());
-        }
+        // voiceclone 模式：需要传入 base64 音频样本
+        return Err("voiceclone 模式暂不支持，请使用 mimo-v2.5-tts 预设音色模式".into());
     } else if is_voicedesign {
-        // voicedesign 模型：audio 中不设置 voice，音色由 user message 描述决定
-    } else {
-        // 预置音色模型 (mimo-v2.5-tts)：使用预置音色名
-        audio["voice"] = serde_json::json!("mimo_default");
+        // voicedesign 模式：audio 中不设 voice，音色由 user message 描述决定
+    } else if is_preset {
+        // 预置音色模式：使用配置的预置音色名
+        audio["voice"] = serde_json::json!(voice);
     }
 
     let body = serde_json::json!({
@@ -496,7 +478,7 @@ struct TtsTool {
     tts_base_url: String,
     tts_model: String,
     tts_api_key: String,
-    tts_voice_ref_b64: Option<String>,
+    tts_voice: String,
     tts_voice_desc: String,
     logger: Option<Arc<dyn plugin_core::LogCallback>>,
 }
@@ -534,7 +516,7 @@ impl ToolExecutor for TtsTool {
         let tts_base_url = self.tts_base_url.clone();
         let tts_model = self.tts_model.clone();
         let tts_api_key = self.tts_api_key.clone();
-        let tts_voice_ref = self.tts_voice_ref_b64.clone();
+        let tts_voice = self.tts_voice.clone();
         let tts_voice_desc = self.tts_voice_desc.clone();
         let logger = self.logger.clone();
 
@@ -546,7 +528,7 @@ impl ToolExecutor for TtsTool {
                 .expect("无法创建 tokio runtime");
 
             rt.block_on(async {
-                match do_tts(&http_client, &tts_base_url, &tts_model, &tts_api_key, &text, tts_voice_ref.as_deref(), &tts_voice_desc).await {
+                match do_tts(&http_client, &tts_base_url, &tts_model, &tts_api_key, &text, &tts_voice, &tts_voice_desc).await {
                     Ok(audio_data) => {
                         if let Some(ref log) = logger {
                             log.log(

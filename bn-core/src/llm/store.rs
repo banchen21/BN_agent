@@ -95,4 +95,11 @@ impl ChatStore {
             .join("data")
             .join("chat_history.db")
     }
+
+    /// 清空所有聊天记录（启动时调用）
+    pub fn clear_all(&self) -> Result<usize, String> {
+        let n = self.conn.execute("DELETE FROM chat_history", [])
+            .map_err(|e| format!("清空失败: {}", e))?;
+        Ok(n)
+    }
 }

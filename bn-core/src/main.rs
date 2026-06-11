@@ -153,12 +153,11 @@ fn main() -> std::io::Result<()> {
                                     }
                                 };
 
-                                // 第一次 LLM 调用（有工具时启用 json_mode）
-                                let has_tools = !tools.is_empty();
+                                // 第一次 LLM 调用（原生 tool calling，不需要 json_mode）
                                 let req = ChatRequest {
                                     chat_id: chat_id.unwrap_or(0),
                                     message: text.clone(),
-                                    json_mode: has_tools,
+                                    json_mode: false,
                                     tools: tools.clone(),
                                 };
 
@@ -197,11 +196,20 @@ fn main() -> std::io::Result<()> {
 
                                     // 先收集工具执行器（克隆 Arc 后释放锁），再执行。
                                     // 避免跨插件工具调用（如 send_voice → tts）时发生 Mutex 死锁。
+                                    // 同时把真实的 chat_id 注入工具参数，LLM 不需要知道 chat_id
+                                    let real_chat_id = chat_id.unwrap_or(0);
                                     let executors: Vec<(String, Arc<dyn plugin_core::ToolExecutor>, serde_json::Value)> = {
                                         match tool_registry.lock() {
                                             Ok(reg) => resp.tool_calls.iter().filter_map(|tc| {
-                                                reg.get_executor(&tc.name)
-                                                    .map(|e| (tc.id.clone(), e, tc.arguments.clone()))
+                                                reg.get_executor(&tc.name).map(|e| {
+                                                    // 注入真实 chat_id
+                                                    let mut args = tc.arguments.clone();
+                                                    if let serde_json::Value::Object(ref mut map) = args {
+                                                        map.entry("chat_id")
+                                                            .or_insert(serde_json::json!(real_chat_id));
+                                                    }
+                                                    (tc.id.clone(), e, args)
+                                                })
                                             }).collect(),
                                             Err(_) => vec![],
                                         }
@@ -209,11 +217,16 @@ fn main() -> std::io::Result<()> {
 
                                     let tool_results: Vec<(String, String)> = executors.into_iter().map(
                                         |(id, executor, args)| {
+                                            let name = executor.def().name.clone();
+                                            tracing::info!("[LLM] 执行工具: {} (id={})", name, id);
                                             let result = executor.execute(&args);
                                             let text = if result.success {
+                                                tracing::info!("[LLM] 工具完成: {} → {}", name, result.content);
                                                 result.content
                                             } else {
-                                                format!("错误: {}", result.error.as_deref().unwrap_or("未知错误"))
+                                                let err = format!("错误: {}", result.error.as_deref().unwrap_or("未知错误"));
+                                                tracing::warn!("[LLM] 工具失败: {} → {}", name, err);
+                                                err
                                             };
                                             (id, text)
                                         }

@@ -208,16 +208,12 @@ impl ToolExecutor for SendVoiceTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {
-                        "type": "integer",
-                        "description": "目标 Telegram 聊天 ID"
-                    },
                     "text": {
                         "type": "string",
                         "description": "要转为语音并发送的文本内容"
                     }
                 },
-                "required": ["chat_id", "text"]
+                "required": ["text"]
             }),
         });
         &DEF
@@ -302,7 +298,7 @@ impl ToolExecutor for SendVoiceTool {
                     Some(ref h) => match h.send_voice(chat_id, audio_data).await {
                         Ok(()) => ToolResult::ok(&format!(
                             "语音消息已发送: {}",
-                            &text[..text.len().min(50)]
+                            text
                         )),
                         Err(e) => ToolResult::err(&format!("发送语音失败: {}", e)),
                     },
