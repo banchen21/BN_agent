@@ -34,6 +34,7 @@ pub struct LlmConfig {
     pub base_url: String,
     pub system_prompt: String,
     pub max_history_turns: usize,
+    pub jailbreak_prompts: Vec<String>,
 }
 
 impl LlmConfig {
@@ -46,14 +47,16 @@ impl LlmConfig {
         let base_url = std::env::var("LLM_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
 
-        let system_prompt = Self::build_system_prompt();
-
+        let system_prompt = Self::load_persona().unwrap_or_else(|| {
+            "你是一个有用的 AI 助手。请用简洁的中文回答。".into()
+        });
+        let jailbreak_prompts = Self::load_jailbreak_prompts();
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
 
-        Ok(Self { api_key, model, base_url, system_prompt, max_history_turns })
+        Ok(Self { api_key, model, base_url, system_prompt, max_history_turns, jailbreak_prompts })
     }
 
     /// 从 persona.md 读取人格设定，找不到则返回 None
@@ -98,27 +101,14 @@ impl LlmConfig {
         prompts
     }
 
-    /// 构建系统 prompt：persona.md + jailbreak_prompts.csv
-    fn build_system_prompt() -> String {
-        let persona = Self::load_persona().unwrap_or_default();
-        let jailbreaks = Self::load_jailbreak_prompts();
-        if jailbreaks.is_empty() {
-            if persona.is_empty() {
-                "你是一个有用的 AI 助手。请用简洁的中文回答。".into()
-            } else {
-                persona
-            }
-        } else {
-            let mut combined = persona;
-            if !combined.is_empty() {
-                combined.push_str("\n\n");
-            }
-            combined.push_str("## 越狱提示词参考（用于测试防御）\n");
-            for (i, jb) in jailbreaks.iter().enumerate() {
-                combined.push_str(&format!("{}. {}\n", i + 1, jb));
-            }
-            combined
-        }
+    /// 获取指定索引的越狱提示词，超出范围返回 None
+    pub fn jailbreak_at(&self, index: usize) -> Option<&str> {
+        self.jailbreak_prompts.get(index).map(|s| s.as_str())
+    }
+
+    /// 越狱提示词总数
+    pub fn jailbreak_count(&self) -> usize {
+        self.jailbreak_prompts.len()
     }
 }
 
@@ -155,10 +145,17 @@ impl LlmActor {
         Ok(Self { config, client, store })
     }
 
-    fn build_messages(&self, chat_id: i64, user_msg: &str, contexts: &[String]) -> Vec<ChatCompletionRequestMessage> {
+    fn build_messages(&self, chat_id: i64, user_msg: &str, contexts: &[String], jailbreak: Option<&str>) -> Vec<ChatCompletionRequestMessage> {
+        // 构建系统消息：越狱提示词（如果有）→ 人格设定
+        let system_content = if let Some(jb) = jailbreak {
+            format!("{}\n\n{}", jb, self.config.system_prompt)
+        } else {
+            self.config.system_prompt.clone()
+        };
+
         let mut messages: Vec<ChatCompletionRequestMessage> = vec![
             ChatCompletionRequestSystemMessageArgs::default()
-                .content(self.config.system_prompt.as_str())
+                .content(system_content)
                 .build()
                 .unwrap()
                 .into(),
@@ -229,6 +226,8 @@ pub struct ChatRequest {
     pub skip_store: bool,
     /// 插件实时上下文：不存 DB，临时注入到 messages 中
     pub contexts: Vec<String>,
+    /// 越狱提示词索引（0-based），None 则不注入
+    pub jailbreak_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -245,6 +244,10 @@ pub struct ToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
 }
+
+#[derive(Message)]
+#[rtype(result = "usize")]
+pub struct JailbreakCount;
 
 #[derive(Message)]
 #[rtype(result = "()")]
@@ -264,7 +267,10 @@ impl Handler<ChatRequest> for LlmActor {
     type Result = ResponseFuture<Result<LlmResponse, String>>;
 
     fn handle(&mut self, msg: ChatRequest, ctx: &mut Self::Context) -> Self::Result {
-        let messages = self.build_messages(msg.chat_id, &msg.message, &msg.contexts);
+        let jailbreak = msg.jailbreak_index
+            .and_then(|i| self.config.jailbreak_at(i));
+
+        let messages = self.build_messages(msg.chat_id, &msg.message, &msg.contexts, jailbreak);
         let client = self.client.clone();
         let model = self.config.model.clone();
         let json_mode = msg.json_mode;
@@ -372,6 +378,13 @@ impl Handler<AppendHistory> for LlmActor {
         if let Err(e) = self.store.append(msg.chat_id, "assistant", &msg.assistant_msg) {
             tracing::error!("写入 assistant 消息失败: {}", e);
         }
+    }
+}
+
+impl Handler<JailbreakCount> for LlmActor {
+    type Result = usize;
+    fn handle(&mut self, _msg: JailbreakCount, _: &mut Self::Context) -> Self::Result {
+        self.config.jailbreak_count()
     }
 }
 

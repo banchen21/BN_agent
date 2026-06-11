@@ -80,6 +80,7 @@ async fn chat(
         tools,
         skip_store: false,
         contexts,
+        jailbreak_index: None,
     };
 
     match llm.send(req).await {

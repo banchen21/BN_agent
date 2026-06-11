@@ -4,7 +4,7 @@
 use actix::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::models::llm::client::{ChatRequest, LlmActor};
+use crate::models::llm::client::{ChatRequest, LlmActor, JailbreakCount};
 use crate::models::event_bus::BusEmitter;
 use crate::models::plugin_loader::{BroadcastEvent, PluginManager};
 use plugin_core::{
@@ -43,7 +43,7 @@ pub async fn handle_user_message(
 
     let cid = chat_id.unwrap_or(0);
 
-    // 第一次 LLM 调用
+    // 首次 LLM 调用（不带越狱提示词）
     let req = ChatRequest {
         chat_id: cid,
         message: text.to_string(),
@@ -51,6 +51,7 @@ pub async fn handle_user_message(
         tools: tools.clone(),
         skip_store: false,
         contexts,
+        jailbreak_index: None,
     };
 
     let resp = match llm.send(req).await {
@@ -106,23 +107,34 @@ pub async fn handle_user_message(
         tracing::info!("[LLM] 回复: {} | 缓存命中: {} tokens", preview, resp.cache_hit_tokens);
 
         let reply_text = if resp.content.trim().is_empty() && resp.cache_hit_tokens > 0 {
-            // DeepSeek 缓存命中导致空回复，重试一次（不带工具、不存DB）
-            tracing::warn!("[LLM] 空回复（缓存命中 {} tokens），重试中...", resp.cache_hit_tokens);
-            let retry_req = ChatRequest {
-                chat_id: cid,
-                message: text.to_string(),
-                json_mode: false,
-                tools: vec![],
-                skip_store: true,
-                contexts: vec![],
-            };
-            match llm.send(retry_req).await {
-                Ok(Ok(r)) => {
-                    tracing::info!("[LLM] 重试回复: {}", r.content.chars().take(80).collect::<String>());
-                    r.content
+            // DeepSeek 缓存命中导致空回复，用越狱提示词重试
+            tracing::warn!("[LLM] 空回复（缓存命中 {} tokens），用越狱提示词重试...", resp.cache_hit_tokens);
+            let total = jailbreak_count(llm).await;
+            for i in 0..total {
+                let retry_req = ChatRequest {
+                    chat_id: cid,
+                    message: text.to_string(),
+                    json_mode: false,
+                    tools: vec![],
+                    skip_store: true,
+                    contexts: vec![],
+                    jailbreak_index: Some(i),
+                };
+                match llm.send(retry_req).await {
+                    Ok(Ok(r)) if !r.content.trim().is_empty() => {
+                        tracing::info!("[LLM] 越狱重试({}/{}) 成功", i + 1, total);
+                        emit_reply(cid, &r.content, source, emitter, pm).await;
+                        return;
+                    }
+                    Ok(Ok(_)) => {
+                        tracing::info!("[LLM] 越狱重试({}/{}) 仍为空，继续", i + 1, total);
+                    }
+                    _ => {
+                        tracing::warn!("[LLM] 越狱重试({}/{}) 失败", i + 1, total);
+                    }
                 }
-                _ => String::new(),
             }
+            String::new()
         } else {
             resp.content
         };
@@ -131,6 +143,11 @@ pub async fn handle_user_message(
             emit_reply(cid, &reply_text, source, emitter, pm).await;
         }
     }
+}
+
+/// 查询 LLM Actor 的越狱提示词总数
+async fn jailbreak_count(llm: &Addr<LlmActor>) -> usize {
+    llm.send(JailbreakCount).await.unwrap_or(0)
 }
 
 /// 广播 AssistantMessage
