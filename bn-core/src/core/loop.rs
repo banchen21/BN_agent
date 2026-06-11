@@ -104,7 +104,32 @@ pub async fn handle_user_message(
         // 无工具调用，直接回复
         let preview: String = resp.content.chars().take(80).collect();
         tracing::info!("[LLM] 回复: {} | 缓存命中: {} tokens", preview, resp.cache_hit_tokens);
-        emit_reply(cid, &resp.content, source, emitter, pm).await;
+
+        let reply_text = if resp.content.trim().is_empty() && resp.cache_hit_tokens > 0 {
+            // DeepSeek 缓存命中导致空回复，重试一次（不带工具、不存DB）
+            tracing::warn!("[LLM] 空回复（缓存命中 {} tokens），重试中...", resp.cache_hit_tokens);
+            let retry_req = ChatRequest {
+                chat_id: cid,
+                message: text.to_string(),
+                json_mode: false,
+                tools: vec![],
+                skip_store: true,
+                contexts: vec![],
+            };
+            match llm.send(retry_req).await {
+                Ok(Ok(r)) => {
+                    tracing::info!("[LLM] 重试回复: {}", r.content.chars().take(80).collect::<String>());
+                    r.content
+                }
+                _ => String::new(),
+            }
+        } else {
+            resp.content
+        };
+
+        if !reply_text.trim().is_empty() {
+            emit_reply(cid, &reply_text, source, emitter, pm).await;
+        }
     }
 }
 

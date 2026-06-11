@@ -291,11 +291,13 @@ impl Handler<ChatRequest> for LlmActor {
                 })
                 .unwrap_or_default();
 
-            let _ = self_addr.send(AppendHistory {
-                chat_id,
-                user_msg,
-                assistant_msg: content.clone(),
-            }).await;
+            if !msg.skip_store && !content.trim().is_empty() {
+                let _ = self_addr.send(AppendHistory {
+                    chat_id,
+                    user_msg,
+                    assistant_msg: content.clone(),
+                }).await;
+            }
 
             Ok(LlmResponse {
                 content,
