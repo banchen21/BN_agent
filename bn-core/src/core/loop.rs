@@ -4,9 +4,9 @@
 use actix::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::llm::client::{ChatRequest, LlmActor, LlmConfig};
+use crate::llm::client::{ChatRequest, LlmActor};
 use crate::models::event_bus::BusEmitter;
-use crate::models::plugin_loader::{BroadcastEvent, PluginManager, RefreshSnapshots};
+use crate::models::plugin_loader::{BroadcastEvent, PluginManager};
 use plugin_core::{
     AgentEvent, EventEmitter, EventSource, EventType, ToolRegistry,
 };

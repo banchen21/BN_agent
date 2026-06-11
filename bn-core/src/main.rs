@@ -2,9 +2,8 @@
 
 mod models { pub mod event_bus; pub mod plugin_loader; }
 mod llm;
+mod core;
 mod api_server;
-mod core_loop;
-mod runtime;
 mod logger;
 
 fn main() -> std::io::Result<()> {
@@ -20,5 +19,7 @@ fn main() -> std::io::Result<()> {
     }
 
     logger::init();
+    use crate::core::runtime;
+
     runtime::run()
 }
