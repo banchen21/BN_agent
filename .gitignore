@@ -2,3 +2,4 @@
 .env
 **/.env
 bn-core/logs/bn-agent.log
+bn-core/logs/bn-agent.log
