@@ -66,6 +66,11 @@ impl ToolRegistry {
         self.executors.get(name).map(|e| e.execute(args))
     }
 
+    /// 获取工具的 Arc 克隆，释放锁后可安全执行（避免跨插件工具调用死锁）
+    pub fn get_executor(&self, name: &str) -> Option<Arc<dyn ToolExecutor>> {
+        self.executors.get(name).cloned()
+    }
+
     pub fn unregister(&mut self, name: &str) {
         self.executors.remove(name);
     }

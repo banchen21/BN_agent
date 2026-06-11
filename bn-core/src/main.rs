@@ -195,25 +195,29 @@ fn main() -> std::io::Result<()> {
                                             .join(", ")
                                     );
 
-                                    // 执行工具调用
-                                    let tool_results: Vec<(String, String)> = {
+                                    // 先收集工具执行器（克隆 Arc 后释放锁），再执行。
+                                    // 避免跨插件工具调用（如 send_voice → tts）时发生 Mutex 死锁。
+                                    let executors: Vec<(String, Arc<dyn plugin_core::ToolExecutor>, serde_json::Value)> = {
                                         match tool_registry.lock() {
-                                            Ok(reg) => resp.tool_calls.iter().map(|tc| {
-                                                let result = match reg.execute(&tc.name, &tc.arguments) {
-                                                    Some(r) => {
-                                                        if r.success {
-                                                            r.content.clone()
-                                                        } else {
-                                                            format!("错误: {}", r.error.as_deref().unwrap_or("未知错误"))
-                                                        }
-                                                    }
-                                                    None => format!("工具 '{}' 未找到", tc.name),
-                                                };
-                                                (tc.id.clone(), result)
+                                            Ok(reg) => resp.tool_calls.iter().filter_map(|tc| {
+                                                reg.get_executor(&tc.name)
+                                                    .map(|e| (tc.id.clone(), e, tc.arguments.clone()))
                                             }).collect(),
                                             Err(_) => vec![],
                                         }
                                     };
+
+                                    let tool_results: Vec<(String, String)> = executors.into_iter().map(
+                                        |(id, executor, args)| {
+                                            let result = executor.execute(&args);
+                                            let text = if result.success {
+                                                result.content
+                                            } else {
+                                                format!("错误: {}", result.error.as_deref().unwrap_or("未知错误"))
+                                            };
+                                            (id, text)
+                                        }
+                                    ).collect();
 
                                     // 构建 tool 结果消息，再次调用 LLM
                                     // 注意：这里简化处理，不维护完整的消息历史用于 tool calling

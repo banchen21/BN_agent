@@ -238,17 +238,20 @@ impl ToolExecutor for SendVoiceTool {
         }
 
         // 1. 通过 ToolRegistry 调用 asr-tts-plugin 的 tts 工具
+        //    先获取 executor 克隆再释放锁，避免与 main.rs 死锁
         let tts_args = serde_json::json!({ "text": text });
-        let tts_result = {
+        let tts_executor = {
             let registry = match self.tool_registry.lock() {
                 Ok(r) => r,
                 Err(e) => return ToolResult::err(&format!("ToolRegistry 锁失败: {}", e)),
             };
-            match registry.execute("tts", &tts_args) {
-                Some(r) => r,
+            match registry.get_executor("tts") {
+                Some(e) => e,
                 None => return ToolResult::err("tts 工具未注册，请确保 asr-tts-plugin 已加载"),
             }
-        };
+        }; // 锁在此处释放
+
+        let tts_result = tts_executor.execute(&tts_args);
 
         if !tts_result.success {
             return ToolResult::err(&format!(
