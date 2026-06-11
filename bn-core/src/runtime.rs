@@ -3,7 +3,7 @@
 use actix::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::api;
+use crate::api_server;
 use crate::core_loop;
 use crate::llm::client::{LlmActor, LlmConfig};
 use crate::models::event_bus::{BusEmitter, EventBus, EmitEvent, RegisterCallback};
@@ -195,7 +195,7 @@ fn start_api_server(
     let api_llm = llm_addr.unwrap_or_else(|| panic!("LLM 未初始化"));
     let api_pm = pm;
     actix_rt::spawn(async move {
-        if let Err(e) = api::start_server(api_pm, api_llm, tool_registry, snapshots).await {
+        if let Err(e) = api_server::start_server(api_pm, api_llm, tool_registry, snapshots).await {
             tracing::error!("API server 错误: {}", e);
         }
     });

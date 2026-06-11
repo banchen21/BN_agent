@@ -2,7 +2,7 @@
 
 mod models { pub mod event_bus; pub mod plugin_loader; }
 mod llm;
-mod api;
+mod api_server;
 mod core_loop;
 mod runtime;
 mod logger;
