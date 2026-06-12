@@ -28,6 +28,7 @@ mod cancellation_actor;
 mod chat_store;
 mod claude_backend;
 mod llm_actor;
+
 mod metrics_actor;
 mod pipeline;
 mod plugin_manager;
@@ -452,7 +453,7 @@ fn main() -> std::io::Result<()> {
             // OpenAI 兼容后端（默认）
             let (llm_rec, chat_rec) = match LlmConfig::from_env() {
                 Ok(config) => {
-                    let addr = LlmActor::new(config, event_bus.clone(), store_addr).start();
+                    let addr = LlmActor::new(config, event_bus.clone(), store_addr.clone()).start();
                     log::info!("LlmActor started");
                     let llm_rec: Recipient<LlmRequest> = addr.clone().recipient();
                     let chat_rec: Recipient<ChatRequest> = addr.clone().recipient();
@@ -525,6 +526,7 @@ fn main() -> std::io::Result<()> {
                 tu.clone(),
                 metrics.clone(),
                 cancel.clone(),
+                store_addr.clone(),
             );
             let pipeline_addr = pipeline.start();
             log::info!("PipelineActor started");

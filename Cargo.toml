@@ -16,6 +16,8 @@ members = [
     "plugins/image-plugin",
     "plugins/video-plugin",
     "plugins/mcp-plugin",
+    "plugins/skill-plugin",
+    "plugins/proactive-plugin",
 ]
 resolver = "2"
 

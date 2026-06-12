@@ -1,16 +1,74 @@
-//! ChatStore — SQLite-backed chat history for multi-turn LLM conversations.
+//! ChatStoreActor — actix actor wrapping SQLite-backed chat history.
 //!
 //! Each row is keyed by `(chat_id, timestamp)` and stores role + content.
-//! The store supports append, recent (last N turns), clear (per chat_id), and clear_all.
+//!
+//! ## Messages
+//!
+//! | Message             | Response           | Description                    |
+//! |---------------------|--------------------|--------------------------------|
+//! | `FetchRecent`       | `Vec<Record>`      | Load recent N records          |
+//! | `AppendRecord`      | `()`               | Insert one message             |
+//! | `AppendPair`        | `()`               | Insert user + assistant pair   |
+//! | `ClearSession`      | `usize`            | Delete all records for chat_id |
+//! | `ClearAll`          | `usize`            | Delete all records             |
 
+use actix::prelude::*;
 use rusqlite::{params, Connection, Result as SqlResult};
 
-pub struct ChatStore {
+// ── Records ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub role: String,
+    pub content: String,
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+/// Fetch the most recent N records for a chat (oldest first).
+#[derive(Message)]
+#[rtype(result = "Vec<Record>")]
+pub struct FetchRecent {
+    pub chat_id: i64,
+    pub limit: usize,
+}
+
+/// Append a single message.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct AppendRecord {
+    pub chat_id: i64,
+    pub role: String,
+    pub content: String,
+}
+
+/// Append a user + assistant pair atomically.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct AppendPair {
+    pub chat_id: i64,
+    pub user_msg: String,
+    pub assistant_msg: String,
+}
+
+/// Clear all records for a chat_id.
+#[derive(Message)]
+#[rtype(result = "usize")]
+pub struct ClearSession(pub i64);
+
+/// Clear all records in the database.
+#[derive(Message)]
+#[rtype(result = "usize")]
+pub struct ClearAll;
+
+// ── Actor ────────────────────────────────────────────────────────────────────
+
+pub struct ChatStoreActor {
     conn: Connection,
 }
 
-impl ChatStore {
-    /// Open (or create) the SQLite database at `path`.
+impl ChatStoreActor {
+    /// Open or create the SQLite database.
     pub fn open(path: &str) -> SqlResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
@@ -27,55 +85,109 @@ impl ChatStore {
         Ok(Self { conn })
     }
 
-    /// Append a message (role = "user" or "assistant").
-    pub fn append(&self, chat_id: i64, role: &str, content: &str) -> SqlResult<()> {
-        self.conn.execute(
-            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, ?2, ?3)",
-            params![chat_id, role, content],
-        )?;
-        Ok(())
-    }
-
-    /// Return the most recent `limit` records for a chat_id, oldest first.
-    pub fn recent(&self, chat_id: i64, limit: usize) -> SqlResult<Vec<Record>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT role, content FROM chat_history
-             WHERE chat_id = ?1
-             ORDER BY id ASC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![chat_id, limit as i64], |row| {
-            Ok(Record {
-                role: row.get(0)?,
-                content: row.get(1)?,
-            })
-        })?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-        Ok(records)
-    }
-
-    /// Delete all records for a chat_id.
-    pub fn clear(&self, chat_id: i64) -> SqlResult<usize> {
-        self.conn
-            .execute("DELETE FROM chat_history WHERE chat_id = ?1", params![chat_id])
-    }
-
-    /// Delete all records.
-    pub fn clear_all(&self) -> SqlResult<usize> {
-        self.conn.execute("DELETE FROM chat_history", [])
-    }
-
-    /// Return the database file path.
+    /// Default database file path.
     pub fn db_path() -> std::path::PathBuf {
         std::path::PathBuf::from("data/chat_history.db")
     }
 }
 
-#[derive(Debug)]
-pub struct Record {
-    pub role: String,
-    pub content: String,
+impl Actor for ChatStoreActor {
+    type Context = Context<Self>;
+
+    fn started(&mut self, _ctx: &mut Self::Context) {
+        log::info!("[ChatStoreActor] started");
+    }
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
+
+impl Handler<FetchRecent> for ChatStoreActor {
+    type Result = Vec<Record>;
+
+    fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT role, content FROM chat_history
+             WHERE chat_id = ?1
+             ORDER BY id ASC
+             LIMIT ?2"
+        ) else { return vec![]; };
+
+        let rows = stmt.query_map(params![msg.chat_id, msg.limit as i64], |row| {
+            Ok(Record {
+                role: row.get(0)?,
+                content: row.get(1)?,
+            })
+        });
+
+        match rows {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::error!("[ChatStoreActor] FetchRecent failed: {}", e);
+                vec![]
+            }
+        }
+    }
+}
+
+impl Handler<AppendRecord> for ChatStoreActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: AppendRecord, _ctx: &mut Self::Context) {
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, ?2, ?3)",
+            params![msg.chat_id, msg.role, msg.content],
+        ) {
+            log::error!("[ChatStoreActor] AppendRecord failed: {}", e);
+        }
+    }
+}
+
+impl Handler<AppendPair> for ChatStoreActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: AppendPair, _ctx: &mut Self::Context) {
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, 'user', ?2)",
+            params![msg.chat_id, msg.user_msg],
+        ) {
+            log::error!("[ChatStoreActor] AppendPair user failed: {}", e);
+        }
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, 'assistant', ?2)",
+            params![msg.chat_id, msg.assistant_msg],
+        ) {
+            log::error!("[ChatStoreActor] AppendPair assistant failed: {}", e);
+        }
+    }
+}
+
+impl Handler<ClearSession> for ChatStoreActor {
+    type Result = usize;
+
+    fn handle(&mut self, msg: ClearSession, _ctx: &mut Self::Context) -> Self::Result {
+        match self.conn.execute(
+            "DELETE FROM chat_history WHERE chat_id = ?1",
+            params![msg.0],
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("[ChatStoreActor] ClearSession failed: {}", e);
+                0
+            }
+        }
+    }
+}
+
+impl Handler<ClearAll> for ChatStoreActor {
+    type Result = usize;
+
+    fn handle(&mut self, _msg: ClearAll, _ctx: &mut Self::Context) -> Self::Result {
+        match self.conn.execute("DELETE FROM chat_history", []) {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("[ChatStoreActor] ClearAll failed: {}", e);
+                0
+            }
+        }
+    }
 }

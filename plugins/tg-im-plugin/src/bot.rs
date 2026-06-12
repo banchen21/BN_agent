@@ -60,7 +60,7 @@ impl BotHandle {
         // 尝试先直接发（假设内容已正确格式化），失败则转义后重发
         let result = self.bot
             .send_message(ChatId(chat_id), text)
-            .parse_mode(ParseMode::MarkdownV2)
+            .parse_mode(ParseMode::Markdown)
             .await;
 
         match result {
@@ -69,7 +69,7 @@ impl BotHandle {
                 let escaped = escape_md(text);
                 self.bot
                     .send_message(ChatId(chat_id), escaped)
-                    .parse_mode(ParseMode::MarkdownV2)
+                    .parse_mode(ParseMode::Markdown)
                     .await
                     .map_err(|e| format!("send_markdown failed: {}", e))?;
                 Ok(())
@@ -189,8 +189,8 @@ pub fn run_bot(
             // 验证连接。
             match bot.get_me().await {
                 Ok(me) => {
-                    eprintln!(
-                        "[tg-im] bot @{} connected",
+                    log::info!(
+                        "bot @{} connected",
                         me.username.as_deref().unwrap_or("unknown")
                     );
                 }
@@ -235,7 +235,7 @@ pub fn run_bot(
                         }
 
                         // ── 普通文本消息 → 发布事件 ──
-                        eprintln!("[tg-im] text from @{}: {}", user_name, text);
+                        log::info!("text from @{}: {}", user_name, text);
                         cb(chat_id, text, &user_name);
 
                         // 发送"正在输入..."状态

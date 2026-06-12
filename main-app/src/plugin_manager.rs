@@ -14,6 +14,19 @@ struct LoadedPlugin {
     path: String,
     instance: Box<dyn Plugin>,
     _library: libloading::Library,
+    tool_names: Vec<String>,
+}
+
+/// Snapshot all tool names currently in the registry.
+fn snapshot_tool_names(registry: &Arc<Mutex<ToolRegistry>>) -> Vec<String> {
+    registry.lock().ok().map(|r| r.all_defs().iter().map(|d| d.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Return tool names that appeared since `before` was taken.
+fn diff_tool_names(registry: &Arc<Mutex<ToolRegistry>>, before: &[String]) -> Vec<String> {
+    let now = snapshot_tool_names(registry);
+    now.into_iter().filter(|n| !before.contains(n)).collect()
 }
 
 // ── PluginManager actor ──────────────────────────────────────────────────────
@@ -35,7 +48,7 @@ impl PluginManager {
         tool_registry: Arc<Mutex<ToolRegistry>>,
         plugin_dir: String,
     ) -> Self {
-        Self {
+        let mut pm = Self {
             event_bus,
             llm_recipient,
             tool_registry,
@@ -43,7 +56,8 @@ impl PluginManager {
             snapshots: Arc::new(Mutex::new(Vec::new())),
             host_ctx: None,
             plugin_dir,
-        }
+        };
+        pm
     }
 
     pub fn snapshots_arc(&self) -> Arc<Mutex<Vec<String>>> {
@@ -132,18 +146,18 @@ impl Actor for PluginManager {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        log::info!("[PluginManager] actor started — scanning plugins...");
+        // Some plugins (e.g. claude-bridge-plugin) call Actor::start() for sub-actors.
+        // This must happen inside the actix runtime, not during new(),
+        // because Cdylib FFI boundary doesn't carry thread-local LocalSet.
+        self.auto_scan();
+        log::info!("[PluginManager] actor started — {} plugin(s) loaded", self.plugins.len());
 
         // Subscribe to ALL events on EventBus, forwarding to plugins via on_event().
-        // This is the only way DLL-based plugins can receive events (they can't
-        // start their own actix actors, which would need a different tokio runtime).
         self.event_bus.do_send(Subscribe {
             topic: "*".into(),
             recipient: ctx.address().recipient(),
         });
         log::info!("[PluginManager] subscribed to '*' on EventBus");
-
-        self.auto_scan();
     }
 
     fn stopping(&mut self, _ctx: &mut Self::Context) -> Running {
@@ -186,15 +200,19 @@ impl Handler<LoadPlugin> for PluginManager {
                     info.name, info.version, info.description
                 );
 
+                let tr_for_ctx = tool_registry.clone();
                 let ctx = PluginContext {
-                    event_bus,
+                    event_bus: event_bus.clone(),
                     plugin_name: plugin_name.clone(),
                     llm: llm_recipient,
-                    tool_registry: Some(tool_registry),
+                    tool_registry: Some(tr_for_ctx),
+                    logger: PluginLogger::new(event_bus.clone(), plugin_name.clone()),
                 };
+                let before = snapshot_tool_names(&tool_registry);
                 plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
+                let tool_names = diff_tool_names(&tool_registry, &before);
 
-                Ok(LoadedPlugin { info, path, instance: plugin, _library: library })
+                Ok(LoadedPlugin { info, path, instance: plugin, _library: library, tool_names })
             }
         }
         .into_actor(self)
@@ -220,6 +238,14 @@ impl Handler<UnloadPlugin> for PluginManager {
     fn handle(&mut self, msg: UnloadPlugin, _ctx: &mut Self::Context) -> Self::Result {
         match self.plugins.remove(&msg.name) {
             Some(mut loaded) => {
+                // Unregister tools before unloading.
+                {
+                    let mut reg = self.tool_registry.lock().unwrap();
+                    for name in &loaded.tool_names {
+                        reg.unregister(name);
+                        log::info!("[PluginManager] unregistered tool '{}'", name);
+                    }
+                }
                 log::info!("[PluginManager] stopping plugin '{}'", msg.name);
                 loaded.instance.stop();
                 unsafe {
@@ -258,6 +284,13 @@ impl Handler<ReloadPlugin> for PluginManager {
         };
 
         if let Some(mut loaded) = self.plugins.remove(&msg.name) {
+            // Unregister old tools before unloading.
+            {
+                let mut reg = self.tool_registry.lock().unwrap();
+                for name in &loaded.tool_names {
+                    reg.unregister(name);
+                }
+            }
             loaded.instance.stop();
             unsafe {
                 let destroy: libloading::Symbol<PluginDestroyFn> =
@@ -280,14 +313,18 @@ impl Handler<ReloadPlugin> for PluginManager {
                 let mut plugin: Box<dyn Plugin> = create();
                 let info = plugin.info();
                 let plugin_name = info.name.clone();
+                let tr_for_ctx = tool_registry.clone();
                 let ctx = PluginContext {
-                    event_bus,
+                    event_bus: event_bus.clone(),
                     plugin_name: plugin_name.clone(),
                     llm: llm_recipient,
-                    tool_registry: Some(tool_registry),
+                    tool_registry: Some(tr_for_ctx),
+                    logger: PluginLogger::new(event_bus.clone(), plugin_name.clone()),
                 };
+                let before = snapshot_tool_names(&tool_registry);
                 plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
-                Ok(LoadedPlugin { info, path, instance: plugin, _library: library })
+                let tool_names = diff_tool_names(&tool_registry, &before);
+                Ok(LoadedPlugin { info, path, instance: plugin, _library: library, tool_names })
             }
         }
         .into_actor(self)
@@ -366,6 +403,19 @@ impl Handler<ScanAndLoad> for PluginManager {
 impl Handler<Event> for PluginManager {
     type Result = ();
     fn handle(&mut self, event: Event, _ctx: &mut Self::Context) {
+        // Intercept plugin.log events and output via host logging.
+        if event.topic == "plugin.log" {
+            let level = event.data["level"].as_str().unwrap_or("info");
+            let plugin = event.data["plugin"].as_str().unwrap_or("plugin");
+            let message = event.data["message"].as_str().unwrap_or("");
+            match level {
+                "error" => log::error!("[{}] {}", plugin, message),
+                "warn"  => log::warn!("[{}] {}", plugin, message),
+                _       => log::info!("[{}] {}", plugin, message),
+            }
+            return;
+        }
+
         for loaded in self.plugins.values() {
             if !loaded.instance.on_event(&event) {
                 break;
@@ -415,6 +465,31 @@ impl Handler<ApiRequest> for PluginManager {
 
 // ── StopAll ──────────────────────────────────────────────────────────────────
 
+// ── GetLlmBackend ─────────────────────────────────────────────────────────
+
+#[derive(Message)]
+#[rtype(result = "Option<LlmBackend>")]
+pub struct GetLlmBackend;
+
+impl Handler<GetLlmBackend> for PluginManager {
+    type Result = Option<LlmBackend>;
+
+    fn handle(&mut self, _: GetLlmBackend, _ctx: &mut Self::Context) -> Self::Result {
+        for loaded in self.plugins.values() {
+            if let Some(backend) = loaded.instance.llm_backend() {
+                log::info!(
+                    "[PluginManager] LLM backend found: plugin={}",
+                    loaded.info.name
+                );
+                return Some(backend);
+            }
+        }
+        None
+    }
+}
+
+// ── StopAll ──────────────────────────────────────────────────────────────────
+
 impl Handler<StopAll> for PluginManager {
     type Result = ();
     fn handle(&mut self, _: StopAll, _ctx: &mut Self::Context) {
@@ -456,16 +531,20 @@ fn load_plugin_file(
         let info = plugin.info();
         let plugin_name = info.name.clone();
 
+        let tr_for_ctx = tool_registry.clone();
         let ctx = PluginContext {
-            event_bus,
-            plugin_name,
+            event_bus: event_bus.clone(),
+            plugin_name: plugin_name.clone(),
             llm: llm_recipient,
-            tool_registry: Some(tool_registry),
+            tool_registry: Some(tr_for_ctx),
+            logger: PluginLogger::new(event_bus.clone(), plugin_name.clone()),
         };
 
+        let before = snapshot_tool_names(&tool_registry);
         plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
+        let tool_names = diff_tool_names(&tool_registry, &before);
 
         let file_path = path.to_string_lossy().to_string();
-        Ok(LoadedPlugin { info, path: file_path, instance: plugin, _library: library })
+        Ok(LoadedPlugin { info, path: file_path, instance: plugin, _library: library, tool_names })
     }
 }

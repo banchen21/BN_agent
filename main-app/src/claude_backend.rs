@@ -105,15 +105,24 @@ impl Handler<ChatRequest> for ClaudeBridgeActor {
         let path = self.claude_path.clone();
         let user_msg = msg.message.clone();
 
-        // Read Claude session ID from env; passed via --resume so Claude
-        // manages its own session history natively.
         let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+
+        // Inject memory fragments + plugin contexts before user message.
+        let mut contexts: Vec<String> = Vec::new();
+        for ctx in &msg.contexts {
+            contexts.push(ctx.clone());
+        }
+        let contexts_prompt = if contexts.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", contexts.join("\n"))
+        };
 
         let tools_prompt = build_tools_system_prompt(&msg.tools);
         let prompt = if tools_prompt.is_empty() {
-            user_msg
+            format!("{}{}", contexts_prompt, user_msg)
         } else {
-            format!("{}\n\n{}", tools_prompt, user_msg)
+            format!("{}\n\n{}{}", tools_prompt, contexts_prompt, user_msg)
         };
 
         Box::pin(async move {
