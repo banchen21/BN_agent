@@ -15,21 +15,41 @@
 //! | POST   | `/api/chat`                  | Full chat with tools + history   |
 //! | GET    | `/api/tools`                 | List registered tools            |
 //! | POST   | `/api/tools/call`            | Call a tool directly             |
+//! | GET    | `/api/metrics`               | Prometheus-format metrics        |
+//! | GET    | `/api/metrics/json`          | JSON-format metrics              |
+//! | GET    | `/api/token-usage`           | Global token usage summary       |
+//! | GET    | `/api/token-usage/{chat_id}` | Per-chat token usage             |
+//! | POST   | `/api/cancel/{chat_id}`      | Cancel in-flight request         |
+//! | GET    | `/api/retry/state`           | Circuit breaker state            |
 //! | ANY    | `/api/plugin/{name}/{path:.*}` | Proxy to plugin API handler    |
 //! | POST   | `/api/shutdown`              | Graceful shutdown                |
 
+mod cancellation_actor;
 mod chat_store;
+mod claude_backend;
 mod llm_actor;
+mod metrics_actor;
 mod pipeline;
 mod plugin_manager;
+mod rate_limit_actor;
+mod retry_actor;
+mod token_usage_actor;
+mod plugin_tools;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
-use llm_actor::LlmActor;
+use cancellation_actor::CancellationActor;
+use chat_store::{ChatStoreActor, ClearAll};
+use llm_actor::{LlmActor, LlmConfig};
+
+use metrics_actor::MetricsActor;
 use plugin_interface::*;
 use plugin_manager::PluginManager;
+use rate_limit_actor::RateLimitActor;
+use retry_actor::RetryActor;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
+use token_usage_actor::TokenUsageActor;
 
 // ── App state ────────────────────────────────────────────────────────────────
 
@@ -37,9 +57,12 @@ struct AppState {
     plugin_manager: Addr<PluginManager>,
     event_bus: Addr<EventBus>,
     llm: Option<Recipient<LlmRequest>>,
-    llm_addr: Option<Addr<LlmActor>>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     snapshots: Arc<Mutex<Vec<String>>>,
+    metrics_addr: Option<Addr<MetricsActor>>,
+    token_usage_addr: Option<Addr<TokenUsageActor>>,
+    retry_addr: Option<Addr<RetryActor>>,
+    cancellation_addr: Option<Addr<CancellationActor>>,
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────
@@ -97,6 +120,7 @@ async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) 
         plugin_name: "host".into(),
         llm: state.llm.clone(),
         tool_registry: Some(state.tool_registry.clone()),
+        logger: PluginLogger::new(state.event_bus.clone(), "host".into()),
     };
     match state.plugin_manager.send(ScanAndLoad { plugin_dir: body.plugin_dir.clone(), host_context: ctx }).await {
         Ok(Ok(n)) => HttpResponse::Ok().json(serde_json::json!({ "loaded": n })),
@@ -141,7 +165,7 @@ async fn llm_chat(state: web::Data<AppState>, body: web::Json<LlmChatRequest>) -
 struct ChatPayload { chat_id: Option<i64>, message: String }
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
-    let llm_addr = match &state.llm_addr {
+    let retry_addr = match &state.retry_addr {
         Some(a) => a.clone(),
         None => return HttpResponse::ServiceUnavailable().json(serde_json::json!({ "error": "LLM not configured" })),
     };
@@ -161,20 +185,41 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         Err(_) => vec![],
     };
 
-    match llm_addr.send(ChatRequest {
-        chat_id: body.chat_id.unwrap_or(0),
-        message: body.message.clone(),
-        tools,
-        skip_store: false,
-        contexts,
-        jailbreak_index: None,
-        image_base64: None,
-        video_base64: None,
-        video_mime: None,
-        file_base64: None,
-        file_name: None,
+    let chat_id = body.chat_id.unwrap_or(0);
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    match retry_addr.send(retry_actor::RetryChatRequest {
+        request: ChatRequest {
+            chat_id,
+            message: body.message.clone(),
+            tools,
+            skip_store: false,
+            contexts,
+            jailbreak_index: None,
+            image_base64: None,
+            video_base64: None,
+            video_mime: None,
+            file_base64: None,
+            file_name: None,
+            stream: true,
+            request_id: request_id.clone(),
+            source: String::new(),
+            user_name: String::new(),
+        },
+        max_retries: 3,
     }).await {
-        Ok(Ok(resp)) => HttpResponse::Ok().json(resp),
+        Ok(Ok(resp)) => {
+            // Record token usage if available.
+            if let Some(ref tu) = state.token_usage_addr {
+                tu.do_send(token_usage_actor::RecordTokenUsage {
+                    chat_id,
+                    model: resp.model.clone(),
+                    prompt_tokens: resp.prompt_tokens,
+                    completion_tokens: resp.completion_tokens,
+                });
+            }
+            HttpResponse::Ok().json(resp)
+        }
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -203,6 +248,80 @@ async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>)
         })),
         None => HttpResponse::NotFound().json(serde_json::json!({ "error": format!("tool '{}' not found", body.tool_name) })),
     }
+}
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+
+async fn get_metrics(state: web::Data<AppState>) -> impl Responder {
+    let metrics = match &state.metrics_addr {
+        Some(a) => a.send(metrics_actor::GetMetrics).await.unwrap_or_else(|_| "".into()),
+        None => "Metrics not available".into(),
+    };
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(metrics)
+}
+
+async fn get_metrics_json(state: web::Data<AppState>) -> impl Responder {
+    let json = match &state.metrics_addr {
+        Some(a) => a.send(metrics_actor::GetMetricsJson).await.unwrap_or_default(),
+        None => serde_json::json!({ "error": "Metrics not available" }),
+    };
+    HttpResponse::Ok().json(json)
+}
+
+// ── Token usage ──────────────────────────────────────────────────────────────
+
+async fn get_global_token_usage(state: web::Data<AppState>) -> impl Responder {
+    let summary = match &state.token_usage_addr {
+        Some(a) => a.send(token_usage_actor::GetGlobalTokenUsage).await.unwrap_or_else(|_| {
+            token_usage_actor::TokenUsageSummary {
+                chat_id: None, total_prompt_tokens: 0, total_completion_tokens: 0,
+                total_tokens: 0, total_calls: 0, by_model: std::collections::HashMap::new(),
+            }
+        }),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Token usage tracking not available" })),
+    };
+    HttpResponse::Ok().json(summary)
+}
+
+async fn get_chat_token_usage(state: web::Data<AppState>, path: web::Path<i64>) -> impl Responder {
+    let chat_id = path.into_inner();
+    let summary = match &state.token_usage_addr {
+        Some(a) => a.send(token_usage_actor::GetTokenUsage { chat_id }).await.unwrap_or_else(|_| {
+            token_usage_actor::TokenUsageSummary {
+                chat_id: Some(chat_id), total_prompt_tokens: 0, total_completion_tokens: 0,
+                total_tokens: 0, total_calls: 0, by_model: std::collections::HashMap::new(),
+            }
+        }),
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Token usage tracking not available" })),
+    };
+    HttpResponse::Ok().json(summary)
+}
+
+// ── Cancellation ─────────────────────────────────────────────────────────────
+
+async fn cancel_chat(state: web::Data<AppState>, path: web::Path<i64>) -> impl Responder {
+    let chat_id = path.into_inner();
+    let cancelled = match &state.cancellation_addr {
+        Some(a) => a.send(cancellation_actor::CancelChat { chat_id }).await.unwrap_or(false),
+        None => false,
+    };
+    if cancelled {
+        HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled", "chat_id": chat_id }))
+    } else {
+        HttpResponse::Ok().json(serde_json::json!({ "status": "no_active_request", "chat_id": chat_id }))
+    }
+}
+
+// ── Retry / Circuit Breaker state ────────────────────────────────────────────
+
+async fn retry_state(state: web::Data<AppState>) -> impl Responder {
+    let state_str = match &state.retry_addr {
+        Some(a) => a.send(retry_actor::CircuitStateQuery).await.unwrap_or_else(|_| "query failed".into()),
+        None => "Retry not available".into(),
+    };
+    HttpResponse::Ok().json(serde_json::json!({ "circuit_breaker": state_str }))
 }
 
 // ── Plugin API proxy ─────────────────────────────────────────────────────────
@@ -244,7 +363,6 @@ async fn shutdown() -> impl Responder {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() -> std::io::Result<()> {
-    // .env 路径：编译时固定在 main-app/ 目录。
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
     if let Err(e) = dotenvy::from_path(&env_path) {
         eprintln!("[main] .env load skipped: {}", e);
@@ -255,27 +373,32 @@ fn main() -> std::io::Result<()> {
     let sys = actix_rt::System::new();
 
     sys.block_on(async {
-        // 1. EventBus
+        // 1. EventBus.
         let event_bus = EventBus::new().start();
         log::info!("EventBus actor started");
 
-        // 2. LlmActor (optional — requires LLM_API_KEY).
-        let (llm_addr, llm_recipient): (Option<Addr<LlmActor>>, Option<Recipient<LlmRequest>>) = {
-            match LlmActor::from_env(event_bus.clone()) {
-                Some(actor) => {
+        // 2. ChatStoreActor (SQLite history).
+        let store_addr = {
+            let db_path = ChatStoreActor::db_path();
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match ChatStoreActor::open(db_path.to_str().unwrap_or("data/chat_history.db")) {
+                Ok(actor) => {
                     let addr = actor.start();
-                    log::info!("LlmActor started");
-                    let recipient = addr.clone().recipient();
-                    (Some(addr), Some(recipient))
+                    log::info!("ChatStoreActor started");
+                    // Clear history on startup (development convenience).
+                    addr.do_send(ClearAll);
+                    addr
                 }
-                None => {
-                    log::warn!("LLM not configured — LLM endpoints will return 503");
-                    (None, None)
+                Err(e) => {
+                    panic!("ChatStoreActor failed to open: {}", e);
                 }
             }
         };
 
-        // 3. Plugin directory (auto-scan happens in PluginManager::started).
+        // ── 3. Shared ToolRegistry + PluginDirectory ──
+        let tool_registry: Arc<Mutex<ToolRegistry>> = Arc::new(Mutex::new(ToolRegistry::new()));
         let plugin_dir = std::env::var("PLUGIN_DIR").unwrap_or_else(|_| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../target/debug")
@@ -284,13 +407,12 @@ fn main() -> std::io::Result<()> {
         });
         log::info!("Plugin dir: {}", plugin_dir);
 
-        // 4. Shared ToolRegistry.
-        let tool_registry: Arc<Mutex<ToolRegistry>> = Arc::new(Mutex::new(ToolRegistry::new()));
-
-        // 5. PluginManager — auto-scans in started() callback.
+        // ── 4. PluginManager (pre-loads plugins in new()) ──
+        // Pass llm_recipient=None for now; plugins don't need ctx.llm at startup.
+        // The correct LLM backend will be set after discovery.
         let pm = PluginManager::new(
             event_bus.clone(),
-            llm_recipient.clone(),
+            None,  // llm_recipient — set after backend discovery
             tool_registry.clone(),
             plugin_dir,
         );
@@ -298,24 +420,132 @@ fn main() -> std::io::Result<()> {
         let plugin_manager = pm.start();
         log::info!("PluginManager actor started");
 
-        // 6. PipelineActor (if LLM is available).
-        if let Some(ref llm_addr) = llm_addr {
+        // ── 5. LLM Backend — openai (default) or claude ──
+        let use_claude = std::env::var("LLM_BACKEND").as_deref() == Ok("claude");
+        let llm_recipient: Option<Recipient<LlmRequest>>;
+        let retry_addr: Option<Addr<RetryActor>>;
+
+        if use_claude {
+            // Claude backend: actor created in the main process (avoids DLL TLS issue)
+            let (available, claude_path) = claude_backend::probe_claude();
+            if available {
+                log::info!("LLM_BACKEND=claude — creating ClaudeBridgeActor in main process");
+                let addr = claude_backend::ClaudeBridgeActor::new(claude_path).start();
+                let chat_rec: Recipient<ChatRequest> = addr.clone().recipient();
+                llm_recipient = Some(addr.recipient());
+                let config = retry_actor::RetryConfig::from_env();
+                let actor = RetryActor::new(chat_rec, config);
+                let addr = actor.start();
+                log::info!("RetryActor (claude backend) started");
+                retry_addr = Some(addr);
+            } else {
+                log::warn!("[main] Claude CLI not available — no LLM for pipeline");
+                let rec = LlmConfig::from_env().ok().map(|config| {
+                    let addr = LlmActor::new(config, event_bus.clone(), store_addr.clone()).start();
+                    log::info!("LlmActor started (fallback, for plugins)");
+                    addr.recipient()
+                });
+                llm_recipient = rec;
+                retry_addr = None;
+            }
+        } else {
+            // OpenAI 兼容后端（默认）
+            let (llm_rec, chat_rec) = match LlmConfig::from_env() {
+                Ok(config) => {
+                    let addr = LlmActor::new(config, event_bus.clone(), store_addr).start();
+                    log::info!("LlmActor started");
+                    let llm_rec: Recipient<LlmRequest> = addr.clone().recipient();
+                    let chat_rec: Recipient<ChatRequest> = addr.clone().recipient();
+                    (Some(llm_rec), Some(chat_rec))
+                }
+                Err(e) => {
+                    log::warn!("LLM not configured — {}", e);
+                    (None, None)
+                }
+            };
+
+            llm_recipient = llm_rec;
+            retry_addr = chat_rec.map(|chat| {
+                let config = retry_actor::RetryConfig::from_env();
+                let addr = RetryActor::new(chat, config).start();
+                log::info!("RetryActor started");
+                addr
+            });
+        }
+
+        // ── 6. TokenUsageActor ──
+        let token_usage_addr = match TokenUsageActor::new() {
+            Ok(actor) => {
+                let addr = actor.start();
+                log::info!("TokenUsageActor started");
+                Some(addr)
+            }
+            Err(e) => {
+                log::warn!("TokenUsageActor failed: {}", e);
+                None
+            }
+        };
+
+        // 5. RateLimitActor.
+        let rate_limit_addr = {
+            let config = rate_limit_actor::RateLimitConfig::from_env();
+            let actor = RateLimitActor::new(config);
+            let addr = actor.start();
+            log::info!("RateLimitActor started");
+            addr
+        };
+
+        // 6. MetricsActor.
+        let metrics_addr = {
+            let actor = MetricsActor::new();
+            let addr = actor.start();
+            log::info!("MetricsActor started");
+            Some(addr)
+        };
+
+        // 7. CancellationActor.
+        let cancellation_addr = {
+            let actor = CancellationActor::new();
+            let addr = actor.start();
+            log::info!("CancellationActor started");
+            Some(addr)
+        };
+
+        // ── 11. PipelineActor (if LLM is available). ──
+        if let (Some(ref retry), Some(ref tu), Some(ref metrics), Some(ref cancel)) =
+            (&retry_addr, &token_usage_addr, &metrics_addr, &cancellation_addr)
+        {
             let pipeline = pipeline::PipelineActor::new(
-                llm_addr.clone(),
+                retry.clone(),
                 plugin_manager.clone(),
                 tool_registry.clone(),
                 snapshots.clone(),
                 event_bus.clone(),
+                rate_limit_addr.clone(),
+                tu.clone(),
+                metrics.clone(),
+                cancel.clone(),
             );
             let pipeline_addr = pipeline.start();
             log::info!("PipelineActor started");
 
-            // Subscribe PipelineActor to user.message events.
             event_bus.do_send(Subscribe {
                 topic: "user.message".into(),
                 recipient: pipeline_addr.recipient(),
             });
             log::info!("PipelineActor subscribed to 'user.message'");
+        } else {
+            log::warn!("PipelineActor not started — missing LLM or infrastructure actors");
+        }
+
+        // ── Register host-level tools (plugin management for LLM) ──
+        {
+            use std::sync::Arc;
+            let mut reg = tool_registry.lock().unwrap();
+            reg.register(Arc::new(plugin_tools::LoadPluginTool::new(plugin_manager.clone())));
+            reg.register(Arc::new(plugin_tools::UnloadPluginTool::new(plugin_manager.clone())));
+            reg.register(Arc::new(plugin_tools::ReloadPluginTool::new(plugin_manager.clone())));
+            log::info!("Registered 3 plugin management tools");
         }
 
         // Build shared state.
@@ -323,9 +553,12 @@ fn main() -> std::io::Result<()> {
             plugin_manager: plugin_manager.clone(),
             event_bus: event_bus.clone(),
             llm: llm_recipient,
-            llm_addr,
             tool_registry,
             snapshots,
+            metrics_addr,
+            token_usage_addr,
+            retry_addr,
+            cancellation_addr,
         });
 
         log::info!("HTTP API listening on http://127.0.0.1:8080");
@@ -343,6 +576,12 @@ fn main() -> std::io::Result<()> {
                 .route("/api/chat", web::post().to(chat))
                 .route("/api/tools", web::get().to(list_tools))
                 .route("/api/tools/call", web::post().to(tool_call))
+                .route("/api/metrics", web::get().to(get_metrics))
+                .route("/api/metrics/json", web::get().to(get_metrics_json))
+                .route("/api/token-usage", web::get().to(get_global_token_usage))
+                .route("/api/token-usage/{chat_id}", web::get().to(get_chat_token_usage))
+                .route("/api/cancel/{chat_id}", web::post().to(cancel_chat))
+                .route("/api/retry/state", web::get().to(retry_state))
                 .route("/api/shutdown", web::post().to(shutdown))
                 .route("/api/plugin/{name}/{path:.*}", web::method(actix_web::http::Method::GET).to(plugin_proxy))
                 .route("/api/plugin/{name}/{path:.*}", web::method(actix_web::http::Method::POST).to(plugin_proxy))
