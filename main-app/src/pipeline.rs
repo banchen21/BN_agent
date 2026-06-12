@@ -109,6 +109,8 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 image_base64: None,
                 video_base64: None,
                 video_mime: None,
+                file_base64: None,
+                file_name: None,
             }).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
@@ -129,6 +131,7 @@ impl Handler<HandleUserMessage> for PipelineActor {
                     resp.tool_calls.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
                 );
 
+                let mut tool_results: Vec<String> = Vec::new();
                 for tc in &resp.tool_calls {
                     let executor = {
                         match tool_registry.lock() {
@@ -149,12 +152,44 @@ impl Handler<HandleUserMessage> for PipelineActor {
 
                     if result.success {
                         log::info!("[Pipeline] tool '{}' ok: {}", tc.name, result.content);
+                        tool_results.push(format!("【{}】\n{}", tc.name, result.content));
                     } else {
-                        log::warn!("[Pipeline] tool '{}' failed: {}", tc.name,
-                            result.error.as_deref().unwrap_or("unknown"));
+                        let err = result.error.as_deref().unwrap_or("unknown");
+                        log::warn!("[Pipeline] tool '{}' failed: {}", tc.name, err);
+                        tool_results.push(format!("【{}】错误：{}", tc.name, err));
                     }
                 }
-                // Tool calls handled; no text reply needed.
+
+                // 工具结果喂回 LLM 进行第二轮推理
+                let follow_up = format!(
+                    "以下是我调用的工具的执行结果，请根据这些结果组织回复：\n\n{}",
+                    tool_results.join("\n\n")
+                );
+                let final_resp = llm_addr.send(ChatRequest {
+                    chat_id,
+                    message: follow_up,
+                    tools: vec![],
+                    skip_store: false,
+                    contexts: vec![],
+                    jailbreak_index: None,
+                    image_base64: None,
+                    video_base64: None,
+                    video_mime: None,
+                    file_base64: None,
+                    file_name: None,
+                }).await;
+                match final_resp {
+                    Ok(Ok(r)) if !r.content.trim().is_empty() => {
+                        emit_reply(chat_id, &r.content, &source, &event_bus, &plugin_manager).await;
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("[Pipeline] tool loop LLM error: {}", e);
+                    }
+                    Err(e) => {
+                        log::error!("[Pipeline] tool loop mailbox error: {}", e);
+                    }
+                    _ => {}
+                }
             } else if !resp.content.trim().is_empty() {
                 // 5. Broadcast assistant reply.
                 emit_reply(chat_id, &resp.content, &source, &event_bus, &plugin_manager).await;
@@ -185,8 +220,10 @@ impl Handler<Event> for PipelineActor {
         let image_base64 = event.data.get("image_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
         let video_base64 = event.data.get("video_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
         let video_mime = event.data.get("video_mime").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let file_base64 = event.data.get("file_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let file_name = event.data.get("file_name").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-        if text.is_empty() && image_base64.is_none() && video_base64.is_none() {
+        if text.is_empty() && image_base64.is_none() && video_base64.is_none() && file_base64.is_none() {
             return;
         }
 
@@ -233,6 +270,8 @@ impl Handler<Event> for PipelineActor {
                 image_base64: image_base64.clone(),
                 video_base64: video_base64.clone(),
                 video_mime: video_mime.clone(),
+                file_base64: file_base64.clone(),
+                file_name: file_name.clone(),
             }).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
@@ -251,6 +290,7 @@ impl Handler<Event> for PipelineActor {
                     resp.tool_calls.len(),
                     resp.tool_calls.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
                 );
+                let mut tool_results: Vec<String> = Vec::new();
                 for tc in &resp.tool_calls {
                     let executor = match tool_registry.lock() {
                         Ok(reg) => reg.get_executor(&tc.name),
@@ -266,10 +306,43 @@ impl Handler<Event> for PipelineActor {
                     };
                     if result.success {
                         log::info!("[Pipeline] tool '{}' ok: {}", tc.name, result.content);
+                        tool_results.push(format!("【{}】\n{}", tc.name, result.content));
                     } else {
-                        log::warn!("[Pipeline] tool '{}' failed: {}", tc.name,
-                            result.error.as_deref().unwrap_or("unknown"));
+                        let err = result.error.as_deref().unwrap_or("unknown");
+                        log::warn!("[Pipeline] tool '{}' failed: {}", tc.name, err);
+                        tool_results.push(format!("【{}】错误：{}", tc.name, err));
                     }
+                }
+
+                // 工具结果喂回 LLM 进行第二轮推理
+                let follow_up = format!(
+                    "以下是我调用的工具的执行结果，请根据这些结果组织回复：\n\n{}",
+                    tool_results.join("\n\n")
+                );
+                let final_resp = llm_addr.send(ChatRequest {
+                    chat_id,
+                    message: follow_up,
+                    tools: vec![],
+                    skip_store: false,
+                    contexts: vec![],
+                    jailbreak_index: None,
+                    image_base64: None,
+                    video_base64: None,
+                    video_mime: None,
+                    file_base64: None,
+                    file_name: None,
+                }).await;
+                match final_resp {
+                    Ok(Ok(r)) if !r.content.trim().is_empty() => {
+                        emit_reply(chat_id, &r.content, &source, &event_bus, &plugin_manager).await;
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("[Pipeline] tool loop LLM error: {}", e);
+                    }
+                    Err(e) => {
+                        log::error!("[Pipeline] tool loop mailbox error: {}", e);
+                    }
+                    _ => {}
                 }
             } else if !resp.content.trim().is_empty() {
                 emit_reply(chat_id, &resp.content, &source, &event_bus, &plugin_manager).await;

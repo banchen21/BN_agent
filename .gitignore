@@ -1,29 +1,43 @@
-# Rust
+# ─── Rust ──────────────────────────────────────────────────
 target/
 Cargo.lock
 
-# IDE
+# ─── IDE / Editor ──────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+*.iml
 
-# OS
+# ─── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
+ehthumbs.db
 
-# Logs
+# ─── Environment ───────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Logs / Temp ──────────────────────────────────────────
 *.log
 logs/
+*.tmp
+*.temp
 
-# Environment
-.env
-
-# Build artifacts
+# ─── Build artifacts ──────────────────────────────────────
 *.dll
 *.so
 *.dylib
 *.dll.d
+*.exe
 
-# Data
-data/chat_history.db
+# ─── Data (runtime-generated) ─────────────────────────────
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# ─── Plugin installation artifacts ────────────────────────
+# 已通过 *.dll 全局忽略

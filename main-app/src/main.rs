@@ -171,6 +171,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         image_base64: None,
         video_base64: None,
         video_mime: None,
+        file_base64: None,
+        file_name: None,
     }).await {
         Ok(Ok(resp)) => HttpResponse::Ok().json(resp),
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),

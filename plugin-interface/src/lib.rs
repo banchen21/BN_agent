@@ -233,6 +233,10 @@ pub struct ChatRequest {
     pub video_base64: Option<String>,
     /// MIME type for the video (e.g. video/mp4).
     pub video_mime: Option<String>,
+    /// Base64-encoded file data (generic documents).
+    pub file_base64: Option<String>,
+    /// Original file name.
+    pub file_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

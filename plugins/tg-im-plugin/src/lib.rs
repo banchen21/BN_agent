@@ -92,6 +92,7 @@ impl ToolExecutor for SendVoiceTool {
                 "properties": {
                     "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
                     "text": {"type": "string", "description": "Text to speak"},
+                    "voice_desc": {"type": "string", "description": "可选：自定义音色描述，如'温柔的女声'、'低沉的男声'，不填则用默认 TTS_VOICE_DESC"}
                 },
                 "required": ["text"]
             }),
@@ -117,6 +118,8 @@ impl ToolExecutor for SendVoiceTool {
             rt.block_on(async { let _ = bot.send_record_voice_action(chat_id).await; });
         });
 
+        let voice_desc = args.get("voice_desc").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+
         let tts_exec = {
             let reg = match self.tool_registry.lock() {
                 Ok(r) => r,
@@ -127,7 +130,11 @@ impl ToolExecutor for SendVoiceTool {
                 None => return ToolResult::err("tts_synthesize not found"),
             }
         };
-        let tts_result = tts_exec.execute(&serde_json::json!({ "text": text }));
+        let mut tts_params = serde_json::json!({ "text": text });
+        if let Some(ref vd) = voice_desc {
+            tts_params["voice_desc"] = serde_json::json!(vd);
+        }
+        let tts_result = tts_exec.execute(&tts_params);
         if !tts_result.success {
             return ToolResult::err(&format!("TTS failed: {}", tts_result.error.unwrap_or_default()));
         }
@@ -616,8 +623,11 @@ impl Plugin for TgImPlugin {
                     rt.block_on(async {
                         // 先发一次 typing（清除状态缓冲）
                         let _ = h.send_typing(chat_id).await;
-                        if let Err(e) = h.send_message(chat_id, &text).await {
-                            eprintln!("[tg-im] send failed: {}", e);
+                        // 尝试 Markdown 发送，失败则回退纯文本
+                        if let Err(_) = h.send_markdown(chat_id, &text).await {
+                            if let Err(e) = h.send_message(chat_id, &text).await {
+                                eprintln!("[tg-im] send failed: {}", e);
+                            }
                         }
                     });
                 });

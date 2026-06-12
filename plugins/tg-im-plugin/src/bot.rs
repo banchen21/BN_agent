@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::net::Download;
-use teloxide::types::{ChatAction, ChatId, InputFile};
+use teloxide::types::{ChatAction, ChatId, InputFile, ParseMode};
 
 // ── BotHandle — 供插件和工具调用 ────────────────────────────────────────────
 
@@ -30,6 +30,51 @@ impl BotHandle {
             .await
             .map_err(|e| format!("send_message failed: {}", e))?;
         Ok(())
+    }
+
+    /// 发送 MarkdownV2 格式消息。特殊字符会被自动转义，也可传递原始的 raw 格式。
+    pub async fn send_markdown(&self, chat_id: i64, text: &str) -> Result<(), String> {
+        // MarkdownV2 需要转义: _ * [ ] ( ) ~ ` > # + - = | { } . !
+        fn escape_md(s: &str) -> String {
+            s.replace('\\', "\\\\")
+             .replace('_', "\\_")
+             .replace('*', "\\*")
+             .replace('[', "\\[")
+             .replace(']', "\\]")
+             .replace('(', "\\(")
+             .replace(')', "\\)")
+             .replace('~', "\\~")
+             .replace('`', "\\`")
+             .replace('>', "\\>")
+             .replace('#', "\\#")
+             .replace('+', "\\+")
+             .replace('-', "\\-")
+             .replace('=', "\\=")
+             .replace('|', "\\|")
+             .replace('{', "\\{")
+             .replace('}', "\\}")
+             .replace('.', "\\.")
+             .replace('!', "\\!")
+        }
+
+        // 尝试先直接发（假设内容已正确格式化），失败则转义后重发
+        let result = self.bot
+            .send_message(ChatId(chat_id), text)
+            .parse_mode(ParseMode::MarkdownV2)
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let escaped = escape_md(text);
+                self.bot
+                    .send_message(ChatId(chat_id), escaped)
+                    .parse_mode(ParseMode::MarkdownV2)
+                    .await
+                    .map_err(|e| format!("send_markdown failed: {}", e))?;
+                Ok(())
+            }
+        }
     }
 
     pub async fn send_typing(&self, chat_id: i64) -> Result<(), String> {

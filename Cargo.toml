@@ -15,6 +15,7 @@ members = [
     "plugins/webrtc-plugin",
     "plugins/image-plugin",
     "plugins/video-plugin",
+    "plugins/mcp-plugin",
 ]
 resolver = "2"
 
