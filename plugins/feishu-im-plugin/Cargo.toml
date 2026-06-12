@@ -1,8 +1,8 @@
 [package]
-name = "audio-capture-plugin"
+name = "feishu-im-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "Local audio capture plugin (WASAPI loopback)"
+description = "Feishu (Lark) IM bridge plugin"
 
 [lib]
 crate-type = ["cdylib"]
@@ -11,6 +11,5 @@ crate-type = ["cdylib"]
 plugin-interface = { path = "../../plugin-interface" }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-cpal = "0.15"
-base64 = "0.22"
+reqwest = { version = "0.12", features = ["json"] }
 log = "0.4"

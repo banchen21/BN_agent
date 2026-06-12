@@ -1,0 +1,172 @@
+//! Feishu IM Plugin — actor-free port of BN_agent's feishu-im-plugin.
+
+mod bot;
+
+use bot::BotHandle;
+use plugin_interface::*;
+use std::sync::{Arc, Mutex};
+
+pub struct FeishuImPlugin {
+    info: PluginInfo,
+    bot_handle: Option<Arc<Mutex<Option<BotHandle>>>>,
+    event_bus: Option<Addr<EventBus>>,
+}
+
+impl FeishuImPlugin {
+    pub fn new() -> Self {
+        Self {
+            info: PluginInfo {
+                name: "feishu-im-plugin".into(),
+                version: "0.1.0".into(),
+                description: "飞书即时通讯插件 — 接收/发送飞书消息".into(),
+                author: "BN Team".into(),
+                min_host_version: "0.1.0".into(),
+            },
+            bot_handle: Some(Arc::new(Mutex::new(None))),
+            event_bus: None,
+        }
+    }
+}
+
+impl Plugin for FeishuImPlugin {
+    fn info(&self) -> PluginInfo { self.info.clone() }
+
+    fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
+        self.event_bus = Some(ctx.event_bus.clone());
+
+        // Register tool unconditionally.
+        if let Some(ref reg) = ctx.tool_registry {
+            let bh = self.bot_handle.clone();
+            reg.lock().map_err(|e| format!("lock: {}", e))?
+                .register(Arc::new(SendMessageTool { bot_handle: bh }));
+            log::info!("[feishu-im] registered tool: feishu_send_message");
+        }
+
+        let app_id = match std::env::var("FEISHU_APP_ID") {
+            Ok(v) if !v.is_empty() => v,
+            _ => {
+                log::warn!("[feishu-im] FEISHU_APP_ID not set — polling disabled (tool only)");
+                log::info!("[feishu-im] started (degraded)");
+                return Ok(());
+            }
+        };
+        let app_secret = std::env::var("FEISHU_APP_SECRET").unwrap_or_default();
+
+        let bh = self.bot_handle.clone();
+        let eb = ctx.event_bus.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().expect("tokio");
+            rt.block_on(async {
+                match bot::run_bot(&app_id, &app_secret, eb).await {
+                    Ok(h) => {
+                        if let Some(ref bh) = bh {
+                            *bh.lock().unwrap() = Some(h);
+                        }
+                        // Keep thread alive — bot runs its own poll loop in tokio::spawn.
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => log::error!("[feishu-im] bot failed: {}", e),
+                }
+            });
+        });
+
+        log::info!("[feishu-im] started");
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        log::info!("[feishu-im] stopped");
+    }
+
+    fn on_event(&self, event: &Event) -> bool {
+        if event.topic == "assistant.message" {
+            let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            if !source.is_empty() && source != "feishu" { return true; }
+
+            let chat_id = event.data.get("chat_id").and_then(|v| v.as_str()).map(String::from);
+            let text = event.data.get("text").and_then(|v| v.as_str());
+            if let (Some(chat_id), Some(text)) = (chat_id, text) {
+                if let Some(ref bh) = self.bot_handle {
+                    let bh = bh.clone();
+                    let t = text.to_string();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all().build().expect("tokio");
+                        rt.block_on(async {
+                            if let Ok(guard) = bh.lock() {
+                                if let Some(ref h) = *guard {
+                                    let _ = h.send_message(&chat_id, &t).await;
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+        }
+        true
+    }
+}
+
+// ─── 工具 ─────────────────────────────────────────────────────────
+
+struct SendMessageTool {
+    bot_handle: Option<Arc<Mutex<Option<BotHandle>>>>,
+}
+
+impl ToolExecutor for SendMessageTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+            name: "feishu_send_message".into(),
+            description: "Send a text message to a Feishu chat.".into(),
+            internal: false,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string", "description": "Feishu chat ID"},
+                    "text": {"type": "string", "description": "Message text"}
+                },
+                "required": ["chat_id", "text"]
+            }),
+        });
+        &DEF
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = match args.get("text").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(), None => return ToolResult::err("missing: text"),
+        };
+        let bh = match self.bot_handle.clone() {
+            Some(h) => h, None => return ToolResult::err("bot not started"),
+        };
+
+        match std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().expect("tokio");
+            rt.block_on(async {
+                let guard = bh.lock().unwrap();
+                match *guard {
+                    Some(ref h) => h.send_message(&chat_id, &text).await
+                        .map(|_| ToolResult::ok("sent"))
+                        .unwrap_or_else(|e| ToolResult::err(&e)),
+                    None => ToolResult::err("bot not started"),
+                }
+            })
+        }).join() {
+            Ok(r) => r,
+            Err(_) => ToolResult::err("thread panic"),
+        }
+    }
+}
+
+// ─── FFI ─────────────────────────────────────────────────────────
+
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn plugin_create() -> Box<dyn Plugin> { Box::new(FeishuImPlugin::new()) }
+
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn plugin_destroy(_p: Box<dyn Plugin>) {}

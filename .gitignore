@@ -1,5 +1,29 @@
-/target
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
 .env
-**/.env
-bn-core/logs/bn-agent.log
-bn-core/logs/bn-agent.log
+
+# Build artifacts
+*.dll
+*.so
+*.dylib
+*.dll.d
+
+# Data
+data/chat_history.db

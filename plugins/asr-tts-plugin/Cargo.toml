@@ -2,15 +2,15 @@
 name = "asr-tts-plugin"
 version = "0.1.0"
 edition = "2021"
+description = "ASR (speech-to-text) + TTS (text-to-speech) plugin using MiMo Chat API"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-plugin-core = { path = "../../plugin-core" }
-serde = { version = "1", features = ["derive"] }
+plugin-interface = { path = "../../plugin-interface" }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
-tracing = "0.1"
+log = "0.4"

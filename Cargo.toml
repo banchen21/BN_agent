@@ -1,9 +1,24 @@
 [workspace]
-resolver = "2"
 members = [
-    "bn-core",
-    "plugin-core",
+    "plugin-interface",
+    "main-app",
+    "plugins/hello-plugin",
+    "plugins/logger-plugin",
     "plugins/time-plugin",
     "plugins/tg-im-plugin",
-    "plugins/asr-tts-plugin"
+    "plugins/tui-plugin",
+    "plugins/asr-tts-plugin",
+    "plugins/feishu-im-plugin",
+    "plugins/claude-bridge-plugin",
+    "plugins/wechat-claw-plugin",
+    "plugins/audio-capture-plugin",
+    "plugins/webrtc-plugin",
+    "plugins/image-plugin",
+    "plugins/video-plugin",
 ]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
