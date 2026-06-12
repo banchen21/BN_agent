@@ -165,6 +165,8 @@ async fn process_message(
             request_id: request_id.clone(),
             source: source.clone(),
             user_name: user_name.clone(),
+            max_tokens: None,
+            original_user_msg: None,
         },
         max_retries: 3,
     };
@@ -219,7 +221,7 @@ async fn process_message(
 
             let mut args = tc.arguments.clone();
             if let serde_json::Value::Object(ref mut map) = args {
-                map.entry("chat_id").or_insert(serde_json::json!(chat_id));
+                map.insert("chat_id".to_string(), serde_json::json!(chat_id));
             }
 
             let tool_start = std::time::Instant::now();
@@ -259,6 +261,7 @@ async fn process_message(
                 message: follow_up,
                 tools: vec![],
                 skip_store: false,
+                original_user_msg: Some(text.clone()),
                 contexts: vec![],
                 jailbreak_index: None,
                 image_base64: None,
@@ -270,6 +273,7 @@ async fn process_message(
                 request_id: format!("{}-followup", request_id),
                 source: String::new(),
                 user_name: String::new(),
+                max_tokens: None,
             },
             max_retries: 2,
         }).await;

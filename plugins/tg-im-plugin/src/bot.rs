@@ -94,7 +94,7 @@ impl BotHandle {
     }
 
     pub async fn send_voice(&self, chat_id: i64, audio_data: Vec<u8>) -> Result<(), String> {
-        let file = InputFile::memory(audio_data).file_name("voice.ogg");
+        let file = InputFile::memory(audio_data).file_name("voice.wav");
         self.bot
             .send_voice(ChatId(chat_id), file)
             .await

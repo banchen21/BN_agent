@@ -150,7 +150,10 @@ impl ToolExecutor for SendVoiceTool {
                 .build()
                 .expect("tokio");
             rt.block_on(async {
-                let _ = bot.send_voice(chat_id, audio_data).await;
+                match bot.send_voice(chat_id, audio_data).await {
+                    Ok(_) => eprintln!("[tg-im] voice sent to {}", chat_id),
+                    Err(e) => eprintln!("[tg-im] send_voice FAILED: {}", e),
+                }
             });
         });
 
@@ -609,7 +612,7 @@ impl Plugin for TgImPlugin {
             self.processing_chats.lock().unwrap().remove(&chat_id);
 
             let text = match event.data.get("text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
+                Some(t) => t.to_string().replace('\n', ""),
                 None => return true,
             };
 

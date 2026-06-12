@@ -91,7 +91,7 @@ impl Handler<LlmRequest> for ClaudeBridgeActor {
 
         Box::pin(async move {
             match call_claude(&path, &prompt, None, None).await {
-                Ok(text) => { let (tc, c) = parse_tool_calls(&text); Ok(LlmResponse { content: c, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: tc }) }
+                Ok(text) => { let (tc, c) = parse_tool_calls(&text); Ok(LlmResponse { content: c, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: tc, reasoning_content: None }) }
                 Err(e) => Err(e),
             }
         })
@@ -129,7 +129,7 @@ impl Handler<ChatRequest> for ClaudeBridgeActor {
             match call_claude(&path, &prompt, session_id.as_deref(), None).await {
                 Ok(text) => {
                     let (tool_calls, content) = parse_tool_calls(&text);
-                    Ok(LlmResponse { content, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls })
+                    Ok(LlmResponse { content, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls, reasoning_content: None })
                 }
                 Err(e) => Err(e),
             }

@@ -26,6 +26,8 @@ pub struct LlmConfig {
     pub base_url: String,
     pub system_prompt: String,
     pub max_history_turns: usize,
+    pub max_tokens: u32,
+    pub thinking: bool,
     pub jailbreak_prompts: Vec<String>,
     pub image_model: String,
     pub image_base_url: String,
@@ -54,6 +56,14 @@ impl LlmConfig {
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
 
+        let max_tokens = std::env::var("LLM_MAX_TOKENS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(384000);
+
+        let thinking = std::env::var("LLM_THINKING")
+            .ok().map(|v| v.to_lowercase())
+            .map(|v| v == "enabled" || v == "true" || v == "1")
+            .unwrap_or(false);
+
         let image_model = std::env::var("IMAGE_MODEL")
             .unwrap_or_else(|_| "mimo-v2.5".into());
         let image_base_url = std::env::var("IMAGE_BASE_URL")
@@ -68,7 +78,7 @@ impl LlmConfig {
             .unwrap_or_else(|_| api_key.clone());
 
         Ok(Self {
-            api_key, model, base_url, system_prompt, max_history_turns,
+            api_key, model, base_url, system_prompt, max_history_turns, max_tokens, thinking,
             jailbreak_prompts, image_model, image_base_url, image_api_key,
             video_model, video_base_url, video_api_key,
         })
@@ -208,6 +218,7 @@ impl Handler<ChatRequest> for LlmActor {
 
         let chat_id = msg.chat_id;
         let user_msg = msg.message.clone();
+        let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
         let contexts = msg.contexts.clone();
         let tools = msg.tools.clone();
@@ -215,6 +226,7 @@ impl Handler<ChatRequest> for LlmActor {
         let video_base64 = msg.video_base64.clone();
         let video_mime = msg.video_mime.clone();
         let stream = msg.stream;
+        let max_tokens = msg.max_tokens.unwrap_or(self.config.max_tokens);
         let file_base64 = msg.file_base64.clone();
         let file_name = msg.file_name.clone();
         let source = msg.source.clone();
@@ -229,6 +241,7 @@ impl Handler<ChatRequest> for LlmActor {
         let video_api_key = self.config.video_api_key.clone();
         let base_url = self.config.base_url.clone();
         let api_key = self.config.api_key.clone();
+        let thinking = self.config.thinking;
 
         event_bus.do_send(Event::new("llm.request", serde_json::json!({
             "model": model, "chat_id": chat_id, "mode": "chat",
@@ -259,9 +272,15 @@ impl Handler<ChatRequest> for LlmActor {
             // ── 3. Recent history ──
             let records = store_addr.send(FetchRecent { chat_id, limit }).await.unwrap_or_default();
             for r in &records {
-                messages.push(serde_json::json!({
-                    "role": r.role, "content": r.content
-                }));
+                let mut msg = serde_json::json!({
+                    "role": r.role.clone(), "content": r.content.clone()
+                });
+                if let Some(ref rc) = r.reasoning_content {
+                    if !rc.is_empty() {
+                        msg["reasoning_content"] = serde_json::json!(rc);
+                    }
+                }
+                messages.push(msg);
             }
 
             // ── 4. Other plugin contexts ──
@@ -269,30 +288,25 @@ impl Handler<ChatRequest> for LlmActor {
                 messages.push(serde_json::json!({ "role": "assistant", "content": ctx }));
             }
 
-            // ── 5. Current user message (source info merged in) ──
-            let channel_prefix = if !source.is_empty() {
-                format!("[{}] ", source)
-            } else {
-                String::new()
-            };
+            // ── 5. Current user message ──
 
             let user_content = if let Some(ref img_b64) = image_base64 {
                 serde_json::json!([
-                    {"type": "text", "text": format!("{}{}", channel_prefix, user_msg)},
+                    {"type": "text", "text": user_msg},
                     {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", img_b64)}}
                 ])
             } else if let (Some(ref vid_b64), Some(ref vid_mime)) = (video_base64.as_ref(), video_mime.as_ref()) {
                 serde_json::json!([
                     {"type": "video_url", "video_url": {"url": format!("data:{};base64,{}", vid_mime, vid_b64)}, "fps": 2, "media_resolution": "default"},
-                    {"type": "text", "text": format!("{}{}", channel_prefix, user_msg)}
+                    {"type": "text", "text": user_msg}
                 ])
             } else if let (Some(ref fb64), Some(ref fname)) = (file_base64.as_ref(), file_name.as_ref()) {
                 serde_json::json!([
                     {"type": "file", "file": {"filename": fname, "file_data": fb64}},
-                    {"type": "text", "text": format!("{}{}", channel_prefix, user_msg)}
+                    {"type": "text", "text": user_msg}
                 ])
             } else {
-                serde_json::json!(format!("{}{}", channel_prefix, user_msg))
+                serde_json::json!(user_msg)
             };
             messages.push(serde_json::json!({ "role": "user", "content": user_content }));
 
@@ -313,11 +327,14 @@ impl Handler<ChatRequest> for LlmActor {
                 "model": actual_model,
                 "messages": messages,
                 "temperature": 0.7,
-                "max_tokens": 2048u32,
+                "max_tokens": max_tokens,
             });
             if !tools.is_empty() {
                 body["tools"] = serde_json::json!(tools);
+                body["tool_choice"] = serde_json::json!("auto");
             }
+            // DeepSeek 思考模式（thinking）开关
+            body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
             // ── 5. Call LLM ──
             let result = if stream {
@@ -329,12 +346,15 @@ impl Handler<ChatRequest> for LlmActor {
             // ── 6. Persist to history ──
             if !skip_store {
                 if let Ok(ref resp) = result {
-                    // 始终保存用户消息，助手消息空也保存（如 tool_call 场景）
-                    store_addr.do_send(AppendPair {
-                        chat_id,
-                        user_msg: user_msg.clone(),
-                        assistant_msg: if resp.content.trim().is_empty() && !resp.tool_calls.is_empty() { serde_json::to_string(&resp.tool_calls).unwrap_or_default() } else { resp.content.clone() },
-                    });
+                    // 只有有实际文本内容时才存历史；纯工具调用不存（避免干扰模型上下文）
+                    if !resp.content.trim().is_empty() {
+                        store_addr.do_send(AppendPair {
+                            chat_id,
+                            user_msg: original_user_msg.clone().unwrap_or_else(|| user_msg.clone()),
+                            assistant_msg: resp.content.clone(),
+                            reasoning_content: resp.reasoning_content.clone(),
+                        });
+                    }
                 }
             }
 
@@ -416,6 +436,7 @@ async fn stream_llm(
     let mut prompt_tokens: u32 = 0;
     let mut completion_tokens: u32 = 0;
     let mut chunk_count = 0u64;
+    let mut reasoning_content = String::new();
 
     struct PartialToolCall {
         id: String, name: String, arguments: String,
@@ -477,6 +498,10 @@ async fn stream_llm(
                 }), "llm-actor"));
             }
 
+            if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                reasoning_content.push_str(rc);
+            }
+
             if let Some(tc) = delta.get("tool_calls") {
                 if let Some(tc_arr) = tc.as_array() {
                     for tc_item in tc_arr {
@@ -524,6 +549,7 @@ async fn stream_llm(
         prompt_tokens,
         completion_tokens,
         tool_calls: collected_tool_calls,
+        reasoning_content: Some(reasoning_content.clone()),
     };
 
     let preview = truncate_preview(&full_content, 200);
@@ -591,6 +617,9 @@ async fn call_llm(
         })
         .unwrap_or_default();
 
+    let reasoning_content = choice["message"]["reasoning_content"]
+        .as_str()
+        .map(|s| s.to_string());
     let tc_count = tool_calls.len();
     let llm_response = LlmResponse {
         content: content.clone(),
@@ -598,6 +627,7 @@ async fn call_llm(
         prompt_tokens,
         completion_tokens,
         tool_calls,
+        reasoning_content,
     };
 
     let preview = truncate_preview(&content, 200);

@@ -206,6 +206,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             request_id: request_id.clone(),
             source: String::new(),
             user_name: String::new(),
+            max_tokens: None,
+            original_user_msg: None,
         },
         max_retries: 3,
     }).await {
@@ -368,7 +370,28 @@ fn main() -> std::io::Result<()> {
     if let Err(e) = dotenvy::from_path(&env_path) {
         eprintln!("[main] .env load skipped: {}", e);
     }
-    env_logger::init();
+    // ── Logging: stdout + rotating file ──
+    let log_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_file = log_dir.join("app.log");
+    let log_path = log_file.to_string_lossy().to_string();
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{} {} {}] {}",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Info)
+        .level_for("actix_server", log::LevelFilter::Warn)
+        .chain(std::io::stdout())
+        .chain(fern::log_file(&log_file).expect("failed to open log file"))
+        .apply()
+        .expect("failed to initialize logging");
+    log::info!("Logging to stdout + {}", log_path);
     log::info!("=== actix-actor plugin system starting ===");
 
     let sys = actix_rt::System::new();

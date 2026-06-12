@@ -21,6 +21,7 @@ use rusqlite::{params, Connection, Result as SqlResult};
 pub struct Record {
     pub role: String,
     pub content: String,
+    pub reasoning_content: Option<String>,
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ pub struct AppendPair {
     pub chat_id: i64,
     pub user_msg: String,
     pub assistant_msg: String,
+    pub reasoning_content: Option<String>,
 }
 
 /// Clear all records for a chat_id.
@@ -77,11 +79,16 @@ impl ChatStoreActor {
                 chat_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                reasoning_content TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_chat_id ON chat_history(chat_id);
             CREATE INDEX IF NOT EXISTS idx_created ON chat_history(created_at);",
         )?;
+        // Add reasoning_content column if upgrading from old schema
+        let _ = conn.execute_batch(
+            "ALTER TABLE chat_history ADD COLUMN reasoning_content TEXT;",
+        );
         Ok(Self { conn })
     }
 
@@ -106,7 +113,7 @@ impl Handler<FetchRecent> for ChatStoreActor {
 
     fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT role, content FROM chat_history
+            "SELECT role, content, reasoning_content FROM chat_history
              WHERE chat_id = ?1
              ORDER BY id ASC
              LIMIT ?2"
@@ -116,6 +123,7 @@ impl Handler<FetchRecent> for ChatStoreActor {
             Ok(Record {
                 role: row.get(0)?,
                 content: row.get(1)?,
+                reasoning_content: row.get(2).ok(),
             })
         });
 
@@ -153,8 +161,8 @@ impl Handler<AppendPair> for ChatStoreActor {
             log::error!("[ChatStoreActor] AppendPair user failed: {}", e);
         }
         if let Err(e) = self.conn.execute(
-            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, 'assistant', ?2)",
-            params![msg.chat_id, msg.assistant_msg],
+            "INSERT INTO chat_history (chat_id, role, content, reasoning_content) VALUES (?1, 'assistant', ?2, ?3)",
+            params![msg.chat_id, msg.assistant_msg, msg.reasoning_content],
         ) {
             log::error!("[ChatStoreActor] AppendPair assistant failed: {}", e);
         }

@@ -247,6 +247,11 @@ pub struct ChatRequest {
     pub source: String,
     /// Display name of the user.
     pub user_name: String,
+    /// Max tokens for the response (None = use default from config).
+    pub max_tokens: Option<u32>,
+    /// Original user message for history storage (instead of the request `message`).
+    /// Used by follow-up calls so the stored user_msg matches the real user input.
+    pub original_user_msg: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,6 +263,9 @@ pub struct LlmResponse {
     /// Tool calls extracted from the LLM response.
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    /// Reasoning / thinking chain content (DeepSeek thinking mode).
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
