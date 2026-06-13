@@ -1,71 +1,64 @@
 # 微信插件开发计划
 
-> 状态：v2.0.0 | 自包含 WeChat Web 协议
+> 状态：v0.2.0 | iLink Bot API（腾讯官方协议）
+> 基座：`https://ilinkai.weixin.qq.com`
 
-## 一、微信绑定
+## ✅ 已完成
 
-**目标：插件自包含，零外部依赖。启动 → QR → 扫码 → 收发消息。**
-
-### 协议层（protocol.rs）
-- [x] `fetch_uuid()` — 从 login.weixin.qq.com 获取 UUID
-- [x] `poll_login()` — 轮询扫码状态（窗口码 201/200/408）
-- [x] `get_session()` — 扫码后获取 session（skey, wxsid, wxuin, pass_ticket）
-- [x] `webwxinit()` — 初始化联系人 + 获取 SyncKey
-- [x] `synccheck()` — 轮询新消息
-- [x] `webwxsync()` — 拉取新消息
-- [x] `send_msg()` — 发送文本消息
+### 登录
+- [x] `fetch_qrcode()` — 获取二维码 + QR 内容
+- [x] `poll_qrcode()` — 轮询扫码状态（wait → scaned → confirmed / expired）
 - [x] 二维码 PNG 生成（qrcode + image crate）
+- [x] 自动刷新过期二维码（最多 3 次）
+- [x] token 持久化到 `data/wechat_session.json`，重启免扫码
 
-### 插件层（lib.rs）
-- [x] 启动时自动获取 UUID + 生成二维码
-- [x] 终端输出二维码图片路径 + URL
-- [x] `wechat_qrcode` 工具 — 获取当前二维码信息
-- [x] `wechat_send_message` 工具 — 发送消息
+### 消息收发
+- [x] `get_updates()` — 长轮询收消息（35s 挂起）
+- [x] `send_message()` — 发送文本消息（含 context_token）
+- [x] 自动管理 context_token（按用户缓存）
+- [x] 断线检测（errcode -14）→ 自动清除 token → 重新登录
+- [x] `wechat_send_message` 工具
+- [x] `wechat_qrcode` 工具
+
+### 输入状态
+- [x] `get_typing_ticket()` — 获取 typing 凭证（POST /getconfig）
+- [x] `send_typing()` — 发送输入状态（POST /sendtyping）
+- [x] 接收消息后自动显示"对方正在输入中"
+- [x] 每 5 秒保活，最长 30 秒
+- [x] 回复发送后自动停止
+- [x] typing_ticket 按用户缓存（≈24h）
+
+### 插件集成
 - [x] `snapshot()` — 连接状态注入 LLM 上下文
-- [x] 后台轮询扫码 + 自动登录
-- [x] 登录后消息轮询循环
+- [x] 事件流：user.message → Pipeline → assistant.message → send_message
+- [x] 2 个注册工具
+- [x] 后台登录/轮询线程
 
-### 待做
-- [ ] 绑定成功后持久化凭证，断线重连
-- [ ] 凭证过期 / 解绑的检测与提示
-- [ ] 音频（语音接收 / 发送）
+## 📋 待做
 
-## 二、音频
+### 消息接收增强
+- [ ] 图片消息（CDN 下载 + AES-128-ECB 解密 → base64 → user.message）
+- [ ] 语音消息（CDN 下载 + SILK 转码 → user.message）
+- [ ] 视频消息（CDN 下载 → user.message）
+- [ ] 文件消息（CDN 下载 → user.message）
 
-### 接收（微信 → Bot）
-- [x] 语音消息识别（WeChat Web `voice_item.text`）
-- [x] 转发为 `user.message`（标记来源 `wechat`）
-
-### 发送（Bot → 微信）
-- [ ] ~~TTS + iLink send_voice~~ 当前 iLink 返回 `{"ret":-3}`，发送失败
-- [ ] 排查 `ret:-3` 原因（音频格式？MIME？大小限制？）
-- [ ] 改用 iLink `sendmessage` 发送 audio，或换其他方式
-- [ ] "正在输入" 状态（iLink sendtyping 需要 `typing_ticket`）
-
-## 三、视频
-
-### 接收（微信 → Bot）
-- [ ] 视频消息的 item 结构调研（`video_item` 字段）
-- [ ] 视频文件下载 / CDN 解密
-- [ ] 转发为 `user.message` 含 `video_base64`
-
-### 发送（Bot → 微信）
-- [ ] `wechat_send_video` 工具
-- [ ] 视频格式转换支持
-
-## 四、文件
-
-### 接收（微信 → Bot）
-- [ ] 文件消息的 item 结构调研（`file_item` 字段）
-- [ ] 文件下载 / CDN 解密
-- [ ] 转发为 `user.message` 含 `file_base64`
-
-### 发送（Bot → 微信）
+### 消息发送增强
+- [ ] `wechat_send_image` 工具（CDN 上传 + AES 加密）
+- [ ] `wechat_send_voice` 工具
 - [ ] `wechat_send_file` 工具
-- [ ] 文件大小限制处理
+- [ ] `wechat_send_video` 工具
 
-## 五、架构优化
+### 媒体 CDN
+- [ ] `get_upload_url()` — 获取 CDN 上传参数
+- [ ] AES-128-ECB 加密/解密（PKCS7 填充）
+- [ ] CDN 文件上传/下载
 
-- [ ] 清理 dead code（`extract_media`、`tool_registry` 参数）
-- [ ] `process_message` 用 `route.message` 走 MessageRouter 统一路由
-- [ ] 统一媒体处理流程（CDN 下载 → 解密 → base64）
+### 稳定性
+- [ ] 多账号支持（配置化）
+- [ ] get_updates 空响应超时处理（客户端超时后自动重试）
+- [ ] typing 循环异常保护（断线时优雅退出）
+- [ ] 日志分级（消息体脱敏）
+
+### 架构
+- [ ] 统一媒体处理流程（CDN → 解密 → 转码 → base64）
+- [ ] 与 asr-tts-plugin 集成（语音识别/合成）
