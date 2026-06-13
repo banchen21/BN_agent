@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 struct SendMessageTool {
     bot_handle: BotHandle,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl ToolExecutor for SendMessageTool {
@@ -38,7 +39,7 @@ impl ToolExecutor for SendMessageTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
+                    "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
                     "text": {"type": "string", "description": "Message text"}
                 },
                 "required": ["text"]
@@ -48,7 +49,9 @@ impl ToolExecutor for SendMessageTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+            .or_else(|| *self.current_chat_id.lock().unwrap());
+        let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
@@ -79,6 +82,7 @@ struct SendVoiceTool {
     bot_handle: BotHandle,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl ToolExecutor for SendVoiceTool {
@@ -90,7 +94,7 @@ impl ToolExecutor for SendVoiceTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
+                    "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
                     "text": {"type": "string", "description": "Text to speak"}
                 },
                 "required": ["text"]
@@ -100,7 +104,9 @@ impl ToolExecutor for SendVoiceTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+            .or_else(|| *self.current_chat_id.lock().unwrap());
+        let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
@@ -164,6 +170,7 @@ impl ToolExecutor for SendVoiceTool {
 struct SendPhotoTool {
     bot_handle: BotHandle,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl ToolExecutor for SendPhotoTool {
@@ -175,7 +182,7 @@ impl ToolExecutor for SendPhotoTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
+                    "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
                     "photo_base64": {"type": "string", "description": "Base64 JPEG/PNG"},
                     "caption": {"type": "string", "description": "Optional caption"}
                 },
@@ -186,7 +193,9 @@ impl ToolExecutor for SendPhotoTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+            .or_else(|| *self.current_chat_id.lock().unwrap());
+        let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
@@ -222,6 +231,7 @@ impl ToolExecutor for SendPhotoTool {
 struct SendVideoTool {
     bot_handle: BotHandle,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl ToolExecutor for SendVideoTool {
@@ -233,7 +243,7 @@ impl ToolExecutor for SendVideoTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
+                    "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
                     "video_base64": {"type": "string", "description": "Base64 encoded video data (MP4)"},
                     "caption": {"type": "string", "description": "Optional caption"}
                 },
@@ -244,7 +254,9 @@ impl ToolExecutor for SendVideoTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+            .or_else(|| *self.current_chat_id.lock().unwrap());
+        let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
@@ -279,6 +291,7 @@ impl ToolExecutor for SendVideoTool {
 struct SendDocumentTool {
     bot_handle: BotHandle,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl ToolExecutor for SendDocumentTool {
@@ -290,7 +303,7 @@ impl ToolExecutor for SendDocumentTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
+                    "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
                     "file_base64": {"type": "string", "description": "Base64 encoded file data"},
                     "file_name": {"type": "string", "description": "File name with extension, e.g. report.pdf"},
                     "caption": {"type": "string", "description": "Optional caption"}
@@ -302,7 +315,9 @@ impl ToolExecutor for SendDocumentTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = match args.get("chat_id").and_then(|v| v.as_i64()) {
+        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+            .or_else(|| *self.current_chat_id.lock().unwrap());
+        let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
@@ -345,6 +360,8 @@ pub struct TgImPlugin {
     bot_thread: Option<std::thread::JoinHandle<()>>,
     /// 正在等待 LLM 回复的 TG chat_id，用于持续发送 typing
     processing_chats: Arc<Mutex<HashSet<i64>>>,
+    /// 当前平台会话 ID（pipeline 不再注入，插件自行维护）
+    current_chat_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl TgImPlugin {
@@ -360,6 +377,7 @@ impl TgImPlugin {
             bot_handle: None,
             bot_thread: None,
             processing_chats: Arc::new(Mutex::new(HashSet::new())),
+            current_chat_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -381,40 +399,47 @@ impl Plugin for TgImPlugin {
         let bot_handle = BotHandle::new(bot.clone());
 
         let pc = self.processing_chats.clone();
+        let cc = self.current_chat_id.clone();
         if let Some(ref reg) = ctx.tool_registry {
             let mut reg = reg.lock().map_err(|e| format!("lock: {}", e))?;
             reg.register(Arc::new(SendMessageTool {
                 bot_handle: bot_handle.clone(),
                 processing_chats: pc.clone(),
+                current_chat_id: cc.clone(),
             }));
             reg.register(Arc::new(SendVoiceTool {
                 bot_handle: bot_handle.clone(),
                 tool_registry: ctx.tool_registry.clone().unwrap(),
                 processing_chats: pc.clone(),
+                current_chat_id: cc.clone(),
             }));
             reg.register(Arc::new(SendPhotoTool {
                 bot_handle: bot_handle.clone(),
                 processing_chats: pc.clone(),
+                current_chat_id: cc.clone(),
             }));
             reg.register(Arc::new(SendVideoTool {
                 bot_handle: bot_handle.clone(),
                 processing_chats: pc.clone(),
+                current_chat_id: cc.clone(),
             }));
             reg.register(Arc::new(SendDocumentTool {
                 bot_handle: bot_handle.clone(),
                 processing_chats: pc.clone(),
+                current_chat_id: cc.clone(),
             }));
             log::info!("[tg-im] registered 5 tools");
         }
 
         // 2. 启动 bot 线程（独立 tokio 运行时）。
         let event_bus = ctx.event_bus.clone();
+        let cc2 = self.current_chat_id.clone();
         let on_user_message: UserMessageCallback = Arc::new(
             move |chat_id: i64, text: &str, user_name: &str| {
+                *cc2.lock().unwrap() = Some(chat_id);
                 event_bus.do_send(Event::new(
                     "user.message",
                     serde_json::json!({
-                        "chat_id": chat_id,
                         "text": text,
                         "source": "telegram",
                         "user_name": user_name,
@@ -427,8 +452,10 @@ impl Plugin for TgImPlugin {
         // 语音消息回调：下载后调用 ASR 工具，将识别结果发布为 user.message
         let tr = ctx.tool_registry.clone().unwrap();
         let eb_vc = ctx.event_bus.clone();
+        let cc3 = self.current_chat_id.clone();
         let on_voice_message: bot::VoiceMessageCallback = Arc::new(
             move |chat_id: i64, audio_b64: String, mime: &str, user_name: &str| {
+                *cc3.lock().unwrap() = Some(chat_id);
                 let tr = tr.clone();
                 let eb = eb_vc.clone();
                 let m = mime.to_string();
@@ -456,7 +483,6 @@ impl Plugin for TgImPlugin {
                         eb.do_send(Event::new(
                             "user.message",
                             serde_json::json!({
-                                "chat_id": chat_id,
                                 "text": asr_result.content,
                                 "source": "telegram",
                                 "user_name": format!("{} (语音)", un),
@@ -470,8 +496,10 @@ impl Plugin for TgImPlugin {
 
         // 图片消息回调：下载后发布为带 image_base64 的 user.message
         let eb_photo = ctx.event_bus.clone();
+        let cc4 = self.current_chat_id.clone();
         let on_photo_message: bot::PhotoMessageCallback = Arc::new(
             move |chat_id: i64, img_b64: String, user_name: &str| {
+                *cc4.lock().unwrap() = Some(chat_id);
                 let eb = eb_photo.clone();
                 let un = user_name.to_string();
                 std::thread::spawn(move || {
@@ -479,7 +507,6 @@ impl Plugin for TgImPlugin {
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
-                            "chat_id": chat_id,
                             "text": format!("@{} 发送了一张图片", un),
                             "image_base64": img_b64,
                             "source": "telegram",
@@ -493,8 +520,10 @@ impl Plugin for TgImPlugin {
 
         // 文件消息回调：下载后发布为带 file 信息的 user.message
         let eb_file = ctx.event_bus.clone();
+        let cc5 = self.current_chat_id.clone();
         let on_file_message: bot::FileMessageCallback = Arc::new(
             move |chat_id: i64, file_b64: String, file_name: String, user_name: &str| {
+                *cc5.lock().unwrap() = Some(chat_id);
                 let eb = eb_file.clone();
                 let un = user_name.to_string();
                 let fn2 = file_name.clone();
@@ -503,7 +532,6 @@ impl Plugin for TgImPlugin {
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
-                            "chat_id": chat_id,
                             "text": format!("@{} 发送了文件：{}", un, fn2),
                             "source": "telegram",
                             "user_name": format!("{} (文件)", un),
@@ -518,8 +546,10 @@ impl Plugin for TgImPlugin {
 
         // 视频消息回调：下载后发布为带 video_base64 的 user.message
         let eb_video = ctx.event_bus.clone();
+        let cc6 = self.current_chat_id.clone();
         let on_video_message: bot::VideoMessageCallback = Arc::new(
             move |chat_id: i64, video_b64: String, mime: String, user_name: &str| {
+                *cc6.lock().unwrap() = Some(chat_id);
                 let eb = eb_video.clone();
                 let un = user_name.to_string();
                 let m = mime;
@@ -528,7 +558,6 @@ impl Plugin for TgImPlugin {
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
-                            "chat_id": chat_id,
                             "text": format!("@{} 发送了一个视频", un),
                             "video_base64": video_b64,
                             "video_mime": m,
@@ -567,7 +596,7 @@ impl Plugin for TgImPlugin {
         // NOTE: log::info! 在 cdylib 中不生效（log crate 被静态链接，独立于主进程的 env_logger）。
         // 使用 eprintln! 替代。
         let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
-        let chat_id = event.data.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let chat_id = self.current_chat_id.lock().unwrap().unwrap_or(0);
 
         // ── user.message from Telegram → 持续发 Typing 直到回复 ──
         if event.topic == "user.message" && source == "telegram" && chat_id != 0 {

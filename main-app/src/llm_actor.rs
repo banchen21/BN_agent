@@ -14,7 +14,7 @@
 //! | `llm.error`     | HTTP / API / parse failure     |
 
 use actix::prelude::*;
-use crate::chat_store::{ChatStoreActor, FetchRecent, AppendPair, ClearSession as StoreClearSession};
+use crate::chat_store::{ChatStoreActor, FetchRecent, AppendPair};
 use plugin_interface::*;
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -236,7 +236,6 @@ impl Handler<ChatRequest> for LlmActor {
         };
         let limit = self.config.max_history_turns * 2;
 
-        let chat_id = msg.chat_id;
         let user_msg = msg.message.clone();
         let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
@@ -249,9 +248,6 @@ impl Handler<ChatRequest> for LlmActor {
         let max_tokens = msg.max_tokens.unwrap_or(self.config.max_tokens);
         let file_base64 = msg.file_base64.clone();
         let file_name = msg.file_name.clone();
-        let source = msg.source.clone();
-        let user_name = msg.user_name.clone();
-
         // Capture config values needed for the async future.
         let image_model = self.config.image_model.clone();
         let image_base_url = self.config.image_base_url.clone();
@@ -264,7 +260,7 @@ impl Handler<ChatRequest> for LlmActor {
         let thinking = self.config.thinking;
 
         event_bus.do_send(Event::new("llm.request", serde_json::json!({
-            "model": model, "chat_id": chat_id, "mode": "chat",
+            "model": model, "mode": "chat",
             "tool_count": tools.len(), "context_count": contexts.len(),
             "stream": stream,
         }), "llm-actor"));
@@ -290,17 +286,11 @@ impl Handler<ChatRequest> for LlmActor {
             }
 
             // ── 3. Recent history ──
-            let records = store_addr.send(FetchRecent { chat_id, limit }).await.unwrap_or_default();
+            let records = store_addr.send(FetchRecent { limit }).await.unwrap_or_default();
             for r in &records {
-                let mut msg = serde_json::json!({
+                messages.push(serde_json::json!({
                     "role": r.role.clone(), "content": r.content.clone()
-                });
-                if let Some(ref rc) = r.reasoning_content {
-                    if !rc.is_empty() {
-                        msg["reasoning_content"] = serde_json::json!(rc);
-                    }
-                }
-                messages.push(msg);
+                }));
             }
 
             // ── 4. Other plugin contexts ──
@@ -401,7 +391,7 @@ impl Handler<ChatRequest> for LlmActor {
 
             // ── 5. Call LLM ──
             let mut result = if stream {
-                stream_llm(&client, &api_url, &actual_api_key, &body, &event_bus, chat_id).await
+                stream_llm(&client, &api_url, &actual_api_key, &body, &event_bus).await
             } else {
                 call_llm(&client, &api_url, &actual_api_key, &body, &event_bus).await
             };
@@ -437,7 +427,7 @@ impl Handler<ChatRequest> for LlmActor {
                     fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
                     result = if stream {
-                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, chat_id).await
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     } else {
                         call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     };
@@ -475,7 +465,7 @@ impl Handler<ChatRequest> for LlmActor {
                     fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
                     result = if stream {
-                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, chat_id).await
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     } else {
                         call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     };
@@ -488,10 +478,8 @@ impl Handler<ChatRequest> for LlmActor {
                     // 只有有实际文本内容时才存历史；纯工具调用不存（避免干扰模型上下文）
                     if !resp.content.trim().is_empty() {
                         store_addr.do_send(AppendPair {
-                            chat_id,
                             user_msg: original_user_msg.clone().unwrap_or_else(|| user_msg.clone()),
                             assistant_msg: resp.content.clone(),
-                            reasoning_content: resp.reasoning_content.clone(),
                         });
                     }
                 }
@@ -519,17 +507,6 @@ impl Handler<JailbreakCount> for LlmActor {
     }
 }
 
-#[derive(Message)]
-#[rtype(result = "()")]
-pub struct ClearSession(pub i64);
-
-impl Handler<ClearSession> for LlmActor {
-    type Result = ();
-    fn handle(&mut self, msg: ClearSession, _: &mut Self::Context) {
-        self.store_addr.do_send(StoreClearSession(msg.0));
-    }
-}
-
 // ── Streaming LLM call ──────────────────────────────────────────────────────
 
 /// Call the LLM with SSE streaming, emitting chunks on the EventBus.
@@ -539,7 +516,6 @@ async fn stream_llm(
     api_key: &str,
     body: &serde_json::Value,
     event_bus: &Addr<EventBus>,
-    chat_id: i64,
 ) -> Result<LlmResponse, String> {
     use futures_util::StreamExt;
 
@@ -575,7 +551,8 @@ async fn stream_llm(
     let mut prompt_tokens: u32 = 0;
     let mut completion_tokens: u32 = 0;
     let mut chunk_count = 0u64;
-    let mut reasoning_content = String::new();
+    let mut prompt_cache_hit_tokens: u32 = 0;
+    let mut prompt_cache_miss_tokens: u32 = 0;
 
     struct PartialToolCall {
         id: String, name: String, arguments: String,
@@ -612,11 +589,20 @@ async fn stream_llm(
             };
 
             let choices = data["choices"].as_array();
-            if choices.is_none() || choices.unwrap().is_empty() {
-                if let Some(usage) = data.get("usage") {
+
+            // Capture usage from ANY chunk (some APIs send it with choices, others separately)
+            if let Some(usage) = data.get("usage") {
+                if usage["prompt_tokens"].as_u64().unwrap_or(0) > 0 {
                     prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                     completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    prompt_cache_hit_tokens = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
+                    prompt_cache_miss_tokens = usage["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
+                    log::info!("[stream_llm] usage captured: prompt={}, completion={}, cache_hit={}, cache_miss={}",
+                        prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens);
                 }
+            }
+
+            if choices.is_none() || choices.unwrap().is_empty() {
                 if model_name.is_empty() {
                     if let Some(m) = data["model"].as_str() {
                         model_name = m.to_string();
@@ -631,14 +617,9 @@ async fn stream_llm(
                 full_content.push_str(content);
                 chunk_count += 1;
                 event_bus.do_send(Event::new("llm.chunk", serde_json::json!({
-                    "chat_id": chat_id,
                     "content": content,
                     "accumulated_length": full_content.len(),
                 }), "llm-actor"));
-            }
-
-            if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                reasoning_content.push_str(rc);
             }
 
             if let Some(tc) = delta.get("tool_calls") {
@@ -687,8 +668,9 @@ async fn stream_llm(
         model: model_name,
         prompt_tokens,
         completion_tokens,
+        prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens,
         tool_calls: collected_tool_calls,
-        reasoning_content: Some(reasoning_content.clone()),
     };
 
     let preview = truncate_preview(&full_content, 200);
@@ -742,6 +724,8 @@ async fn call_llm(
     let content = choice["message"]["content"].as_str().unwrap_or("").to_string();
     let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+    let prompt_cache_hit_tokens = json["usage"]["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
+    let prompt_cache_miss_tokens = json["usage"]["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
 
     let tool_calls: Vec<ToolCall> = choice["message"]["tool_calls"]
         .as_array()
@@ -756,17 +740,15 @@ async fn call_llm(
         })
         .unwrap_or_default();
 
-    let reasoning_content = choice["message"]["reasoning_content"]
-        .as_str()
-        .map(|s| s.to_string());
     let tc_count = tool_calls.len();
     let llm_response = LlmResponse {
         content: content.clone(),
         model: json["model"].as_str().unwrap_or("").to_string(),
         prompt_tokens,
         completion_tokens,
+        prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens,
         tool_calls,
-        reasoning_content,
     };
 
     let preview = truncate_preview(&content, 200);

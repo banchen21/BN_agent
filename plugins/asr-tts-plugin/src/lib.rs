@@ -146,7 +146,7 @@ impl AsrTtsPlugin {
                         eb.do_send(Event::new(
                             "user.message",
                             serde_json::json!({
-                                "chat_id": peer, "user_name": format!("{}:{}", source_owned, peer),
+                                "user_name": format!("{}:{}", source_owned, peer),
                                 "text": text, "source": source_owned,
                             }),
                             "asr-tts-plugin",
@@ -159,8 +159,8 @@ impl AsrTtsPlugin {
     }
 
     fn handle_assistant_for_tts(&self, event: &Event, source: &str) {
-        let peer_id = event.data.get("chat_id")
-            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // 单会话模式：使用 source 作为 peer 标识
+        let peer_id = source.to_string();
         let text = match event.data.get("text").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(), None => return,
         };

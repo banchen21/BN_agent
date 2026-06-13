@@ -1,6 +1,6 @@
 //! ChatStoreActor — actix actor wrapping SQLite-backed chat history.
 //!
-//! Each row is keyed by `(chat_id, timestamp)` and stores role + content.
+//! Each row stores role + content with a timestamp.
 //!
 //! ## Messages
 //!
@@ -9,7 +9,6 @@
 //! | `FetchRecent`       | `Vec<Record>`      | Load recent N records          |
 //! | `AppendRecord`      | `()`               | Insert one message             |
 //! | `AppendPair`        | `()`               | Insert user + assistant pair   |
-//! | `ClearSession`      | `usize`            | Delete all records for chat_id |
 //! | `ClearAll`          | `usize`            | Delete all records             |
 
 use actix::prelude::*;
@@ -21,16 +20,14 @@ use rusqlite::{params, Connection, Result as SqlResult};
 pub struct Record {
     pub role: String,
     pub content: String,
-    pub reasoning_content: Option<String>,
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
-/// Fetch the most recent N records for a chat (oldest first).
+/// Fetch the most recent N records (oldest first).
 #[derive(Message)]
 #[rtype(result = "Vec<Record>")]
 pub struct FetchRecent {
-    pub chat_id: i64,
     pub limit: usize,
 }
 
@@ -38,7 +35,6 @@ pub struct FetchRecent {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct AppendRecord {
-    pub chat_id: i64,
     pub role: String,
     pub content: String,
 }
@@ -47,16 +43,9 @@ pub struct AppendRecord {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct AppendPair {
-    pub chat_id: i64,
     pub user_msg: String,
     pub assistant_msg: String,
-    pub reasoning_content: Option<String>,
 }
-
-/// Clear all records for a chat_id.
-#[derive(Message)]
-#[rtype(result = "usize")]
-pub struct ClearSession(pub i64);
 
 /// Clear all records in the database.
 #[derive(Message)]
@@ -76,19 +65,12 @@ impl ChatStoreActor {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                reasoning_content TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-            CREATE INDEX IF NOT EXISTS idx_chat_id ON chat_history(chat_id);
             CREATE INDEX IF NOT EXISTS idx_created ON chat_history(created_at);",
         )?;
-        // Add reasoning_content column if upgrading from old schema
-        let _ = conn.execute_batch(
-            "ALTER TABLE chat_history ADD COLUMN reasoning_content TEXT;",
-        );
         Ok(Self { conn })
     }
 
@@ -114,19 +96,17 @@ impl Handler<FetchRecent> for ChatStoreActor {
     fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
         // 子查询先取最新 N 条，外层按 id ASC 恢复时间序
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT role, content, reasoning_content FROM (
-                SELECT id, role, content, reasoning_content FROM chat_history
-                WHERE chat_id = ?1
+            "SELECT role, content FROM (
+                SELECT id, role, content FROM chat_history
                 ORDER BY id DESC
-                LIMIT ?2
+                LIMIT ?1
             ) ORDER BY id ASC"
         ) else { return vec![]; };
 
-        let rows = stmt.query_map(params![msg.chat_id, msg.limit as i64], |row| {
+        let rows = stmt.query_map(params![msg.limit as i64], |row| {
             Ok(Record {
                 role: row.get(0)?,
                 content: row.get(1)?,
-                reasoning_content: row.get(2).ok(),
             })
         });
 
@@ -145,8 +125,8 @@ impl Handler<AppendRecord> for ChatStoreActor {
 
     fn handle(&mut self, msg: AppendRecord, _ctx: &mut Self::Context) {
         if let Err(e) = self.conn.execute(
-            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, ?2, ?3)",
-            params![msg.chat_id, msg.role, msg.content],
+            "INSERT INTO chat_history (role, content) VALUES (?1, ?2)",
+            params![msg.role, msg.content],
         ) {
             log::error!("[ChatStoreActor] AppendRecord failed: {}", e);
         }
@@ -158,33 +138,16 @@ impl Handler<AppendPair> for ChatStoreActor {
 
     fn handle(&mut self, msg: AppendPair, _ctx: &mut Self::Context) {
         if let Err(e) = self.conn.execute(
-            "INSERT INTO chat_history (chat_id, role, content) VALUES (?1, 'user', ?2)",
-            params![msg.chat_id, msg.user_msg],
+            "INSERT INTO chat_history (role, content) VALUES ('user', ?1)",
+            params![msg.user_msg],
         ) {
             log::error!("[ChatStoreActor] AppendPair user failed: {}", e);
         }
         if let Err(e) = self.conn.execute(
-            "INSERT INTO chat_history (chat_id, role, content, reasoning_content) VALUES (?1, 'assistant', ?2, ?3)",
-            params![msg.chat_id, msg.assistant_msg, msg.reasoning_content],
+            "INSERT INTO chat_history (role, content) VALUES ('assistant', ?1)",
+            params![msg.assistant_msg],
         ) {
             log::error!("[ChatStoreActor] AppendPair assistant failed: {}", e);
-        }
-    }
-}
-
-impl Handler<ClearSession> for ChatStoreActor {
-    type Result = usize;
-
-    fn handle(&mut self, msg: ClearSession, _ctx: &mut Self::Context) -> Self::Result {
-        match self.conn.execute(
-            "DELETE FROM chat_history WHERE chat_id = ?1",
-            params![msg.0],
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                log::error!("[ChatStoreActor] ClearSession failed: {}", e);
-                0
-            }
         }
     }
 }

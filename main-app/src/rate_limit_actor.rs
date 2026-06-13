@@ -1,19 +1,18 @@
-//! RateLimitActor — per-chat_id token-bucket rate limiter.
+//! RateLimitActor — global token-bucket rate limiter.
 //!
 //! ## Messages
 //!
-//! - `CheckRateLimit { chat_id }` → `bool` (true = allowed, false = rate-limited).
+//! - `CheckRateLimit` → `bool` (true = allowed, false = rate-limited).
 
 use actix::prelude::*;
 use plugin_interface::*;
-use std::collections::HashMap;
 use std::time::Instant;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct RateLimitConfig {
-    /// Max requests per minute per chat_id.
+    /// Max requests per minute (global).
     pub requests_per_minute: u32,
     /// Max burst size (allow short bursts above the sustained rate).
     pub burst_size: u32,
@@ -82,35 +81,21 @@ impl TokenBucket {
 
 #[derive(Message)]
 #[rtype(result = "bool")]
-pub struct CheckRateLimit {
-    pub chat_id: i64,
-}
-
-/// Get current rate limit state for a chat_id (for debugging/metrics).
-#[derive(Message)]
-#[rtype(result = "Option<RateLimitStatus>")]
-pub struct GetRateLimitStatus {
-    pub chat_id: i64,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct RateLimitStatus {
-    pub chat_id: i64,
-    pub tokens_remaining: f64,
-    pub capacity: f64,
-}
+pub struct CheckRateLimit;
 
 // ── Actor ────────────────────────────────────────────────────────────────────
 
 pub struct RateLimitActor {
-    buckets: HashMap<i64, TokenBucket>,
+    bucket: TokenBucket,
     config: RateLimitConfig,
 }
 
 impl RateLimitActor {
     pub fn new(config: RateLimitConfig) -> Self {
+        let capacity = config.burst_size as f64;
+        let refill_rate = config.requests_per_minute as f64 / 60.0;
         Self {
-            buckets: HashMap::new(),
+            bucket: TokenBucket::new(capacity, refill_rate),
             config,
         }
     }
@@ -131,29 +116,11 @@ impl Actor for RateLimitActor {
 impl Handler<CheckRateLimit> for RateLimitActor {
     type Result = bool;
 
-    fn handle(&mut self, msg: CheckRateLimit, _ctx: &mut Self::Context) -> bool {
-        let bucket = self.buckets.entry(msg.chat_id).or_insert_with(|| {
-            let capacity = self.config.burst_size as f64;
-            let refill_rate = self.config.requests_per_minute as f64 / 60.0;
-            TokenBucket::new(capacity, refill_rate)
-        });
-
-        let allowed = bucket.try_consume(1.0);
+    fn handle(&mut self, _msg: CheckRateLimit, _ctx: &mut Self::Context) -> bool {
+        let allowed = self.bucket.try_consume(1.0);
         if !allowed {
-            log::warn!("[RateLimit] chat_id={} rate-limited (tokens={:.1})", msg.chat_id, bucket.tokens);
+            log::warn!("[RateLimit] rate-limited (tokens={:.1})", self.bucket.tokens);
         }
         allowed
-    }
-}
-
-impl Handler<GetRateLimitStatus> for RateLimitActor {
-    type Result = Option<RateLimitStatus>;
-
-    fn handle(&mut self, msg: GetRateLimitStatus, _ctx: &mut Self::Context) -> Option<RateLimitStatus> {
-        self.buckets.get(&msg.chat_id).map(|b| RateLimitStatus {
-            chat_id: msg.chat_id,
-            tokens_remaining: b.tokens,
-            capacity: b.capacity,
-        })
     }
 }

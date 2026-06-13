@@ -28,7 +28,7 @@ Token 用量    ██████████ 完成
 - [x] **频率限制** — 令牌桶 per-chat_id 限流
 - [x] **结构化观测** — Prometheus 格式指标（延迟/成功率/调用计数）
 - [x] **LLM 多模态路由** — 图片/视频自动切换专用模型
-- [x] **DeepSeek 推理链支持** — reasoning_content 解析/存储/回传，思考模式开关（LLM_THINKING）
+- [x] **DeepSeek 思考模式开关** — LLM_THINKING 环境变量控制 thinking type
 - [x] **可配置 max_tokens** — LLM_MAX_TOKENS 环境变量（默认 384000）
 - [x] **工具调用稳定性** — tool_choice:auto + system prompt 工具感知提示，解决 persona 覆盖工具意识
 

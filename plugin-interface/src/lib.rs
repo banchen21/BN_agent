@@ -219,7 +219,6 @@ pub struct LlmRequest {
 #[derive(Message, Clone)]
 #[rtype(result = "Result<LlmResponse, String>")]
 pub struct ChatRequest {
-    pub chat_id: i64,
     pub message: String,
     pub tools: Vec<serde_json::Value>,
     pub skip_store: bool,
@@ -266,12 +265,16 @@ pub struct LlmResponse {
     pub model: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// DeepSeek 上下文硬盘缓存命中 tokens 数。
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: u32,
+    /// DeepSeek 上下文硬盘缓存未命中 tokens 数。
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: u32,
     /// Tool calls extracted from the LLM response.
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
-    /// Reasoning / thinking chain content (DeepSeek thinking mode).
-    #[serde(default)]
-    pub reasoning_content: Option<String>,
+
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -18,8 +18,7 @@
 //! | GET    | `/api/metrics`               | Prometheus-format metrics        |
 //! | GET    | `/api/metrics/json`          | JSON-format metrics              |
 //! | GET    | `/api/token-usage`           | Global token usage summary       |
-//! | GET    | `/api/token-usage/{chat_id}` | Per-chat token usage             |
-//! | POST   | `/api/cancel/{chat_id}`      | Cancel in-flight request         |
+//! | POST   | `/api/cancel`                | Cancel in-flight request         |
 //! | GET    | `/api/retry/state`           | Circuit breaker state            |
 //! | ANY    | `/api/plugin/{name}/{path:.*}` | Proxy to plugin API handler    |
 //! | POST   | `/api/shutdown`              | Graceful shutdown                |
@@ -163,7 +162,7 @@ async fn llm_chat(state: web::Data<AppState>, body: web::Json<LlmChatRequest>) -
 // ── Full Chat (with tools + history) ─────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct ChatPayload { chat_id: Option<i64>, message: String }
+struct ChatPayload { message: String }
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
     let retry_addr = match &state.retry_addr {
@@ -186,12 +185,10 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         Err(_) => vec![],
     };
 
-    let chat_id = body.chat_id.unwrap_or(0);
     let request_id = uuid::Uuid::new_v4().to_string();
 
     match retry_addr.send(retry_actor::RetryChatRequest {
         request: ChatRequest {
-            chat_id,
             message: body.message.clone(),
             tools,
             skip_store: false,
@@ -217,10 +214,11 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             // Record token usage if available.
             if let Some(ref tu) = state.token_usage_addr {
                 tu.do_send(token_usage_actor::RecordTokenUsage {
-                    chat_id,
                     model: resp.model.clone(),
                     prompt_tokens: resp.prompt_tokens,
                     completion_tokens: resp.completion_tokens,
+                    prompt_cache_hit_tokens: resp.prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens: resp.prompt_cache_miss_tokens,
                 });
             }
             HttpResponse::Ok().json(resp)
@@ -281,21 +279,8 @@ async fn get_global_token_usage(state: web::Data<AppState>) -> impl Responder {
     let summary = match &state.token_usage_addr {
         Some(a) => a.send(token_usage_actor::GetGlobalTokenUsage).await.unwrap_or_else(|_| {
             token_usage_actor::TokenUsageSummary {
-                chat_id: None, total_prompt_tokens: 0, total_completion_tokens: 0,
-                total_tokens: 0, total_calls: 0, by_model: std::collections::HashMap::new(),
-            }
-        }),
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Token usage tracking not available" })),
-    };
-    HttpResponse::Ok().json(summary)
-}
-
-async fn get_chat_token_usage(state: web::Data<AppState>, path: web::Path<i64>) -> impl Responder {
-    let chat_id = path.into_inner();
-    let summary = match &state.token_usage_addr {
-        Some(a) => a.send(token_usage_actor::GetTokenUsage { chat_id }).await.unwrap_or_else(|_| {
-            token_usage_actor::TokenUsageSummary {
-                chat_id: Some(chat_id), total_prompt_tokens: 0, total_completion_tokens: 0,
+                total_prompt_tokens: 0, total_completion_tokens: 0,
+                total_prompt_cache_hit_tokens: 0, total_prompt_cache_miss_tokens: 0,
                 total_tokens: 0, total_calls: 0, by_model: std::collections::HashMap::new(),
             }
         }),
@@ -306,16 +291,15 @@ async fn get_chat_token_usage(state: web::Data<AppState>, path: web::Path<i64>) 
 
 // ── Cancellation ─────────────────────────────────────────────────────────────
 
-async fn cancel_chat(state: web::Data<AppState>, path: web::Path<i64>) -> impl Responder {
-    let chat_id = path.into_inner();
+async fn cancel_handler(state: web::Data<AppState>) -> impl Responder {
     let cancelled = match &state.cancellation_addr {
-        Some(a) => a.send(cancellation_actor::CancelChat { chat_id }).await.unwrap_or(false),
+        Some(a) => a.send(cancellation_actor::CancelCurrent).await.unwrap_or(false),
         None => false,
     };
     if cancelled {
-        HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled", "chat_id": chat_id }))
+        HttpResponse::Ok().json(serde_json::json!({ "status": "cancelled" }))
     } else {
-        HttpResponse::Ok().json(serde_json::json!({ "status": "no_active_request", "chat_id": chat_id }))
+        HttpResponse::Ok().json(serde_json::json!({ "status": "no_active_request" }))
     }
 }
 
@@ -376,6 +360,31 @@ fn main() -> std::io::Result<()> {
     let log_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
     let _ = std::fs::create_dir_all(&log_dir);
     let log_file = log_dir.join("app.log");
+    // 启动前清理旧日志
+    // RUST_LOG=debug 时直接清掉，否则超过 10MB 才轮转（最多留 3 个备份）
+    let is_debug = std::env::var("RUST_LOG")
+        .map(|v| v.to_lowercase().contains("debug"))
+        .unwrap_or(false);
+    if is_debug {
+        let _ = std::fs::remove_file(&log_file);
+    } else {
+        const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+        const LOG_MAX_BACKUPS: u32 = 3;
+        if let Ok(meta) = std::fs::metadata(&log_file) {
+            if meta.len() > LOG_MAX_BYTES {
+                for i in (1..=LOG_MAX_BACKUPS).rev() {
+                    let old = log_dir.join(format!("app.log.{}.old", i));
+                    if i == LOG_MAX_BACKUPS {
+                        let _ = std::fs::remove_file(&old);
+                    } else {
+                        let dst = log_dir.join(format!("app.log.{}.old", i + 1));
+                        let _ = std::fs::rename(&old, &dst);
+                    }
+                }
+                let _ = std::fs::rename(&log_file, log_dir.join("app.log.1.old"));
+            }
+        }
+    }
     let log_path = log_file.to_string_lossy().to_string();
     fern::Dispatch::new()
         .format(|out, message, record| {
@@ -540,8 +549,8 @@ fn main() -> std::io::Result<()> {
         };
 
         // ── 11. PipelineActor (if LLM is available). ──
-        if let (Some(ref retry), Some(ref tu), Some(ref metrics), Some(ref cancel)) =
-            (&retry_addr, &token_usage_addr, &metrics_addr, &cancellation_addr)
+        if let (Some(ref retry), Some(ref tu), Some(ref metrics)) =
+            (&retry_addr, &token_usage_addr, &metrics_addr)
         {
             let pipeline = pipeline::PipelineActor::new(
                 retry.clone(),
@@ -552,8 +561,6 @@ fn main() -> std::io::Result<()> {
                 rate_limit_addr.clone(),
                 tu.clone(),
                 metrics.clone(),
-                cancel.clone(),
-                store_addr.clone(),
             );
             let pipeline_addr = pipeline.start();
             log::info!("PipelineActor started");
@@ -608,8 +615,7 @@ fn main() -> std::io::Result<()> {
                 .route("/api/metrics", web::get().to(get_metrics))
                 .route("/api/metrics/json", web::get().to(get_metrics_json))
                 .route("/api/token-usage", web::get().to(get_global_token_usage))
-                .route("/api/token-usage/{chat_id}", web::get().to(get_chat_token_usage))
-                .route("/api/cancel/{chat_id}", web::post().to(cancel_chat))
+                .route("/api/cancel", web::post().to(cancel_handler))
                 .route("/api/retry/state", web::get().to(retry_state))
                 .route("/api/shutdown", web::post().to(shutdown))
                 .route("/api/plugin/{name}/{path:.*}", web::method(actix_web::http::Method::GET).to(plugin_proxy))

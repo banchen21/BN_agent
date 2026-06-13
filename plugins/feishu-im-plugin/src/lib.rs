@@ -10,6 +10,7 @@ pub struct FeishuImPlugin {
     info: PluginInfo,
     bot_handle: Option<Arc<Mutex<Option<BotHandle>>>>,
     event_bus: Option<Addr<EventBus>>,
+    current_chat_id: Arc<Mutex<Option<String>>>,
 }
 
 impl FeishuImPlugin {
@@ -24,6 +25,7 @@ impl FeishuImPlugin {
             },
             bot_handle: Some(Arc::new(Mutex::new(None))),
             event_bus: None,
+            current_chat_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -37,8 +39,9 @@ impl Plugin for FeishuImPlugin {
         // Register tool unconditionally.
         if let Some(ref reg) = ctx.tool_registry {
             let bh = self.bot_handle.clone();
+            let cc = self.current_chat_id.clone();
             reg.lock().map_err(|e| format!("lock: {}", e))?
-                .register(Arc::new(SendMessageTool { bot_handle: bh }));
+                .register(Arc::new(SendMessageTool { bot_handle: bh, current_chat_id: cc }));
             log::info!("[feishu-im] registered tool: feishu_send_message");
         }
 
@@ -85,7 +88,11 @@ impl Plugin for FeishuImPlugin {
             let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
             if !source.is_empty() && source != "feishu" { return true; }
 
-            let chat_id = event.data.get("chat_id").and_then(|v| v.as_str()).map(String::from);
+            // 从事件中提取并存储当前平台会话 ID
+            if let Some(cid) = event.data.get("chat_id").and_then(|v| v.as_str()) {
+                *self.current_chat_id.lock().unwrap() = Some(cid.to_string());
+            }
+            let chat_id = self.current_chat_id.lock().unwrap().clone();
             let text = event.data.get("text").and_then(|v| v.as_str());
             if let (Some(chat_id), Some(text)) = (chat_id, text) {
                 if let Some(ref bh) = self.bot_handle {
@@ -113,6 +120,7 @@ impl Plugin for FeishuImPlugin {
 
 struct SendMessageTool {
     bot_handle: Option<Arc<Mutex<Option<BotHandle>>>>,
+    current_chat_id: Arc<Mutex<Option<String>>>,
 }
 
 impl ToolExecutor for SendMessageTool {
@@ -124,17 +132,19 @@ impl ToolExecutor for SendMessageTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "string", "description": "Feishu chat ID"},
+                    "chat_id": {"type": "string", "description": "Feishu chat ID（可选，不传则发到当前会话）"},
                     "text": {"type": "string", "description": "Message text"}
                 },
-                "required": ["chat_id", "text"]
+                "required": ["text"]
             }),
         });
         &DEF
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let chat_id = args.get("chat_id").and_then(|v| v.as_str()).map(String::from)
+            .or_else(|| self.current_chat_id.lock().unwrap().clone())
+            .unwrap_or_default();
         let text = match args.get("text").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(), None => return ToolResult::err("missing: text"),
         };

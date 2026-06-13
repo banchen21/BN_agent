@@ -6,12 +6,11 @@
 
 use plugin_interface::*;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-/// 最近图片缓存（chat_id → (base64_data, mime_type)）
-static MEDIA_CACHE: LazyLock<Mutex<HashMap<i64, (String, String)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 最近图片缓存（单会话，只保留最新一张）
+static MEDIA_CACHE: LazyLock<Mutex<Option<(String, String)>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 // ── MiMo API 配置 ────────────────────────────────────────────────────────────
 
@@ -176,12 +175,9 @@ fn resolve_image(args: &serde_json::Value) -> Result<(String, String), String> {
         return Ok((b64.to_string(), mime));
     }
     // 从缓存取
-    let chat_id = args.get("chat_id").and_then(|v| v.as_i64());
-    if let Some(cid) = chat_id {
-        if let Ok(cache) = MEDIA_CACHE.lock() {
-            if let Some((b64, mime)) = cache.get(&cid) {
-                return Ok((b64.clone(), mime.clone()));
-            }
+    if let Ok(cache) = MEDIA_CACHE.lock() {
+        if let Some((b64, mime)) = cache.as_ref() {
+            return Ok((b64.clone(), mime.clone()));
         }
     }
     Err("未找到图片数据。请先发送图片，或提供 image_base64 参数。".into())
@@ -340,8 +336,7 @@ impl ToolExecutor for ImageCompareTool {
         let b64_a = match args.get("image_base64_a").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => {
-                let chat_id = args.get("chat_id").and_then(|v| v.as_i64());
-                match chat_id.and_then(|cid| MEDIA_CACHE.lock().ok().and_then(|c| c.get(&cid).cloned())) {
+                match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
                     Some((b64, _)) => b64,
                     None => return ToolResult::err("missing: image_base64_a（且缓存中无图片）"),
                 }
@@ -350,8 +345,7 @@ impl ToolExecutor for ImageCompareTool {
         let b64_b = match args.get("image_base64_b").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => {
-                let chat_id = args.get("chat_id").and_then(|v| v.as_i64());
-                match chat_id.and_then(|cid| MEDIA_CACHE.lock().ok().and_then(|c| c.get(&cid).cloned())) {
+                match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
                     Some((b64, _)) => b64,
                     None => return ToolResult::err("missing: image_base64_b（且缓存中无图片）"),
                 }
@@ -427,10 +421,8 @@ impl Plugin for ImagePlugin {
                 let mime = event.data.get("mime_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("image/jpeg");
-                if let Some(chat_id) = event.data.get("chat_id").and_then(|v| v.as_i64()) {
-                    if let Ok(mut cache) = MEDIA_CACHE.lock() {
-                        cache.insert(chat_id, (b64.to_string(), mime.to_string()));
-                    }
+                if let Ok(mut cache) = MEDIA_CACHE.lock() {
+                    *cache = Some((b64.to_string(), mime.to_string()));
                 }
             }
         }

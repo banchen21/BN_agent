@@ -2,7 +2,7 @@
 //!
 //! ## Flow
 //!
-//! 1. Receive `HandleUserMessage` with user text + chat_id + source.
+//! 1. Receive `HandleUserMessage` with user text + source.
 //! 2. Check rate limit (via `RateLimitActor`).
 //! 3. Generate request_id, register with `CancellationActor`.
 //! 4. Refresh plugin snapshots.
@@ -16,9 +16,7 @@ use actix::prelude::*;
 use plugin_interface::*;
 use std::sync::{Arc, Mutex};
 
-use crate::cancellation_actor::CancellationActor;
 use crate::metrics_actor::MetricsActor;
-use crate::chat_store::{ChatStoreActor};
 use crate::rate_limit_actor::RateLimitActor;
 use crate::retry_actor::{RetryActor, RetryChatRequest};
 use crate::token_usage_actor::TokenUsageActor;
@@ -30,7 +28,6 @@ use crate::plugin_manager::PluginManager;
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct HandleUserMessage {
-    pub chat_id: i64,
     pub text: String,
     pub source: String,
     pub user_name: String,
@@ -47,8 +44,6 @@ pub struct PipelineActor {
     rate_limit_addr: Addr<RateLimitActor>,
     token_usage_addr: Addr<TokenUsageActor>,
     metrics_addr: Addr<MetricsActor>,
-    cancellation_addr: Addr<CancellationActor>,
-    store_addr: Addr<ChatStoreActor>,
 }
 
 impl PipelineActor {
@@ -62,8 +57,6 @@ impl PipelineActor {
         rate_limit_addr: Addr<RateLimitActor>,
         token_usage_addr: Addr<TokenUsageActor>,
         metrics_addr: Addr<MetricsActor>,
-        cancellation_addr: Addr<CancellationActor>,
-        store_addr: Addr<ChatStoreActor>,
     ) -> Self {
         Self {
             retry_addr,
@@ -74,8 +67,6 @@ impl PipelineActor {
             rate_limit_addr,
             token_usage_addr,
             metrics_addr,
-            cancellation_addr,
-            store_addr,
         }
     }
 }
@@ -92,7 +83,6 @@ impl Actor for PipelineActor {
 
 #[allow(clippy::too_many_arguments)]
 async fn process_message(
-    chat_id: i64,
     text: String,
     source: String,
     user_name: String,
@@ -109,15 +99,13 @@ async fn process_message(
     rate_limit_addr: Addr<RateLimitActor>,
     token_usage_addr: Addr<TokenUsageActor>,
     metrics_addr: Addr<MetricsActor>,
-    cancellation_addr: Addr<CancellationActor>,
-    store_addr: Addr<ChatStoreActor>,
 ) {
     // 1. Rate limit check.
-    let allowed = rate_limit_addr.send(crate::rate_limit_actor::CheckRateLimit { chat_id }).await
+    let allowed = rate_limit_addr.send(crate::rate_limit_actor::CheckRateLimit).await
         .unwrap_or(true);
     if !allowed {
-        log::warn!("[Pipeline] chat_id={} rate limited", chat_id);
-        emit_reply(chat_id, "⏳ 请求过于频繁，请稍后再试。", &source, &event_bus, &plugin_manager).await;
+        log::warn!("[Pipeline] rate limited");
+        emit_reply("⏳ 请求过于频繁，请稍后再试。", &source, &event_bus).await;
         return;
     }
 
@@ -144,13 +132,10 @@ async fn process_message(
         Err(_) => vec![],
     };
 
-    let tool_count = tools.len();
-
     // 5. Send to RetryActor (streaming enabled).
     let req_start = std::time::Instant::now();
     let retry_msg = RetryChatRequest {
         request: ChatRequest {
-            chat_id,
             message: text.clone(),
             tools: tools.clone(),
             skip_store: false,
@@ -179,7 +164,7 @@ async fn process_message(
             log::error!("[Pipeline] LLM error: {}", e);
             // Record error metric.
             metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
-            emit_reply(chat_id, &format!("抱歉，出错了：{}", e), &source, &event_bus, &plugin_manager).await;
+            emit_reply(&format!("抱歉，出错了：{}", e), &source, &event_bus).await;
             return;
         }
         Err(e) => {
@@ -192,10 +177,11 @@ async fn process_message(
 
     // 6. Record token usage.
     token_usage_addr.do_send(crate::token_usage_actor::RecordTokenUsage {
-        chat_id,
         model: resp.model.clone(),
         prompt_tokens: resp.prompt_tokens,
         completion_tokens: resp.completion_tokens,
+        prompt_cache_hit_tokens: resp.prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens: resp.prompt_cache_miss_tokens,
     });
 
     // Record metrics.
@@ -221,10 +207,7 @@ async fn process_message(
                 }
             };
 
-            let mut args = tc.arguments.clone();
-            if let serde_json::Value::Object(ref mut map) = args {
-                map.insert("chat_id".to_string(), serde_json::json!(chat_id));
-            }
+            let args = tc.arguments.clone();
 
             let tool_start = std::time::Instant::now();
             let result = match executor {
@@ -257,7 +240,6 @@ async fn process_message(
         let req_start2 = std::time::Instant::now();
         let final_resp = retry_addr.send(RetryChatRequest {
             request: ChatRequest {
-                chat_id,
                 message: String::new(),
                 tools,
                 skip_store: false,
@@ -284,10 +266,11 @@ async fn process_message(
             Ok(Ok(r)) if !r.content.trim().is_empty() => {
                 // Record token usage for the follow-up.
                 token_usage_addr.do_send(crate::token_usage_actor::RecordTokenUsage {
-                    chat_id,
                     model: r.model.clone(),
                     prompt_tokens: r.prompt_tokens,
                     completion_tokens: r.completion_tokens,
+                    prompt_cache_hit_tokens: r.prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens: r.prompt_cache_miss_tokens,
                 });
                 metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
                     seconds: req_start2.elapsed().as_secs_f64(),
@@ -296,7 +279,7 @@ async fn process_message(
                 });
 
 
-                emit_reply(chat_id, &r.content, &source, &event_bus, &plugin_manager).await;
+                emit_reply(&r.content, &source, &event_bus).await;
             }
             Ok(Err(e)) => {
                 log::error!("[Pipeline] tool loop LLM error: {}", e);
@@ -309,7 +292,7 @@ async fn process_message(
         }
     } else if !resp.content.trim().is_empty() {
         // 8. Broadcast assistant reply.
-        emit_reply(chat_id, &resp.content, &source, &event_bus, &plugin_manager).await;
+        emit_reply(&resp.content, &source, &event_bus).await;
     }
 }
 
@@ -327,22 +310,18 @@ impl Handler<HandleUserMessage> for PipelineActor {
         let rate_limit_addr = self.rate_limit_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
         let metrics_addr = self.metrics_addr.clone();
-        let cancellation_addr = self.cancellation_addr.clone();
-        let store_addr = self.store_addr.clone();
-
         let text = msg.text;
-        let chat_id = msg.chat_id;
         let source = msg.source;
         let user_name = msg.user_name;
 
         let fut = async move {
             log::info!("[Pipeline] @{}: {}", user_name, text);
             process_message(
-                chat_id, text, source, user_name,
+                text, source, user_name,
                 None, None, None, None, None,
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr, cancellation_addr, store_addr,
+                metrics_addr,
             ).await;
         }.into_actor(self).map(|_, _ctx: &mut Self, _| ());
 
@@ -360,7 +339,6 @@ impl Handler<Event> for PipelineActor {
             return;
         }
 
-        let chat_id = event.data.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0);
         let text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let user_name = event.data.get("user_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
@@ -382,9 +360,6 @@ impl Handler<Event> for PipelineActor {
         let rate_limit_addr = self.rate_limit_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
         let metrics_addr = self.metrics_addr.clone();
-        let cancellation_addr = self.cancellation_addr.clone();
-        let store_addr = self.store_addr.clone();
-
         actix::spawn(async move {
             if !text.is_empty() {
                 log::info!("[Pipeline] @{}: {}", user_name, text);
@@ -394,11 +369,11 @@ impl Handler<Event> for PipelineActor {
             }
 
             process_message(
-                chat_id, text, source, user_name,
+                text, source, user_name,
                 image_base64, video_base64, video_mime, file_base64, file_name,
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr, cancellation_addr, store_addr,
+                metrics_addr,
             ).await;
         });
     }
@@ -407,15 +382,13 @@ impl Handler<Event> for PipelineActor {
 // ── Helper ───────────────────────────────────────────────────────────────────
 
 async fn emit_reply(
-    chat_id: i64,
     text: &str,
     source: &str,
     event_bus: &Addr<EventBus>,
-    _plugin_manager: &Addr<PluginManager>,
 ) {
     let reply = Event::new(
         "assistant.message",
-        serde_json::json!({ "chat_id": chat_id, "text": text, "source": source }),
+        serde_json::json!({ "text": text, "source": source }),
         "pipeline",
     );
     event_bus.do_send(reply);
