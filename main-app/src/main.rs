@@ -35,6 +35,7 @@ mod rate_limit_actor;
 mod retry_actor;
 mod token_usage_actor;
 mod plugin_tools;
+mod message_router;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
@@ -50,6 +51,7 @@ use retry_actor::RetryActor;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use token_usage_actor::TokenUsageActor;
+use message_router::MessageRouter;
 
 // ── App state ────────────────────────────────────────────────────────────────
 
@@ -411,6 +413,18 @@ fn main() -> std::io::Result<()> {
         // 1. EventBus.
         let event_bus = EventBus::new().start();
         log::info!("EventBus actor started");
+
+        // 1b. MessageRouter（统一消息路由层）。
+        let message_router_addr = MessageRouter::new(event_bus.clone()).start();
+        event_bus.do_send(Subscribe {
+            topic: "user.message".into(),
+            recipient: message_router_addr.clone().recipient(),
+        });
+        event_bus.do_send(Subscribe {
+            topic: "route.message".into(),
+            recipient: message_router_addr.recipient(),
+        });
+        log::info!("MessageRouter actor started, subscribed to 'user.message' + 'route.message'");
 
         // 2. ChatStoreActor (SQLite history).
         let store_addr = {

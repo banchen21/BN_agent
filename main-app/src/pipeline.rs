@@ -387,7 +387,7 @@ async fn emit_reply(
     event_bus: &Addr<EventBus>,
 ) {
     let reply = Event::new(
-        "assistant.message",
+        "route.message",
         serde_json::json!({ "text": text, "source": source }),
         "pipeline",
     );

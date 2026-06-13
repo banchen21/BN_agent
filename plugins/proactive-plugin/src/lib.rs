@@ -89,6 +89,8 @@ pub struct ProactivePlugin {
     plugin_name: Option<String>,
     loop_spawned: Arc<AtomicBool>,
     max_history: usize,
+    /// 后台循环间隔秒数（默认 15，可通过 PROACTIVE_LOOP_INTERVAL 环境变量覆盖）
+    loop_interval: u64,
 }
 
 impl ProactivePlugin {
@@ -111,6 +113,9 @@ impl ProactivePlugin {
             plugin_name: None,
             loop_spawned: Arc::new(AtomicBool::new(false)),
             max_history: 100,
+            loop_interval: std::env::var("PROACTIVE_LOOP_INTERVAL")
+                .ok().and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(15),
         }
     }
 
@@ -243,6 +248,7 @@ impl ProactivePlugin {
         let scheduled = self.scheduled.clone();
         let last_llm_call = self.last_llm_call.clone();
         let max_history = self.max_history;
+        let loop_interval = self.loop_interval;
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -251,7 +257,7 @@ impl ProactivePlugin {
                 .expect("proactive tokio runtime");
             rt.block_on(async {
                 eprintln!("[proactive] v7 loop started — single-session mode");
-                let _ = main_loop(config, history, source, stop_flag, scheduled, last_llm_call, llm, eb, plugin_name, max_history).await;
+                let _ = main_loop(config, history, source, stop_flag, scheduled, last_llm_call, llm, eb, plugin_name, max_history, loop_interval).await;
                 eprintln!("[proactive] loop stopped");
             });
         });
@@ -271,9 +277,10 @@ async fn main_loop(
     eb: Addr<plugin_interface::EventBus>,
     plugin_name: String,
     max_history: usize,
+    loop_interval: u64,
 ) {
     loop {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_secs(loop_interval)).await;
 
         if stop_flag.load(Ordering::Relaxed) { break; }
 
@@ -287,7 +294,7 @@ async fn main_loop(
         let hist = history.lock().unwrap().clone();
         if hist.len() < 2 { continue; }
         let cur_source = source.lock().unwrap().clone();
-        let cur_source = if cur_source.is_empty() { "unknown".to_string() } else { cur_source };
+        // source 为空则广播（由 MessageRouter 决定走哪个通道）
 
         let action = scheduled.lock().unwrap().clone();
 
@@ -302,7 +309,7 @@ async fn main_loop(
             if now < action.send_at { continue; }
 
             eprintln!("[proactive] sending: {}", action.message);
-            eb.do_send(Event::new("assistant.message", serde_json::json!({
+            eb.do_send(Event::new("route.message", serde_json::json!({
                 "text": &action.message,
                 "source": &action.source,
             }), &plugin_name));
@@ -344,7 +351,7 @@ async fn main_loop(
         let decision = ProactivePlugin::call_llm(&llm, &prompt).await;
 
         if let Some(d) = decision {
-            let msg_preview = if d.message.len() > 30 { &d.message[..30] } else { &d.message };
+            let msg_preview: String = d.message.chars().take(30).collect();
             eprintln!("[proactive] paused={} wait={}s msg={} cont={}",
                 d.paused, d.wait_seconds, msg_preview, d.continue_);
 
