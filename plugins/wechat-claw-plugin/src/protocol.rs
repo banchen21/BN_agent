@@ -411,17 +411,22 @@ pub async fn send_message(
 
 /// 获取用户的 typing_ticket（缓存 ≈24h）。
 /// POST /ilink/bot/getconfig
+/// body: { ilink_user_id, context_token?, base_info }
 pub async fn get_typing_ticket(
     client: &Client,
     token: &str,
     base_url: &str,
-    to_user_id: &str,
+    user_id: &str,
+    context_token: &str,
 ) -> Result<String, String> {
     let url = format!("{}/ilink/bot/getconfig", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "to_user_id": to_user_id,
+    let mut body = serde_json::json!({
+        "ilink_user_id": user_id,
         "base_info": base_info(),
     });
+    if !context_token.is_empty() {
+        body["context_token"] = serde_json::json!(context_token);
+    }
 
     let resp = client
         .post(&url)
@@ -441,24 +446,25 @@ pub async fn get_typing_ticket(
         .ok_or_else(|| "missing typing_ticket".to_string())?
         .to_string();
 
-    log::info!("[wechat] got typing_ticket for {} ({} chars)", to_user_id, ticket.len());
+    log::info!("[wechat] got typing_ticket for {} ({} chars)", user_id, ticket.len());
     Ok(ticket)
 }
 
 /// 发送输入状态。
-/// status: 1 = 开始输入, 2 = 停止输入。
+/// status: 1 = 开始输入 (TYPING), 2 = 停止输入 (CANCEL)。
 /// POST /ilink/bot/sendtyping
+/// body: { ilink_user_id, typing_ticket, status, base_info }
 pub async fn send_typing(
     client: &Client,
     token: &str,
     base_url: &str,
-    to_user_id: &str,
+    user_id: &str,
     typing_ticket: &str,
     status: i32,
 ) -> Result<(), String> {
     let url = format!("{}/ilink/bot/sendtyping", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
-        "to_user_id": to_user_id,
+        "ilink_user_id": user_id,
         "typing_ticket": typing_ticket,
         "status": status,
         "base_info": base_info(),

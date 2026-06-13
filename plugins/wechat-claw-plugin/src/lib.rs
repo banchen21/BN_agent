@@ -691,8 +691,14 @@ async fn poll_loop(
                     ));
 
                     // ── 启动输入状态指示器 ──
+                    // 查找该用户的 context_token
+                    let ctx_token = context_tokens
+                        .lock().unwrap()
+                        .get(&msg.from_user_id)
+                        .cloned()
+                        .unwrap_or_default();
                     start_typing(
-                        &client, &token, &base_url, &msg.from_user_id,
+                        &client, &token, &base_url, &msg.from_user_id, &ctx_token,
                         &processing_users, &typing_tickets, &running,
                     ).await;
                 }
@@ -725,6 +731,7 @@ async fn start_typing(
     token: &str,
     base_url: &str,
     to_user_id: &str,
+    context_token: &str,
     processing_users: &Arc<Mutex<HashSet<String>>>,
     typing_tickets: &Arc<Mutex<HashMap<String, String>>>,
     running: &Arc<AtomicBool>,
@@ -738,7 +745,7 @@ async fn start_typing(
         if let Some(t) = cached {
             t
         } else {
-            match get_typing_ticket(client, token, base_url, to_user_id).await {
+            match get_typing_ticket(client, token, base_url, to_user_id, context_token).await {
                 Ok(t) => {
                     typing_tickets.lock().unwrap().insert(to_user_id.to_string(), t.clone());
                     t
