@@ -298,7 +298,7 @@ impl ToolExecutor for SendDocumentTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_file".into(),
-            description: "Send a file to a Telegram chat. Input: base64 file data + file name. 调用此工具后不要额外回复确认文字。".into(),
+            description: "Send a file to a Telegram chat".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",

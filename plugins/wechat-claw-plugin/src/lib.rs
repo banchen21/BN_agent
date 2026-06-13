@@ -87,7 +87,7 @@ impl ToolExecutor for SendWechatMessage {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "wechat_send_message".into(),
-            description: "Send a text message to a WeChat contact via iLink Bot API.".into(),
+            description: "通过微信发送一条消息".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",

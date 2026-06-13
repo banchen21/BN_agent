@@ -16,6 +16,7 @@ use actix::prelude::*;
 use plugin_interface::*;
 use std::sync::{Arc, Mutex};
 
+use crate::chat_store::{AppendRecord, ChatStoreActor};
 use crate::metrics_actor::MetricsActor;
 use crate::rate_limit_actor::RateLimitActor;
 use crate::retry_actor::{RetryActor, RetryChatRequest};
@@ -44,6 +45,7 @@ pub struct PipelineActor {
     rate_limit_addr: Addr<RateLimitActor>,
     token_usage_addr: Addr<TokenUsageActor>,
     metrics_addr: Addr<MetricsActor>,
+    store_addr: Addr<ChatStoreActor>,
 }
 
 impl PipelineActor {
@@ -57,6 +59,7 @@ impl PipelineActor {
         rate_limit_addr: Addr<RateLimitActor>,
         token_usage_addr: Addr<TokenUsageActor>,
         metrics_addr: Addr<MetricsActor>,
+        store_addr: Addr<ChatStoreActor>,
     ) -> Self {
         Self {
             retry_addr,
@@ -67,6 +70,7 @@ impl PipelineActor {
             rate_limit_addr,
             token_usage_addr,
             metrics_addr,
+            store_addr,
         }
     }
 }
@@ -99,6 +103,7 @@ async fn process_message(
     rate_limit_addr: Addr<RateLimitActor>,
     token_usage_addr: Addr<TokenUsageActor>,
     metrics_addr: Addr<MetricsActor>,
+    store_addr: Addr<ChatStoreActor>,
 ) {
     // 1. Rate limit check.
     let allowed = rate_limit_addr.send(crate::rate_limit_actor::CheckRateLimit).await
@@ -191,15 +196,40 @@ async fn process_message(
         success: true,
     });
 
-    // 7. Execute tool calls.
-    if !resp.tool_calls.is_empty() {
-        log::info!("[Pipeline] {} tool call(s): {:?}",
-            resp.tool_calls.len(),
-            resp.tool_calls.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+    // 7. Tool call loop — 最多 LLM_MAX_TOOL_ROUNDS 轮（默认 20）。
+    let max_tool_rounds: usize = std::env::var("LLM_MAX_TOOL_ROUNDS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+
+    let mut current_resp = resp;
+    let mut tool_round: usize = 0;
+    // 累积全部轮次的 tool_calls 和 tool_results，每轮一起传给 LLM。
+    let mut all_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut all_tool_results: Vec<String> = Vec::new();
+
+    loop {
+        if current_resp.tool_calls.is_empty() || tool_round >= max_tool_rounds {
+            if !current_resp.content.trim().is_empty() {
+                // 最终回复：持久化 + 广播。
+                if tool_round > 0 {
+                    store_addr.do_send(AppendRecord {
+                        role: "assistant".into(),
+                        content: current_resp.content.clone(),
+                    });
+                }
+                emit_reply(&current_resp.content, &source, &event_bus).await;
+            }
+            break;
+        }
+
+        log::info!("[Pipeline] tool round {}/{} — {} tool call(s): {:?}",
+            tool_round + 1, max_tool_rounds,
+            current_resp.tool_calls.len(),
+            current_resp.tool_calls.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
         );
 
-        let mut tool_results: Vec<String> = Vec::new();
-        for tc in &resp.tool_calls {
+        // 执行本轮工具调用。
+        let mut round_results: Vec<String> = Vec::new();
+        for tc in &current_resp.tool_calls {
             let executor = {
                 match tool_registry.lock() {
                     Ok(reg) => reg.get_executor(&tc.name),
@@ -216,7 +246,6 @@ async fn process_message(
             };
             let tool_ms = tool_start.elapsed().as_millis() as u64;
 
-            // Record tool metrics.
             metrics_addr.do_send(crate::metrics_actor::RecordToolCall {
                 tool_name: tc.name.clone(),
                 success: result.success,
@@ -225,25 +254,26 @@ async fn process_message(
 
             if result.success {
                 log::info!("[Pipeline] tool '{}' ok ({}ms): {}", tc.name, tool_ms, result.content);
-                tool_results.push(format!("【{}】\n{}", tc.name, result.content));
+                round_results.push(format!("【{}】\n{}", tc.name, result.content));
             } else {
                 let err = result.error.as_deref().unwrap_or("unknown");
                 log::warn!("[Pipeline] tool '{}' failed ({}ms): {}", tc.name, tool_ms, err);
-                tool_results.push(format!("【{}】错误：{}", tc.name, err));
+                round_results.push(format!("【{}】错误：{}", tc.name, err));
             }
         }
 
-        // 工具结果喂回 LLM 进行第二轮推理（DeepSeek API 规范：assistant tool_calls + tool role 消息）
-        let assistant_tool_calls: Vec<ToolCall> = resp.tool_calls.clone();
-        let tool_result_strings: Vec<String> = tool_results.clone();
+        // 累积到历史。
+        all_tool_calls.extend(current_resp.tool_calls.clone());
+        all_tool_results.extend(round_results);
 
-        let req_start2 = std::time::Instant::now();
-        let final_resp = retry_addr.send(RetryChatRequest {
+        // 喂回 LLM（带上所有历史 tool_calls + results）。
+        let req_start = std::time::Instant::now();
+        let next = retry_addr.send(RetryChatRequest {
             request: ChatRequest {
                 message: String::new(),
-                tools,
-                skip_store: false,
-                original_user_msg: Some(text.clone()),
+                tools: tools.clone(),
+                skip_store: true,
+                original_user_msg: None,
                 contexts: vec![],
                 jailbreak_index: None,
                 image_base64: None,
@@ -252,19 +282,19 @@ async fn process_message(
                 file_base64: None,
                 file_name: None,
                 stream: true,
-                request_id: format!("{}-followup", request_id),
+                request_id: format!("{}-t{}", request_id, tool_round + 1),
                 source: String::new(),
                 user_name: String::new(),
                 max_tokens: None,
-                assistant_tool_calls,
-                tool_results: tool_result_strings,
+                assistant_tool_calls: all_tool_calls.clone(),
+                tool_results: all_tool_results.clone(),
             },
             max_retries: 2,
         }).await;
 
-        match final_resp {
-            Ok(Ok(r)) if !r.content.trim().is_empty() => {
-                // Record token usage for the follow-up.
+        match next {
+            Ok(Ok(r)) => {
+                let elapsed = req_start.elapsed();
                 token_usage_addr.do_send(crate::token_usage_actor::RecordTokenUsage {
                     model: r.model.clone(),
                     prompt_tokens: r.prompt_tokens,
@@ -273,26 +303,23 @@ async fn process_message(
                     prompt_cache_miss_tokens: r.prompt_cache_miss_tokens,
                 });
                 metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
-                    seconds: req_start2.elapsed().as_secs_f64(),
-                    model: r.model,
+                    seconds: elapsed.as_secs_f64(),
+                    model: r.model.clone(),
                     success: true,
                 });
-
-
-                emit_reply(&r.content, &source, &event_bus).await;
+                current_resp = r;
+                tool_round += 1;
             }
             Ok(Err(e)) => {
-                log::error!("[Pipeline] tool loop LLM error: {}", e);
+                log::error!("[Pipeline] tool round {} LLM error: {}", tool_round + 1, e);
                 metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
+                break;
             }
             Err(e) => {
-                log::error!("[Pipeline] tool loop mailbox error: {}", e);
+                log::error!("[Pipeline] tool round {} mailbox error: {:?}", tool_round + 1, e);
+                break;
             }
-            _ => {}
         }
-    } else if !resp.content.trim().is_empty() {
-        // 8. Broadcast assistant reply.
-        emit_reply(&resp.content, &source, &event_bus).await;
     }
 }
 
@@ -310,6 +337,7 @@ impl Handler<HandleUserMessage> for PipelineActor {
         let rate_limit_addr = self.rate_limit_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
         let metrics_addr = self.metrics_addr.clone();
+        let store_addr = self.store_addr.clone();
         let text = msg.text;
         let source = msg.source;
         let user_name = msg.user_name;
@@ -321,7 +349,7 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 None, None, None, None, None,
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr,
+                metrics_addr, store_addr,
             ).await;
         }.into_actor(self).map(|_, _ctx: &mut Self, _| ());
 
@@ -360,6 +388,7 @@ impl Handler<Event> for PipelineActor {
         let rate_limit_addr = self.rate_limit_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
         let metrics_addr = self.metrics_addr.clone();
+        let store_addr = self.store_addr.clone();
         actix::spawn(async move {
             if !text.is_empty() {
                 log::info!("[Pipeline] @{}: {}", user_name, text);
@@ -373,7 +402,7 @@ impl Handler<Event> for PipelineActor {
                 image_base64, video_base64, video_mime, file_base64, file_name,
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr,
+                metrics_addr, store_addr,
             ).await;
         });
     }

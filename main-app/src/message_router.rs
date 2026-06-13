@@ -186,8 +186,8 @@ impl MessageRouter {
             self.event_bus
                 .do_send(Event::new("assistant.message", payload, "message-router"));
 
-            let preview: String = text.chars().take(40).collect();
-            log::info!(
+            let preview: String = text.clone();
+            log::debug!(
                 "[MessageRouter] routed '{}…' to {} (chat_id={:?})",
                 preview,
                 target.source,

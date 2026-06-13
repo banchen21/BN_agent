@@ -215,6 +215,16 @@ pub struct LlmRequest {
     pub max_tokens: Option<u32>,
 }
 
+/// Append a single record to the chat history database.
+/// Plugins use this to persist messages (e.g. proactive plugin messages)
+/// so they appear in the LLM context on subsequent requests.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct AppendChatRecord {
+    pub role: String,
+    pub content: String,
+}
+
 /// Full-featured chat request sent by PipelineActor.
 #[derive(Message, Clone)]
 #[rtype(result = "Result<LlmResponse, String>")]
@@ -405,6 +415,8 @@ pub struct PluginContext {
     pub tool_registry: Option<Arc<Mutex<ToolRegistry>>>,
     /// Centralized logger — use this instead of `eprintln!` or `log::info!`.
     pub logger: PluginLogger,
+    /// Chat history store — persist messages so they appear in LLM context.
+    pub chat_store: Option<Recipient<AppendChatRecord>>,
 }
 
 /// The **object-safe** trait every plugin must implement.

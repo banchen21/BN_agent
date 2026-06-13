@@ -72,7 +72,7 @@ fn parse_skill_file(content: &str) -> Option<(String, String)> {
 /// Load all `.md` files from a directory and parse them into `SkillDef`s.
 fn load_skills(dir: &str) -> Vec<SkillDef> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        eprintln!("[skill] SKILL_DIR '{dir}' not found, skipping");
+         log::info!("[skill] SKILL_DIR '{dir}' not found, skipping");
         return Vec::new();
     };
 
@@ -85,7 +85,7 @@ fn load_skills(dir: &str) -> Vec<SkillDef> {
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[skill] failed to read '{}': {}", path.display(), e);
+                 log::info!("[skill] failed to read '{}': {}", path.display(), e);
                 continue;
             }
         };
@@ -93,7 +93,7 @@ fn load_skills(dir: &str) -> Vec<SkillDef> {
         let (yaml_str, body) = match parse_skill_file(&content) {
             Some(p) => p,
             None => {
-                eprintln!("[skill] '{}' has no valid frontmatter (needs `---` delimiters), skipping", path.display());
+                 log::info!("[skill] '{}' has no valid frontmatter (needs `---` delimiters), skipping", path.display());
                 continue;
             }
         };
@@ -101,12 +101,12 @@ fn load_skills(dir: &str) -> Vec<SkillDef> {
         let meta: SkillMeta = match serde_yaml::from_str(&yaml_str) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[skill] '{}' frontmatter parse error: {}", path.display(), e);
+                 log::info!("[skill] '{}' frontmatter parse error: {}", path.display(), e);
                 continue;
             }
         };
 
-        eprintln!("[skill] loaded skill '{}' from {}", meta.name, path.display());
+         log::info!("[skill] loaded skill '{}' from {}", meta.name, path.display());
         skills.push(SkillDef { meta, body });
     }
 
@@ -185,18 +185,18 @@ impl Plugin for SkillPlugin {
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         let skill_dir = std::env::var("SKILL_DIR").unwrap_or_else(|_| "data/skills".into());
-        eprintln!("[skill] loading skills from '{skill_dir}'");
+         log::info!("[skill] loading skills from '{skill_dir}'");
 
         let skills = load_skills(&skill_dir);
         if skills.is_empty() {
-            eprintln!("[skill] WARN: no skills loaded ({} dir exists but no valid .md files)", skill_dir);
+             log::info!("[skill] WARN: no skills loaded ({} dir exists but no valid .md files)", skill_dir);
             return Ok(());
         }
 
         let registry = match ctx.tool_registry {
             Some(ref r) => r,
             None => {
-                eprintln!("[skill] WARN: no tool_registry available, skills will not be registered");
+                 log::info!("[skill] WARN: no tool_registry available, skills will not be registered");
                 return Ok(());
             }
         };
@@ -207,17 +207,17 @@ impl Plugin for SkillPlugin {
             let executor = Arc::new(SkillToolExecutor::new(skill));
             let name = executor.def().name.clone();
             reg.register(executor);
-            eprintln!("[skill] registered tool: {name}");
+             log::info!("[skill] registered tool: {name}");
         }
 
-        eprintln!("[skill] started with {} skill(s)", skill_count);
+         log::info!("[skill] started with {} skill(s)", skill_count);
         Ok(())
     }
 
     fn on_event(&self, _event: &Event) -> bool { true }
 
     fn stop(&mut self) {
-        eprintln!("[skill] stopped");
+         log::info!("[skill] stopped");
     }
 }
 

@@ -227,29 +227,21 @@ impl Handler<ChatRequest> for LlmActor {
         } else {
             self.config.system_prompt.clone()
         };
-        // 工具可用性提醒：放在 system prompt 最前面，防止 persona 覆盖工具感知
-        let tool_hint = "你有以下发送工具可用于回复用户：
-- tg_send_voice：把文字转语音发送（用户明确要求发语音时必须用这个）
-- tg_send_message：发送文字消息
-- tg_send_photo：发送图片
-- tg_send_video：发送视频
-- tg_send_file：发送文件
+        let limit = self.config.max_history_turns * 2;
 
-重要规则：
-1. 发送工具本身就是你的回复。使用发送工具后，不要生成额外的确认文字（如\"已发送\"\"好的\"等）。
-2. 如果你只需要用文字回复，直接回复即可，不需要调用 tg_send_message。";
-        let system_content = if !msg.tools.is_empty() {
+        let tools = msg.tools.clone();
+
+        // 动态生成工具提示（从实际注册的工具列表中提取）
+        let tool_hint = build_tool_hint(&tools);
+        let system_content = if !tools.is_empty() {
             format!("{}\n\n{}", tool_hint, system_content)
         } else {
             system_content
         };
-        let limit = self.config.max_history_turns * 2;
-
         let user_msg = msg.message.clone();
         let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
         let contexts = msg.contexts.clone();
-        let tools = msg.tools.clone();
         let image_base64 = msg.image_base64.clone();
         let video_base64 = msg.video_base64.clone();
         let video_mime = msg.video_mime.clone();
@@ -786,6 +778,44 @@ fn should_fallback_to_tools(result: &Result<LlmResponse, String>) -> bool {
             resp.content.trim().chars().count() <= 1
         }
     }
+}
+
+/// 从 tools JSON 数组中动态生成工具提示文本。
+fn build_tool_hint(tools: &[serde_json::Value]) -> String {
+    let mut send_tools = Vec::new();
+    let mut other_tools = Vec::new();
+    for tool in tools {
+        let func = match tool.get("function") {
+            Some(f) => f,
+            None => continue,
+        };
+        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() { continue; }
+        let line = format!("- {}：{}", name, desc);
+        if name.contains("send") || name.contains("message") || name.contains("voice") {
+            send_tools.push(line);
+        } else {
+            other_tools.push(line);
+        }
+    }
+    let mut lines = vec![
+        "【重要规则】".to_string(),
+        "1. 如果用户要求你发送消息/语音/图片/视频/文件，你必须调用对应的发送工具。".to_string(),
+        "2. 发送工具本身就是你的回复——调用后不要再生成确认文字（如\"已发送\"）。".to_string(),
+        "3. 纯文字回复直接输出即可，不需要调用工具。".to_string(),
+        String::new(),
+    ];
+    if !send_tools.is_empty() {
+        lines.push("【发送工具】".to_string());
+        lines.extend(send_tools);
+        lines.push(String::new());
+    }
+    if !other_tools.is_empty() {
+        lines.push("【其他工具】".to_string());
+        lines.extend(other_tools);
+    }
+    lines.join("\n")
 }
 
 fn truncate_preview(s: &str, max: usize) -> &str {

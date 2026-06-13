@@ -3244,12 +3244,9 @@ dependencies = [
 name = "proactive-plugin"
 version = "0.1.0"
 dependencies = [
- "actix",
- "chrono",
+ "log",
  "plugin-interface",
- "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

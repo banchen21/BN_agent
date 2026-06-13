@@ -65,6 +65,7 @@ struct AppState {
     token_usage_addr: Option<Addr<TokenUsageActor>>,
     retry_addr: Option<Addr<RetryActor>>,
     cancellation_addr: Option<Addr<CancellationActor>>,
+    chat_store: Option<Recipient<AppendChatRecord>>,
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────
@@ -123,6 +124,7 @@ async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) 
         llm: state.llm.clone(),
         tool_registry: Some(state.tool_registry.clone()),
         logger: PluginLogger::new(state.event_bus.clone(), "host".into()),
+        chat_store: state.chat_store.clone(),
     };
     match state.plugin_manager.send(ScanAndLoad { plugin_dir: body.plugin_dir.clone(), host_context: ctx }).await {
         Ok(Ok(n)) => HttpResponse::Ok().json(serde_json::json!({ "loaded": n })),
@@ -463,6 +465,7 @@ fn main() -> std::io::Result<()> {
             None,  // llm_recipient — will be set below
             tool_registry.clone(),
             plugin_dir,
+            Some(store_addr.clone().recipient()),
         );
         let snapshots = pm.snapshots_arc();
 
@@ -575,6 +578,7 @@ fn main() -> std::io::Result<()> {
                 rate_limit_addr.clone(),
                 tu.clone(),
                 metrics.clone(),
+                store_addr.clone(),
             );
             let pipeline_addr = pipeline.start();
             log::info!("PipelineActor started");
@@ -609,6 +613,7 @@ fn main() -> std::io::Result<()> {
             token_usage_addr,
             retry_addr,
             cancellation_addr,
+            chat_store: Some(store_addr.clone().recipient()),
         });
 
         log::info!("HTTP API listening on http://127.0.0.1:8080");

@@ -12,6 +12,7 @@
 //! | `ClearAll`          | `usize`            | Delete all records             |
 
 use actix::prelude::*;
+use plugin_interface::AppendChatRecord;
 use rusqlite::{params, Connection, Result as SqlResult};
 
 // ── Records ──────────────────────────────────────────────────────────────────
@@ -129,6 +130,19 @@ impl Handler<AppendRecord> for ChatStoreActor {
             params![msg.role, msg.content],
         ) {
             log::error!("[ChatStoreActor] AppendRecord failed: {}", e);
+        }
+    }
+}
+
+impl Handler<AppendChatRecord> for ChatStoreActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: AppendChatRecord, _ctx: &mut Self::Context) {
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO chat_history (role, content) VALUES (?1, ?2)",
+            params![msg.role, msg.content],
+        ) {
+            log::error!("[ChatStoreActor] AppendChatRecord failed: {}", e);
         }
     }
 }
