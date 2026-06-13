@@ -34,7 +34,7 @@ impl ToolExecutor for SendMessageTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_message".into(),
-            description: "Send a text message to a Telegram chat.".into(),
+            description: "Send a text message to a Telegram chat. 调用此工具后不要额外回复确认文字。如果只需文字回复，直接回复即可不需要调用此工具。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -89,7 +89,7 @@ impl ToolExecutor for SendVoiceTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_voice".into(),
-            description: "Convert text to speech and send as voice message to Telegram.".into(),
+            description: "Convert text to speech and send as voice message to Telegram. 用户明确要求发语音时必须使用此工具。调用后不要额外回复确认文字。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -177,7 +177,7 @@ impl ToolExecutor for SendPhotoTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_photo".into(),
-            description: "Send a photo to a Telegram chat.".into(),
+            description: "Send a photo to a Telegram chat. 调用此工具后不要额外回复确认文字。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -238,7 +238,7 @@ impl ToolExecutor for SendVideoTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_video".into(),
-            description: "Send a video to a Telegram chat. Input: base64 video data. Output: confirmation.".into(),
+            description: "Send a video to a Telegram chat. 调用此工具后不要额外回复确认文字。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -298,7 +298,7 @@ impl ToolExecutor for SendDocumentTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_file".into(),
-            description: "Send a file to a Telegram chat. Input: base64 file data + file name. Output: confirmation.".into(),
+            description: "Send a file to a Telegram chat. Input: base64 file data + file name. 调用此工具后不要额外回复确认文字。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
