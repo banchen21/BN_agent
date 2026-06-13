@@ -38,6 +38,9 @@ logs/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/*.png
+data/*.json
+data/*.wav
 
 # ─── Plugin installation artifacts ────────────────────────
 # 已通过 *.dll 全局忽略
