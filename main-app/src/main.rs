@@ -208,6 +208,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             user_name: String::new(),
             max_tokens: None,
             original_user_msg: None,
+            assistant_tool_calls: vec![],
+            tool_results: vec![],
         },
         max_retries: 3,
     }).await {
@@ -431,18 +433,15 @@ fn main() -> std::io::Result<()> {
         });
         log::info!("Plugin dir: {}", plugin_dir);
 
-        // ── 4. PluginManager (pre-loads plugins in new()) ──
-        // Pass llm_recipient=None for now; plugins don't need ctx.llm at startup.
-        // The correct LLM backend will be set after discovery.
-        let pm = PluginManager::new(
+        // ── 4. PluginManager ──
+        // Defer start until after LLM backend is ready, so plugins can access ctx.llm.
+        let mut pm = PluginManager::new(
             event_bus.clone(),
-            None,  // llm_recipient — set after backend discovery
+            None,  // llm_recipient — will be set below
             tool_registry.clone(),
             plugin_dir,
         );
         let snapshots = pm.snapshots_arc();
-        let plugin_manager = pm.start();
-        log::info!("PluginManager actor started");
 
         // ── 5. LLM Backend — openai (default) or claude ──
         let use_claude = std::env::var("LLM_BACKEND").as_deref() == Ok("claude");
@@ -496,6 +495,11 @@ fn main() -> std::io::Result<()> {
                 addr
             });
         }
+
+        // ── Start PluginManager now that LLM is ready ──
+        pm.set_llm_recipient(llm_recipient.clone());
+        let plugin_manager = pm.start();
+        log::info!("PluginManager actor started");
 
         // ── 6. TokenUsageActor ──
         let token_usage_addr = match TokenUsageActor::new() {

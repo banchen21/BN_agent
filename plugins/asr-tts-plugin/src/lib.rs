@@ -231,6 +231,28 @@ fn ogg_to_wav(ogg_data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+// ─── 破限词 ──────────────────────────────────────────────────────
+
+fn random_jailbreak() -> Option<String> {
+    let path = std::path::PathBuf::from("data/jailbreak_prompts.csv");
+    let mut prompts: Vec<String> = Vec::new();
+    if let Ok(mut reader) = csv::Reader::from_path(&path) {
+        for result in reader.records() {
+            if let Ok(record) = result {
+                if let Some(p) = record.get(2) {
+                    let t = p.trim();
+                    if !t.is_empty() {
+                        prompts.push(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if prompts.is_empty() { return None; }
+    use rand::Rng;
+    Some(prompts[rand::thread_rng().gen_range(0..prompts.len())].clone())
+}
+
 // ─── ASR API ──────────────────────────────────────────────────────
 
 async fn do_asr(

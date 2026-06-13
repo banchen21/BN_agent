@@ -2,7 +2,7 @@
 name = "image-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "图片处理插件 — 缩放、格式转换、特效等"
+description = "图片理解插件 — 基于 MiMo API 的图片描述、分析、对比"
 
 [lib]
 crate-type = ["cdylib"]
@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 plugin-interface = { path = "../../plugin-interface" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 log = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt"] }

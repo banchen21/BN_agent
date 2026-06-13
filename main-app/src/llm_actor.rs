@@ -208,11 +208,31 @@ impl Handler<ChatRequest> for LlmActor {
         let event_bus = self.event_bus.clone();
         let store_addr = self.store_addr.clone();
 
-        let jailbreak = msg.jailbreak_index.and_then(|i| self.config.jailbreak_at(i));
+        // 多模态请求（图片/视频/文件）自动随机选取破限词
+        let jailbreak = msg.jailbreak_index
+            .or_else(|| {
+                let is_multimodal = msg.image_base64.is_some()
+                    || msg.video_base64.is_some()
+                    || msg.file_base64.is_some();
+                if is_multimodal && !self.config.jailbreak_prompts.is_empty() {
+                    use rand::Rng;
+                    Some(rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len()))
+                } else {
+                    None
+                }
+            })
+            .and_then(|i| self.config.jailbreak_at(i));
         let system_content = if let Some(jb) = jailbreak {
             format!("{}\n\n{}", jb, self.config.system_prompt)
         } else {
             self.config.system_prompt.clone()
+        };
+        // 工具可用性提醒：放在 system prompt 最前面，防止 persona 覆盖工具感知
+        let tool_hint = "你有工具可用：tg_send_voice（发送语音），tg_send_message（发送文字）。用户明确要求发语音时必须调用 tg_send_voice。";
+        let system_content = if !msg.tools.is_empty() {
+            format!("{}\n\n{}", tool_hint, system_content)
+        } else {
+            system_content
         };
         let limit = self.config.max_history_turns * 2;
 
@@ -288,6 +308,36 @@ impl Handler<ChatRequest> for LlmActor {
                 messages.push(serde_json::json!({ "role": "assistant", "content": ctx }));
             }
 
+            // ── 4b. Follow-up: assistant tool_calls + tool results (DeepSeek API spec) ──
+            let assistant_tool_calls = msg.assistant_tool_calls.clone();
+            let tool_results = msg.tool_results.clone();
+            if !assistant_tool_calls.is_empty() {
+                let mut tc_array = Vec::new();
+                for tc in &assistant_tool_calls {
+                    tc_array.push(serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default()
+                        }
+                    }));
+                }
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": tc_array
+                }));
+                for (i, tc) in assistant_tool_calls.iter().enumerate() {
+                    let content = tool_results.get(i).cloned().unwrap_or_default();
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": content
+                    }));
+                }
+            }
+
             // ── 5. Current user message ──
 
             let user_content = if let Some(ref img_b64) = image_base64 {
@@ -300,20 +350,30 @@ impl Handler<ChatRequest> for LlmActor {
                     {"type": "video_url", "video_url": {"url": format!("data:{};base64,{}", vid_mime, vid_b64)}, "fps": 2, "media_resolution": "default"},
                     {"type": "text", "text": user_msg}
                 ])
-            } else if let (Some(ref fb64), Some(ref fname)) = (file_base64.as_ref(), file_name.as_ref()) {
-                serde_json::json!([
-                    {"type": "file", "file": {"filename": fname, "file_data": fb64}},
-                    {"type": "text", "text": user_msg}
-                ])
+            } else if let (Some(_fb64), Some(ref fname)) = (file_base64.as_ref(), file_name.as_ref()) {
+                // DeepSeek/MiMo API 不支持 type: "file"，改为文本提示
+                let file_hint = if user_msg.is_empty() {
+                    format!("用户发送了一个文件：{}", fname)
+                } else {
+                    format!("{}\n\n[用户发送了文件：{}]", user_msg, fname)
+                };
+                serde_json::json!(file_hint)
             } else {
                 serde_json::json!(user_msg)
             };
-            messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+            // 工具回调轮可能没有新用户消息，跳过空消息
+            if !user_msg.is_empty() || assistant_tool_calls.is_empty() {
+                messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+            }
 
             // ── 4. Route to correct model/endpoint ──
+            // Clone defaults before the if-else moves them (needed for potential fallback).
+            let default_model = model.clone();
+            let default_base_url = base_url.clone();
+            let default_api_key = api_key.clone();
             let actual_model = if video_base64.is_some() { video_model }
                 else if image_base64.is_some() { image_model }
-                else { model.clone() };
+                else { model };
             let actual_base_url = if video_base64.is_some() { video_base_url }
                 else if image_base64.is_some() { image_base_url }
                 else { base_url };
@@ -322,6 +382,9 @@ impl Handler<ChatRequest> for LlmActor {
                 else { api_key };
 
             let api_url = format!("{}/chat/completions", actual_base_url.trim_end_matches('/'));
+
+            // Clone messages before they're moved into body (needed for potential fallback).
+            let messages_for_fallback = messages.clone();
 
             let mut body = serde_json::json!({
                 "model": actual_model,
@@ -337,11 +400,87 @@ impl Handler<ChatRequest> for LlmActor {
             body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
             // ── 5. Call LLM ──
-            let result = if stream {
+            let mut result = if stream {
                 stream_llm(&client, &api_url, &actual_api_key, &body, &event_bus, chat_id).await
             } else {
                 call_llm(&client, &api_url, &actual_api_key, &body, &event_bus).await
             };
+
+            // ── 5b. Fallback: 图片模型失败 → 用文本模型 + 工具重试 ──
+            if let Some(ref _img_b64) = image_base64 {
+                if should_fallback_to_tools(&result) {
+                    log::info!("[LlmActor] image model failed, retrying with text model + tools");
+                    let fallback_text = if user_msg.is_empty() {
+                        "用户发送了一张图片。你无法直接查看图片，请使用 image_understand 或 image_describe 工具来分析它（image_base64 参数可省略，工具会自动使用最近收到的图片）。".to_string()
+                    } else {
+                        format!(
+                            "用户消息：{}\n\n用户还发送了一张图片。请使用 image_understand 或 image_describe 工具来分析它（image_base64 参数可省略，工具会自动使用最近收到的图片）。",
+                            user_msg
+                        )
+                    };
+                    let mut fallback_messages = messages_for_fallback.clone();
+                    if let Some(last) = fallback_messages.last_mut() {
+                        last["content"] = serde_json::json!(fallback_text);
+                    }
+
+                    let fallback_api_url = format!("{}/chat/completions", default_base_url.trim_end_matches('/'));
+                    let mut fallback_body = serde_json::json!({
+                        "model": default_model,
+                        "messages": fallback_messages,
+                        "temperature": 0.7,
+                        "max_tokens": max_tokens,
+                    });
+                    if !tools.is_empty() {
+                        fallback_body["tools"] = serde_json::json!(tools);
+                        fallback_body["tool_choice"] = serde_json::json!("auto");
+                    }
+                    fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
+
+                    result = if stream {
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, chat_id).await
+                    } else {
+                        call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
+                    };
+                }
+            }
+
+            // ── 5c. Fallback: 视频模型失败 → 用文本模型 + video_analyze 工具重试 ──
+            if let (Some(_vid_b64), Some(_vid_mime)) = (video_base64.as_ref(), video_mime.as_ref()) {
+                if should_fallback_to_tools(&result) {
+                    log::info!("[LlmActor] video model failed, retrying with text model + video_analyze tool");
+                    let fallback_text = if user_msg.is_empty() {
+                        "用户发送了一段视频。你无法直接查看视频，请使用 video_analyze 工具来分析它（参数可省略，工具会自动使用最近收到的视频）。".to_string()
+                    } else {
+                        format!(
+                            "用户消息：{}\n\n用户还发送了一段视频。请使用 video_analyze 工具来分析它（参数可省略，工具会自动使用最近收到的视频）。",
+                            user_msg
+                        )
+                    };
+                    let mut fallback_messages = messages_for_fallback.clone();
+                    if let Some(last) = fallback_messages.last_mut() {
+                        last["content"] = serde_json::json!(fallback_text);
+                    }
+
+                    let fallback_api_url = format!("{}/chat/completions", default_base_url.trim_end_matches('/'));
+                    let mut fallback_body = serde_json::json!({
+                        "model": default_model,
+                        "messages": fallback_messages,
+                        "temperature": 0.7,
+                        "max_tokens": max_tokens,
+                    });
+                    if !tools.is_empty() {
+                        fallback_body["tools"] = serde_json::json!(tools);
+                        fallback_body["tool_choice"] = serde_json::json!("auto");
+                    }
+                    fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
+
+                    result = if stream {
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, chat_id).await
+                    } else {
+                        call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
+                    };
+                }
+            }
 
             // ── 6. Persist to history ──
             if !skip_store {
@@ -641,6 +780,22 @@ async fn call_llm(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// 判断是否需要从多模态模型回退到文本模型 + 工具调用。
+/// 条件：LLM 调用出错，或返回内容太短（说明模型无法处理图片）。
+fn should_fallback_to_tools(result: &Result<LlmResponse, String>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(resp) => {
+            // 有 tool_calls 说明模型正在使用工具 → 不需要回退
+            if !resp.tool_calls.is_empty() {
+                return false;
+            }
+            // 内容 ≤1 字符 → 模型可能无法处理图片/视频
+            resp.content.trim().chars().count() <= 1
+        }
+    }
+}
 
 fn truncate_preview(s: &str, max: usize) -> &str {
     let max = max.min(s.len());

@@ -167,6 +167,8 @@ async fn process_message(
             user_name: user_name.clone(),
             max_tokens: None,
             original_user_msg: None,
+            assistant_tool_calls: vec![],
+            tool_results: vec![],
         },
         max_retries: 3,
     };
@@ -248,18 +250,16 @@ async fn process_message(
             }
         }
 
-        // 工具结果喂回 LLM 进行第二轮推理.
-        let follow_up = format!(
-            "以下是我调用的工具的执行结果，请根据这些结果组织回复：\n\n{}",
-            tool_results.join("\n\n")
-        );
+        // 工具结果喂回 LLM 进行第二轮推理（DeepSeek API 规范：assistant tool_calls + tool role 消息）
+        let assistant_tool_calls: Vec<ToolCall> = resp.tool_calls.clone();
+        let tool_result_strings: Vec<String> = tool_results.clone();
 
         let req_start2 = std::time::Instant::now();
         let final_resp = retry_addr.send(RetryChatRequest {
             request: ChatRequest {
                 chat_id,
-                message: follow_up,
-                tools: vec![],
+                message: String::new(),
+                tools,
                 skip_store: false,
                 original_user_msg: Some(text.clone()),
                 contexts: vec![],
@@ -274,6 +274,8 @@ async fn process_message(
                 source: String::new(),
                 user_name: String::new(),
                 max_tokens: None,
+                assistant_tool_calls,
+                tool_results: tool_result_strings,
             },
             max_retries: 2,
         }).await;

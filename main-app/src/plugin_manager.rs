@@ -64,6 +64,11 @@ impl PluginManager {
         self.snapshots.clone()
     }
 
+    /// Set the LLM recipient after construction (plugins started before LLM was ready need this).
+    pub fn set_llm_recipient(&mut self, llm: Option<Recipient<LlmRequest>>) {
+        self.llm_recipient = llm;
+    }
+
     /// Auto-scan the plugin directory and load all plugins found.
     fn auto_scan(&mut self) {
         let dir = std::path::Path::new(&self.plugin_dir);

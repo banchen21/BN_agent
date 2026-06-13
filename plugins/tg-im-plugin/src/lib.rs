@@ -91,8 +91,7 @@ impl ToolExecutor for SendVoiceTool {
                 "type": "object",
                 "properties": {
                     "chat_id": {"type": "integer", "description": "Telegram chat ID（由系统自动注入）"},
-                    "text": {"type": "string", "description": "Text to speak"},
-                    "voice_desc": {"type": "string", "description": "可选：自定义音色描述，如'温柔的女声'、'低沉的男声'，不填则用默认 TTS_VOICE_DESC"}
+                    "text": {"type": "string", "description": "Text to speak"}
                 },
                 "required": ["text"]
             }),

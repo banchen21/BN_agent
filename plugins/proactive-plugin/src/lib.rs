@@ -1,11 +1,13 @@
-//! # Proactive Plugin v3 — 纯 LLM 决策
+//! # Proactive Plugin v6 — 自动覆盖所有活跃对话
 //!
-//! 没有任何硬编码秒数/轮数。插件只做两件事：
+//! 无需手动配置 chat_id / source。
+//! 通过共享 ChatHistory 自动追踪所有活跃对话，
+//! 对每个对话独立判断是否需要主动追问。
 //!
-//! 1. 收集对话历史（ChatHistory actor）→ 发给 LLM
-//! 2. LLM 决定：对话是否暂停？多久后追问？追问什么？是否继续？
+//! 可选配置：
+//!   PROACTIVE_MODE=full|semi        (默认 full)
+//!   PROACTIVE_TIME_WINDOWS=[...]   (semi 模式下的时间窗口)
 
-use actix::prelude::*;
 use chrono::Timelike;
 use plugin_interface::*;
 use serde::Deserialize;
@@ -16,77 +18,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  ChatHistory Actor
+//  Shared ChatHistory (no actix actor — safe to use from plugin start())
 // ═══════════════════════════════════════════════════════════════════════════════
 
-struct ChatHistoryActor {
+struct ChatHistory {
     history: HashMap<i64, Vec<(String, String, Instant)>>,
+    sources: HashMap<i64, String>,
     max_per_chat: usize,
 }
 
-impl ChatHistoryActor {
+impl ChatHistory {
     fn new(max_per_chat: usize) -> Self {
-        Self { history: HashMap::new(), max_per_chat }
+        Self { history: HashMap::new(), sources: HashMap::new(), max_per_chat }
     }
-}
 
-impl Actor for ChatHistoryActor {
-    type Context = Context<Self>;
-}
-
-// ── Messages ──
-
-struct RecordMessage {
-    chat_id: i64,
-    role: String,
-    text: String,
-}
-
-impl Message for RecordMessage {
-    type Result = ();
-}
-
-impl Handler<RecordMessage> for ChatHistoryActor {
-    type Result = ();
-
-    fn handle(&mut self, msg: RecordMessage, _ctx: &mut Self::Context) {
-        let msgs = self.history.entry(msg.chat_id).or_default();
-        msgs.push((msg.role, msg.text, Instant::now()));
+    fn record(&mut self, chat_id: i64, role: &str, text: &str, source: &str) {
+        let msgs = self.history.entry(chat_id).or_default();
+        msgs.push((role.to_string(), text.to_string(), Instant::now()));
         while msgs.len() > self.max_per_chat {
             msgs.remove(0);
         }
+        if !source.is_empty() {
+            self.sources.insert(chat_id, source.to_string());
+        }
     }
-}
 
-struct GetHistory {
-    chat_id: i64,
-}
-
-impl Message for GetHistory {
-    type Result = Vec<(String, String, Instant)>;
-}
-
-impl Handler<GetHistory> for ChatHistoryActor {
-    type Result = Vec<(String, String, Instant)>;
-
-    fn handle(&mut self, msg: GetHistory, _ctx: &mut Self::Context) -> Self::Result {
-        self.history.get(&msg.chat_id).cloned().unwrap_or_default()
+    fn get(&self, chat_id: i64) -> (Vec<(String, String, Instant)>, String) {
+        let hist = self.history.get(&chat_id).cloned().unwrap_or_default();
+        let source = self.sources.get(&chat_id).cloned().unwrap_or_default();
+        (hist, source)
     }
-}
 
-struct ClearHistory {
-    chat_id: i64,
-}
-
-impl Message for ClearHistory {
-    type Result = ();
-}
-
-impl Handler<ClearHistory> for ChatHistoryActor {
-    type Result = ();
-
-    fn handle(&mut self, msg: ClearHistory, _ctx: &mut Self::Context) {
-        self.history.remove(&msg.chat_id);
+    fn active_chats(&self, min_msgs: usize) -> Vec<i64> {
+        self.history.iter()
+            .filter(|(_, msgs)| msgs.len() >= min_msgs)
+            .map(|(id, _)| *id)
+            .collect()
     }
 }
 
@@ -110,8 +77,6 @@ enum ProactiveMode {
 
 #[derive(Clone)]
 struct Config {
-    chat_id: i64,
-    source: String,
     mode: ProactiveMode,
     time_windows: Vec<TimeWindow>,
 }
@@ -130,14 +95,12 @@ struct ProactiveDecision {
     wait_seconds: u64,
     #[serde(default)]
     continue_: bool,
-    #[serde(default)]
-    reason: String,
 }
 
 fn default_wait() -> u64 { 120 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Scheduled action (shared state for the async loop)
+//  Scheduled action
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
@@ -146,6 +109,7 @@ struct ScheduledAction {
     send_at: Instant,
     decided_at: Instant,
     should_continue: bool,
+    source: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -155,12 +119,17 @@ struct ScheduledAction {
 pub struct ProactivePlugin {
     info: PluginInfo,
     stop_flag: Arc<AtomicBool>,
-    /// ChatHistory actor address — set during start().
-    history_addr: Option<Addr<ChatHistoryActor>>,
-    /// Scheduled actions (shared with async loop).
+    chat_history: Arc<Mutex<ChatHistory>>,
     scheduled: Arc<Mutex<HashMap<i64, ScheduledAction>>>,
-    /// Last LLM call timestamps (shared with async loop).
     last_llm_call: Arc<Mutex<HashMap<i64, Instant>>>,
+    /// LLM recipient cached for lazy spawn on first event.
+    llm_recipient: Option<actix::Recipient<LlmRequest>>,
+    /// EventBus cached for lazy spawn.
+    event_bus: Option<Addr<plugin_interface::EventBus>>,
+    /// Plugin name cached for lazy spawn.
+    plugin_name: Option<String>,
+    /// Flag: main loop already spawned?
+    loop_spawned: Arc<AtomicBool>,
 }
 
 impl ProactivePlugin {
@@ -168,33 +137,30 @@ impl ProactivePlugin {
         Self {
             info: PluginInfo {
                 name: "proactive-plugin".into(),
-                version: "0.4.0".into(),
-                description: "纯 LLM 决策 + ChatHistory actor".into(),
+                version: "0.6.0".into(),
+                description: "自动覆盖所有活跃对话的主动追问".into(),
                 author: "bn-agent".into(),
                 min_host_version: "0.1.0".into(),
             },
             stop_flag: Arc::new(AtomicBool::new(false)),
-            history_addr: None,
+            chat_history: Arc::new(Mutex::new(ChatHistory::new(100))),
             scheduled: Arc::new(Mutex::new(HashMap::new())),
             last_llm_call: Arc::new(Mutex::new(HashMap::new())),
+            llm_recipient: None,
+            event_bus: None,
+            plugin_name: None,
+            loop_spawned: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn load_config() -> Option<Config> {
-        let chat_id = std::env::var("PROACTIVE_CHAT_ID")
-            .ok()?.parse::<i64>().ok().filter(|&id| id > 0)?;
+    fn load_config() -> Config {
         let mode = match std::env::var("PROACTIVE_MODE").as_deref() {
             Ok("semi") => ProactiveMode::Semi,
             _ => ProactiveMode::Full,
         };
         let time_windows = std::env::var("PROACTIVE_TIME_WINDOWS")
             .ok().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-        Some(Config {
-            chat_id,
-            source: std::env::var("PROACTIVE_SOURCE").unwrap_or_else(|_| "telegram".into()),
-            mode,
-            time_windows,
-        })
+        Config { mode, time_windows }
     }
 
     fn in_time_window(windows: &[TimeWindow]) -> bool {
@@ -211,7 +177,6 @@ impl ProactivePlugin {
         false
     }
 
-    /// Extract JSON from LLM text — handles ```json ... ``` wrapping.
     fn extract_json(text: &str) -> Option<String> {
         let text = text.trim();
         if let Some(start) = text.find("```json") {
@@ -228,17 +193,15 @@ impl ProactivePlugin {
         None
     }
 
-    fn build_prompt(history: &[(String, String, Instant)], now: Instant) -> String {
+    fn build_prompt(history: &[(String, String, Instant)], now: Instant, source: &str) -> String {
         if history.is_empty() {
             return "对话尚未开始。".to_string();
         }
-
         let mut lines = Vec::new();
         for (role, text, _ts) in history.iter().rev().take(40) {
             lines.push(format!("{}: {}", role, text));
         }
         lines.reverse();
-
         let last_msg_ago = if let Some((_, _, ts)) = history.last() {
             let secs = now.duration_since(*ts).as_secs();
             if secs < 60 { format!("{} 秒", secs) }
@@ -246,15 +209,13 @@ impl ProactivePlugin {
         } else {
             "未知".to_string()
         };
-
         let last_role = history.last().map(|(r, _, _)| r.as_str()).unwrap_or("unknown");
-
         format!(
-            "【对话记录】\n{}\n\n\
+            "【对话记录 — 来源: {}】\n{}\n\n\
              【状态】\n最后一条来自: {}\n沉默: {} 前\n当前: {}\n\n\
              【任务】输出 JSON（不要 markdown 代码块）：\n\
-             {{\"paused\":true/false,\"message\":\"...\",\"wait_seconds\":120,\"continue_\":true/false,\"reason\":\"...\"}}",
-            lines.join("\n"),
+             {{\"paused\":true/false,\"message\":\"...\",\"wait_seconds\":120,\"continue_\":true/false}}",
+            source, lines.join("\n"),
             last_role, last_msg_ago,
             chrono::Local::now().format("%H:%M:%S"),
         )
@@ -282,20 +243,162 @@ impl ProactivePlugin {
 
         let text = match resp {
             Ok(Ok(r)) => r.content,
-            Ok(Err(e)) => { log::warn!("[Proactive] LLM error: {}", e); return None; }
-            Err(e) => { log::warn!("[Proactive] LLM mailbox: {:?}", e); return None; }
+            Ok(Err(e)) => { eprintln!("[proactive] LLM error: {}", e); return None; }
+            Err(e) => { eprintln!("[proactive] LLM mailbox: {:?}", e); return None; }
         };
 
         let json_str = Self::extract_json(&text)?;
         match serde_json::from_str::<ProactiveDecision>(&json_str) {
             Ok(d) => Some(d),
             Err(e) => {
-                log::warn!("[Proactive] parse JSON fail: {} — raw: {}", e, text);
+                eprintln!("[proactive] parse JSON fail: {} — raw: {}", e, text);
                 None
             }
         }
     }
+
+    /// Lazy-spawn the main proactive loop on first event.
+    fn maybe_spawn_loop(&self) {
+        if self.loop_spawned.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        let llm = match &self.llm_recipient {
+            Some(l) => l.clone(),
+            None => return,
+        };
+        let eb = match &self.event_bus {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let plugin_name = match &self.plugin_name {
+            Some(n) => n.clone(),
+            None => return,
+        };
+
+        let config = Arc::new(Self::load_config());
+        let chat_history = self.chat_history.clone();
+        let stop_flag = self.stop_flag.clone();
+        let scheduled = self.scheduled.clone();
+        let last_llm_call = self.last_llm_call.clone();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("proactive tokio runtime");
+            rt.block_on(async {
+                eprintln!("[proactive] v6 loop started — auto all-chat mode");
+                let _ = main_loop(config, chat_history, stop_flag, scheduled, last_llm_call, llm, eb, plugin_name).await;
+                eprintln!("[proactive] loop stopped");
+            });
+        });
+    }
 }
+
+// ── Main proactive loop (spawned lazily on first event) ─────────────────
+
+async fn main_loop(
+    config: Arc<Config>,
+    chat_history: Arc<Mutex<ChatHistory>>,
+    stop_flag: Arc<AtomicBool>,
+    scheduled: Arc<Mutex<HashMap<i64, ScheduledAction>>>,
+    last_llm_call: Arc<Mutex<HashMap<i64, Instant>>>,
+    llm: actix::Recipient<LlmRequest>,
+    eb: Addr<plugin_interface::EventBus>,
+    plugin_name: String,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        if stop_flag.load(Ordering::Relaxed) { break; }
+
+        if matches!(config.mode, ProactiveMode::Semi)
+            && !ProactivePlugin::in_time_window(&config.time_windows)
+        {
+            continue;
+        }
+
+        let now = Instant::now();
+        let active_chats = chat_history.lock().unwrap().active_chats(2);
+
+        for chat_id in active_chats {
+            if stop_flag.load(Ordering::Relaxed) { break; }
+
+            let (hist, source) = chat_history.lock().unwrap().get(chat_id);
+            if hist.len() < 2 { continue; }
+            let source = if source.is_empty() { "unknown".to_string() } else { source };
+
+            let action = scheduled.lock().unwrap().get(&chat_id).cloned();
+
+            if let Some(action) = action {
+                let user_replied = hist.iter()
+                    .filter(|(r, _, _)| r == "user")
+                    .any(|(_, _, ts)| *ts > action.decided_at);
+                if user_replied {
+                    scheduled.lock().unwrap().remove(&chat_id);
+                    continue;
+                }
+                if now < action.send_at { continue; }
+
+                eprintln!("[proactive] chat={} sending: {}", chat_id, action.message);
+                eb.do_send(Event::new("assistant.message", serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": &action.message,
+                    "source": &action.source,
+                }), &plugin_name));
+
+                chat_history.lock().unwrap().record(chat_id, "assistant", &action.message, &action.source);
+                scheduled.lock().unwrap().remove(&chat_id);
+
+                if action.should_continue {
+                    let prompt = ProactivePlugin::build_prompt(&hist, now, &action.source);
+                    let decision = ProactivePlugin::call_llm(&llm, &prompt).await;
+                    if let Some(d) = decision {
+                        if d.paused && !d.message.is_empty() {
+                            scheduled.lock().unwrap().insert(chat_id, ScheduledAction {
+                                message: d.message,
+                                send_at: Instant::now() + Duration::from_secs(d.wait_seconds),
+                                decided_at: Instant::now(),
+                                should_continue: d.continue_,
+                                source: action.source,
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let too_soon = last_llm_call.lock().unwrap().get(&chat_id)
+                .map(|last| now.duration_since(*last).as_secs() < 30)
+                .unwrap_or(false);
+            if too_soon { continue; }
+
+            let prompt = ProactivePlugin::build_prompt(&hist, now, &source);
+            last_llm_call.lock().unwrap().insert(chat_id, now);
+
+            let decision = ProactivePlugin::call_llm(&llm, &prompt).await;
+
+            if let Some(d) = decision {
+                let msg_preview = if d.message.len() > 30 { &d.message[..30] } else { &d.message };
+                eprintln!("[proactive] chat={} paused={} wait={}s msg={} cont={}",
+                    chat_id, d.paused, d.wait_seconds, msg_preview, d.continue_);
+
+                if d.paused && !d.message.is_empty() {
+                    scheduled.lock().unwrap().insert(chat_id, ScheduledAction {
+                        message: d.message,
+                        send_at: Instant::now() + Duration::from_secs(d.wait_seconds),
+                        decided_at: Instant::now(),
+                        should_continue: d.continue_,
+                        source: source.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+// ── Plugin trait ─────────────────────────────────────────────────────────────
 
 impl Plugin for ProactivePlugin {
     fn info(&self) -> PluginInfo {
@@ -303,184 +406,45 @@ impl Plugin for ProactivePlugin {
     }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
-        let config = match Self::load_config() {
-            Some(c) => {
-                log::info!("[Proactive] config: chat_id={}, mode={:?}", c.chat_id, c.mode);
-                c
-            }
-            None => {
-                log::info!("[Proactive] no PROACTIVE_CHAT_ID, idle");
-                return Ok(());
-            }
-        };
+        let config = Self::load_config();
+        eprintln!("[proactive] mode={:?}", config.mode);
 
-        let llm = match &ctx.llm {
-            Some(l) => l.clone(),
-            None => { log::warn!("[Proactive] no LLM, idle"); return Ok(()); }
-        };
+        // Cache LLM / EventBus / plugin_name for lazy spawn on first event.
+        // We can't spawn here because the tokio runtime isn't running yet
+        // (PluginManager auto_scan runs before system.block_on).
+        self.llm_recipient = ctx.llm.clone();
+        self.event_bus = Some(ctx.event_bus.clone());
+        self.plugin_name = Some(ctx.plugin_name.clone());
+        self.loop_spawned.store(false, Ordering::Relaxed);
 
-        // ── Start ChatHistory actor ──
-        let history_addr = ChatHistoryActor::new(100).start();
-        self.history_addr = Some(history_addr.clone());
-
-        let config = Arc::new(config);
-        let stop_flag = self.stop_flag.clone();
-        let scheduled = self.scheduled.clone();
-        let last_llm_call = self.last_llm_call.clone();
-        let plugin_name = ctx.plugin_name.clone();
-        let eb = ctx.event_bus.clone();
-
-        // ── Main proactive loop ──
-        actix::spawn(async move {
-            log::info!("[Proactive] v4 loop started — ChatHistory actor + pure LLM");
-
-            loop {
-                tokio::time::sleep(Duration::from_secs(15)).await;
-
-                if stop_flag.load(Ordering::Relaxed) { break; }
-
-                let chat_id = config.chat_id;
-                let now = Instant::now();
-
-                // ── Semi mode: time window ──
-                if matches!(config.mode, ProactiveMode::Semi)
-                    && !Self::in_time_window(&config.time_windows)
-                {
-                    scheduled.lock().unwrap().remove(&chat_id);
-                    continue;
-                }
-
-                // ── Fetch history from actor ──
-                let hist = history_addr.send(GetHistory { chat_id }).await
-                    .unwrap_or_default();
-
-                if hist.len() < 2 {
-                    continue;
-                }
-
-                // ── Check if there's a scheduled action ──
-                let action = scheduled.lock().unwrap().get(&chat_id).cloned();
-
-                if let Some(action) = action {
-                    // Check if user replied during wait
-                    let user_replied = hist.iter()
-                        .filter(|(r, _, _)| r == "user")
-                        .any(|(_, _, ts)| *ts > action.decided_at);
-
-                    if user_replied {
-                        log::info!("[Proactive] user replied — cancelling scheduled action");
-                        scheduled.lock().unwrap().remove(&chat_id);
-                        continue;
-                    }
-
-                    if now < action.send_at {
-                        continue; // Still waiting
-                    }
-
-                    // ── Send the message ──
-                    log::info!("[Proactive] sending: {}", action.message);
-                    eb.do_send(Event::new("assistant.message", serde_json::json!({
-                        "chat_id": chat_id,
-                        "text": &action.message,
-                        "source": &config.source,
-                    }), &plugin_name));
-
-                    // Record the sent message in history
-                    history_addr.do_send(RecordMessage {
-                        chat_id,
-                        role: "assistant".to_string(),
-                        text: action.message.clone(),
-                    });
-
-                    scheduled.lock().unwrap().remove(&chat_id);
-
-                    // ── Continue cycle? ──
-                    if action.should_continue {
-                        let prompt = Self::build_prompt(&hist, now);
-                        log::info!("[Proactive] asking LLM for next decision");
-                        let decision = ProactivePlugin::call_llm(&llm, &prompt).await;
-                        if let Some(d) = decision {
-                            log::info!("[Proactive] next decision: paused={}, wait={}s, msg={}, reason={}",
-                                d.paused, d.wait_seconds, d.message, d.reason);
-                            if d.paused && !d.message.is_empty() {
-                                scheduled.lock().unwrap().insert(chat_id, ScheduledAction {
-                                    message: d.message,
-                                    send_at: Instant::now() + Duration::from_secs(d.wait_seconds),
-                                    decided_at: Instant::now(),
-                                    should_continue: d.continue_,
-                                });
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                // ── No scheduled action — ask LLM if we should start one ──
-
-                let too_soon = last_llm_call.lock().unwrap().get(&chat_id)
-                    .map(|last| now.duration_since(*last).as_secs() < 15)
-                    .unwrap_or(false);
-                if too_soon { continue; }
-
-                let prompt = Self::build_prompt(&hist, now);
-                log::info!("[Proactive] calling LLM (history: {} msgs)", hist.len());
-
-                last_llm_call.lock().unwrap().insert(chat_id, now);
-
-                let decision = ProactivePlugin::call_llm(&llm, &prompt).await;
-
-                if let Some(d) = decision {
-                    log::info!("[Proactive] LLM: paused={}, wait={}s, msg={}, cont={}, reason={}",
-                        d.paused, d.wait_seconds, d.message, d.continue_, d.reason);
-
-                    if d.paused && !d.message.is_empty() {
-                        let msg = d.message.clone();
-                        let send_at = Instant::now() + Duration::from_secs(d.wait_seconds);
-                        scheduled.lock().unwrap().insert(chat_id, ScheduledAction {
-                            message: d.message,
-                            send_at,
-                            decided_at: Instant::now(),
-                            should_continue: d.continue_,
-                        });
-                        log::info!("[Proactive] scheduled in {}s: {}", d.wait_seconds, msg);
-                    }
-                }
-            }
-
-            log::info!("[Proactive] loop stopped");
-        });
-
-        log::info!("[Proactive] v4 started — ChatHistory actor");
+        eprintln!("[proactive] v6 started — lazy spawn on first event");
         Ok(())
     }
 
     fn on_event(&self, event: &Event) -> bool {
+        // Lazy-spawn the main loop on first event (tokio runtime is now up).
+        self.maybe_spawn_loop();
+
         let chat_id = match event.data.get("chat_id").and_then(|v| v.as_i64()) {
             Some(id) => id,
             None => return true,
         };
-
         let role = match event.topic.as_str() {
             "user.message" => "user",
             "assistant.message" => "assistant",
             _ => return true,
         };
-
+        let source = event.data.get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if let Some(text) = event.data.get("text").and_then(|v| v.as_str()) {
-            if let Some(ref addr) = self.history_addr {
-                addr.do_send(RecordMessage {
-                    chat_id,
-                    role: role.to_string(),
-                    text: text.to_string(),
-                });
-            }
+            self.chat_history.lock().unwrap().record(chat_id, role, text, source);
         }
-
         true
     }
 
     fn stop(&mut self) {
-        log::info!("[Proactive] stopping");
+        eprintln!("[proactive] stopping");
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
@@ -505,6 +469,4 @@ pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
 }
 
 #[no_mangle]
-pub extern "C" fn plugin_destroy(_plugin: Box<dyn Plugin>) {
-    // Plugin is dropped here; stop() was already called by PluginManager.
-}
+pub extern "C" fn plugin_destroy(_plugin: Box<dyn Plugin>) {}

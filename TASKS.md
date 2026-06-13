@@ -19,7 +19,7 @@ Token 用量    ██████████ 完成
 
 ## 已完成功能
 
-### 基础设施（7/7）
+### 基础设施（10/10）
 
 - [x] **重试+熔断** — 指数退避重试 + Circuit Breaker（closed/open/half-open）
 - [x] **Token 用量追踪** — SQLite 持久化 per-chat/per-model 用量
@@ -28,6 +28,9 @@ Token 用量    ██████████ 完成
 - [x] **频率限制** — 令牌桶 per-chat_id 限流
 - [x] **结构化观测** — Prometheus 格式指标（延迟/成功率/调用计数）
 - [x] **LLM 多模态路由** — 图片/视频自动切换专用模型
+- [x] **DeepSeek 推理链支持** — reasoning_content 解析/存储/回传，思考模式开关（LLM_THINKING）
+- [x] **可配置 max_tokens** — LLM_MAX_TOKENS 环境变量（默认 384000）
+- [x] **工具调用稳定性** — tool_choice:auto + system prompt 工具感知提示，解决 persona 覆盖工具意识
 
 ### 插件（15/15）
 
@@ -87,6 +90,13 @@ Token 用量    ██████████ 完成
 - **熔断状态非持久化** — 重启后重置为 closed，可能被上游 API 持续故障触发频繁重试
 - **图片/视频模型专用配置** — 需要独立配置 `IMAGE_MODEL` / `VIDEO_MODEL`，增加了部署复杂度
 - **链式工具调用** — 当前只支持一轮工具调用 + 结果回送，不支持多轮链式调用
+
+## 已解决的问题
+
+- **DeepSeek 思考模式与工具调用冲突** — `thinking: enabled` 会导致后续请求忽略工具。解决方案：默认 `LLM_THINKING=disabled`，在 system prompt 最前面插入工具感知提示
+- **响应被拆成多条 Telegram 消息** — 模型输出含 `\n` 导致视觉换行。解决方案：tg-im-plugin 发送前 `.replace('\n', "")`
+- **工具调用后对话历史断裂** — 工具调用结果未存储导致连续两条 user 消息。解决方案：`original_user_msg` 字段 + follow-up 回复关联原始消息存储
+- **Persona 覆盖工具意识** — NSFW 角色扮演过强导致模型忽略工具。解决方案：system prompt 最前面加 `tool_hint` 提醒可用工具
 
 ---
 

@@ -112,11 +112,14 @@ impl Handler<FetchRecent> for ChatStoreActor {
     type Result = Vec<Record>;
 
     fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
+        // 子查询先取最新 N 条，外层按 id ASC 恢复时间序
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT role, content, reasoning_content FROM chat_history
-             WHERE chat_id = ?1
-             ORDER BY id ASC
-             LIMIT ?2"
+            "SELECT role, content, reasoning_content FROM (
+                SELECT id, role, content, reasoning_content FROM chat_history
+                WHERE chat_id = ?1
+                ORDER BY id DESC
+                LIMIT ?2
+            ) ORDER BY id ASC"
         ) else { return vec![]; };
 
         let rows = stmt.query_map(params![msg.chat_id, msg.limit as i64], |row| {

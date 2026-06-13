@@ -252,6 +252,12 @@ pub struct ChatRequest {
     /// Original user message for history storage (instead of the request `message`).
     /// Used by follow-up calls so the stored user_msg matches the real user input.
     pub original_user_msg: Option<String>,
+    /// Tool calls returned by the assistant in the previous round (used to reconstruct
+    /// assistant message for the follow-up per DeepSeek API spec).
+    pub assistant_tool_calls: Vec<ToolCall>,
+    /// Tool execution results, one per tool call, in the same order.
+    /// Used to build `role: "tool"` messages with proper tool_call_id.
+    pub tool_results: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
