@@ -407,6 +407,80 @@ pub async fn send_message(
     Ok(())
 }
 
+// ── 4. 输入状态指示器 ──────────────────────────────────────────────────────────
+
+/// 获取用户的 typing_ticket（缓存 ≈24h）。
+/// POST /ilink/bot/getconfig
+pub async fn get_typing_ticket(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    to_user_id: &str,
+) -> Result<String, String> {
+    let url = format!("{}/ilink/bot/getconfig", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "to_user_id": to_user_id,
+        "base_info": base_info(),
+    });
+
+    let resp = client
+        .post(&url)
+        .headers(build_headers(Some(token)))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("getconfig HTTP: {}", e))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("getconfig JSON: {}", e))?;
+
+    let ticket = json["typing_ticket"]
+        .as_str()
+        .ok_or_else(|| "missing typing_ticket".to_string())?
+        .to_string();
+
+    log::info!("[wechat] got typing_ticket for {} ({} chars)", to_user_id, ticket.len());
+    Ok(ticket)
+}
+
+/// 发送输入状态。
+/// status: 1 = 开始输入, 2 = 停止输入。
+/// POST /ilink/bot/sendtyping
+pub async fn send_typing(
+    client: &Client,
+    token: &str,
+    base_url: &str,
+    to_user_id: &str,
+    typing_ticket: &str,
+    status: i32,
+) -> Result<(), String> {
+    let url = format!("{}/ilink/bot/sendtyping", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "to_user_id": to_user_id,
+        "typing_ticket": typing_ticket,
+        "status": status,
+        "base_info": base_info(),
+    });
+
+    let resp = client
+        .post(&url)
+        .headers(build_headers(Some(token)))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("sendtyping HTTP: {}", e))?;
+
+    let status_code = resp.status();
+    if !status_code.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("sendtyping HTTP {}: {}", status_code, text));
+    }
+
+    Ok(())
+}
+
 // ── Utility ──────────────────────────────────────────────────────────────────
 
 /// 简单 URL 编码（仅编码特殊字符）。
