@@ -65,7 +65,7 @@ struct AppState {
     token_usage_addr: Option<Addr<TokenUsageActor>>,
     retry_addr: Option<Addr<RetryActor>>,
     cancellation_addr: Option<Addr<CancellationActor>>,
-    chat_store: Option<Recipient<AppendChatRecord>>,
+    chat_store: Option<Recipient<ChatStoreMsg>>,
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────

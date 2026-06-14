@@ -39,7 +39,7 @@ pub struct PluginManager {
     snapshots: Arc<Mutex<Vec<String>>>,
     host_ctx: Option<PluginContext>,
     plugin_dir: String,
-    chat_store_recipient: Option<Recipient<AppendChatRecord>>,
+    chat_store: Option<Recipient<ChatStoreMsg>>,
 }
 
 impl PluginManager {
@@ -48,7 +48,7 @@ impl PluginManager {
         llm_recipient: Option<Recipient<LlmRequest>>,
         tool_registry: Arc<Mutex<ToolRegistry>>,
         plugin_dir: String,
-        chat_store_recipient: Option<Recipient<AppendChatRecord>>,
+        chat_store: Option<Recipient<ChatStoreMsg>>,
     ) -> Self {
         let mut pm = Self {
             event_bus,
@@ -58,7 +58,7 @@ impl PluginManager {
             snapshots: Arc::new(Mutex::new(Vec::new())),
             host_ctx: None,
             plugin_dir,
-            chat_store_recipient,
+            chat_store,
         };
         pm
     }
@@ -134,7 +134,7 @@ impl PluginManager {
                 self.event_bus.clone(),
                 self.llm_recipient.clone(),
                 self.tool_registry.clone(),
-                self.chat_store_recipient.clone(),
+                self.chat_store.clone(),
             ) {
                 Ok(loaded) => {
                     log::info!("[PluginManager] auto-loaded '{}'", loaded.info.name);
@@ -191,7 +191,7 @@ impl Handler<LoadPlugin> for PluginManager {
         let event_bus = self.event_bus.clone();
         let llm_recipient = self.llm_recipient.clone();
         let tool_registry = self.tool_registry.clone();
-        let chat_store = self.chat_store_recipient.clone();
+        let chat_store = self.chat_store.clone();
         let path = msg.path;
 
         let fut = async move {
@@ -314,7 +314,7 @@ impl Handler<ReloadPlugin> for PluginManager {
         let event_bus = self.event_bus.clone();
         let llm_recipient = self.llm_recipient.clone();
         let tool_registry = self.tool_registry.clone();
-        let chat_store = self.chat_store_recipient.clone();
+        let chat_store = self.chat_store.clone();
         let fut = async move {
             unsafe {
                 let library = libloading::Library::new(&path)
@@ -393,7 +393,7 @@ impl Handler<ScanAndLoad> for PluginManager {
                 self.event_bus.clone(),
                 self.llm_recipient.clone(),
                 self.tool_registry.clone(),
-                self.chat_store_recipient.clone(),
+                self.chat_store.clone(),
             ) {
                 Ok(loaded) => {
                     log::info!("[PluginManager] auto-loaded plugin '{}'", loaded.info.name);
@@ -532,7 +532,7 @@ fn load_plugin_file(
     event_bus: Addr<EventBus>,
     llm_recipient: Option<Recipient<LlmRequest>>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
-    chat_store_recipient: Option<Recipient<AppendChatRecord>>,
+    chat_store: Option<Recipient<ChatStoreMsg>>,
 ) -> Result<LoadedPlugin, String> {
     unsafe {
         let library = libloading::Library::new(path)
@@ -553,7 +553,7 @@ fn load_plugin_file(
             llm: llm_recipient,
             tool_registry: Some(tr_for_ctx),
             logger: PluginLogger::new(event_bus.clone(), plugin_name.clone()),
-            chat_store: chat_store_recipient,
+            chat_store,
         };
 
         let before = snapshot_tool_names(&tool_registry);

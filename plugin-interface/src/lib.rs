@@ -225,6 +225,40 @@ pub struct AppendChatRecord {
     pub content: String,
 }
 
+/// Fetch recent chat history records from the database.
+/// Used by plugins (e.g. proactive-plugin) to restore context on startup.
+#[derive(Message)]
+#[rtype(result = "Vec<ChatHistoryRecord>")]
+pub struct FetchChatHistory {
+    /// Maximum number of records to fetch (most recent first, returned oldest-first).
+    pub limit: usize,
+}
+
+/// A single chat history record returned from the database.
+#[derive(Debug, Clone)]
+pub struct ChatHistoryRecord {
+    pub role: String,
+    pub content: String,
+}
+
+/// Unified chat store message — combines read and write operations
+/// so plugins only need a single `Recipient<ChatStoreMsg>`.
+#[derive(Message)]
+#[rtype(result = "ChatStoreResponse")]
+pub enum ChatStoreMsg {
+    /// Append a message to the chat history.
+    Append { role: String, content: String },
+    /// Fetch recent N records (oldest-first).
+    FetchRecent { limit: usize },
+}
+
+/// Response from ChatStoreMsg.
+#[derive(Debug, MessageResponse)]
+pub enum ChatStoreResponse {
+    AppendOk,
+    FetchRecent(Vec<ChatHistoryRecord>),
+}
+
 /// Full-featured chat request sent by PipelineActor.
 #[derive(Message, Clone)]
 #[rtype(result = "Result<LlmResponse, String>")]
@@ -415,8 +449,8 @@ pub struct PluginContext {
     pub tool_registry: Option<Arc<Mutex<ToolRegistry>>>,
     /// Centralized logger — use this instead of `eprintln!` or `log::info!`.
     pub logger: PluginLogger,
-    /// Chat history store — persist messages so they appear in LLM context.
-    pub chat_store: Option<Recipient<AppendChatRecord>>,
+    /// Chat history store — unified read/write access (Append + FetchRecent).
+    pub chat_store: Option<Recipient<ChatStoreMsg>>,
 }
 
 /// The **object-safe** trait every plugin must implement.

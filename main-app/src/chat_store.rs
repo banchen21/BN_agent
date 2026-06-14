@@ -12,7 +12,7 @@
 //! | `ClearAll`          | `usize`            | Delete all records             |
 
 use actix::prelude::*;
-use plugin_interface::AppendChatRecord;
+use plugin_interface::{AppendChatRecord, ChatHistoryRecord, ChatStoreMsg, ChatStoreResponse, FetchChatHistory};
 use rusqlite::{params, Connection, Result as SqlResult};
 
 // ── Records ──────────────────────────────────────────────────────────────────
@@ -175,6 +175,80 @@ impl Handler<ClearAll> for ChatStoreActor {
             Err(e) => {
                 log::error!("[ChatStoreActor] ClearAll failed: {}", e);
                 0
+            }
+        }
+    }
+}
+
+impl Handler<FetchChatHistory> for ChatStoreActor {
+    type Result = Vec<ChatHistoryRecord>;
+
+    fn handle(&mut self, msg: FetchChatHistory, _ctx: &mut Self::Context) -> Self::Result {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT role, content FROM (
+                SELECT id, role, content FROM chat_history
+                ORDER BY id DESC
+                LIMIT ?1
+            ) ORDER BY id ASC"
+        ) else { return vec![]; };
+
+        let rows = stmt.query_map(params![msg.limit as i64], |row| {
+            Ok(ChatHistoryRecord {
+                role: row.get(0)?,
+                content: row.get(1)?,
+            })
+        });
+
+        match rows {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::error!("[ChatStoreActor] FetchChatHistory failed: {}", e);
+                vec![]
+            }
+        }
+    }
+}
+
+impl Handler<ChatStoreMsg> for ChatStoreActor {
+    type Result = ChatStoreResponse;
+
+    fn handle(&mut self, msg: ChatStoreMsg, _ctx: &mut Self::Context) -> Self::Result {
+        match msg {
+            ChatStoreMsg::Append { role, content } => {
+                if let Err(e) = self.conn.execute(
+                    "INSERT INTO chat_history (role, content) VALUES (?1, ?2)",
+                    params![role, content],
+                ) {
+                    log::error!("[ChatStoreActor] ChatStoreMsg::Append failed: {}", e);
+                }
+                ChatStoreResponse::AppendOk
+            }
+            ChatStoreMsg::FetchRecent { limit } => {
+                let Ok(mut stmt) = self.conn.prepare(
+                    "SELECT role, content FROM (
+                        SELECT id, role, content FROM chat_history
+                        ORDER BY id DESC
+                        LIMIT ?1
+                    ) ORDER BY id ASC"
+                ) else {
+                    return ChatStoreResponse::FetchRecent(vec![]);
+                };
+
+                let rows = stmt.query_map(params![limit as i64], |row| {
+                    Ok(ChatHistoryRecord {
+                        role: row.get(0)?,
+                        content: row.get(1)?,
+                    })
+                });
+
+                let records = match rows {
+                    Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+                    Err(e) => {
+                        log::error!("[ChatStoreActor] ChatStoreMsg::FetchRecent failed: {}", e);
+                        vec![]
+                    }
+                };
+                ChatStoreResponse::FetchRecent(records)
             }
         }
     }
