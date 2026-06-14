@@ -14,7 +14,7 @@ use tokio::runtime::Runtime;
 
 // ── ComfyUI 配置 ────────────────────────────────────────────────
 const COMFY_URL: &str = "http://127.0.0.1:8188";
-const OUTPUT_DIR: &str = r"D:\banch\ai\ComfyUI\output";
+const OUTPUT_DIR: &str = r"E:\BN_agent\temp_images";
 const DEFAULT_SEED: u64 = 300;
 const DEFAULT_STEPS: u64 = 25;
 const DEFAULT_CFG: f64 = 7.0;
@@ -334,7 +334,15 @@ impl ToolExecutor for GenerateImageTool {
             Err(e) => return ToolResult::err(&format!("生成失败: {}", e)),
         };
 
-        let full_path = format!("{}\\{}", state.output_dir, filename);
+        // 从 ComfyUI 输出目录拷到 E 盘
+        let comfy_out = r"D:\banch\ai\ComfyUI\output";
+        let src = format!("{}\\{}", comfy_out, filename);
+        let dest_dir = state.output_dir.clone();
+        let full_path = format!("{}\\{}", dest_dir, filename);
+        fs::create_dir_all(&dest_dir).ok();
+        if let Err(e) = fs::copy(&src, &full_path) {
+            return ToolResult::err(&format!("文件拷贝失败 [{}] -> [{}]: {}", src, full_path, e));
+        }
 
         // 读取图片文件并 base64 编码
         let b64 = match fs::read(&full_path) {
