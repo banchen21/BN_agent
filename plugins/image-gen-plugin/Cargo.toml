@@ -1,0 +1,18 @@
+[package]
+name = "image-gen-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "本地生图插件 — 通过 ComfyUI API 调用 SD1.5 模型生成图片，支持换脸"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+plugin-interface = { path = "../../plugin-interface" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"

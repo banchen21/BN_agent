@@ -1,8 +1,8 @@
 [package]
-name = "hello-plugin"
+name = "demo-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "Example plugin — subscribes to 'greeting' events and publishes 'greeted' responses"
+description = "示例插件 — 订阅 'greeting' 事件并发布 'greeted' 响应"
 
 [lib]
 crate-type = ["cdylib"]

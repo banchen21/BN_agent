@@ -1,21 +1,21 @@
-//! hello-plugin — example plugin for the actix-actor plugin system.
+//! demo-plugin — 示例插件，演示 actix-actor 插件系统的基本用法。
 //!
-//! Uses `on_event()` instead of an internal actor (DLLs can't call `Actor::start()`).
+//! 使用 `on_event()` 而非内部 actor（DLL 中无法调用 `Actor::start()`）。
 
 use plugin_interface::*;
 
-struct HelloPlugin {
+struct DemoPlugin {
     info: PluginInfo,
     event_bus: Option<Addr<EventBus>>,
 }
 
-impl HelloPlugin {
+impl DemoPlugin {
     fn new() -> Self {
         Self {
             info: PluginInfo {
-                name: "hello-plugin".into(),
+                name: "demo-plugin".into(),
                 version: "0.1.0".into(),
-                description: "Subscribes to 'greeting' events and publishes 'greeted' responses".into(),
+                description: "示例插件：订阅 'greeting' 事件并发布 'greeted' 响应".into(),
                 author: "demo".into(),
                 min_host_version: "0.1.0".into(),
             },
@@ -24,26 +24,26 @@ impl HelloPlugin {
     }
 }
 
-impl Plugin for HelloPlugin {
+impl Plugin for DemoPlugin {
     fn info(&self) -> PluginInfo {
         self.info.clone()
     }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
-        log::info!("[hello-plugin] started (actor-free mode)");
+        log::info!("[demo-plugin] started (actor-free mode)");
         self.event_bus = Some(ctx.event_bus.clone());
         // Subscribe via on_event — no internal actor needed.
         Ok(())
     }
 
     fn stop(&mut self) {
-        log::info!("[hello-plugin] stopped");
+        log::info!("[demo-plugin] stopped");
         self.event_bus = None;
     }
 
     fn on_event(&self, event: &Event) -> bool {
         if event.topic == "greeting" {
-            log::info!("[hello-plugin] received greeting: {}", event.data);
+            log::info!("[demo-plugin] received greeting: {}", event.data);
 
             if let Some(ref eb) = self.event_bus {
                 let response = Event::new(
@@ -52,7 +52,7 @@ impl Plugin for HelloPlugin {
                         "message": format!("Hello back! I received: {}", event.data),
                         "in_response_to": event.timestamp,
                     }),
-                    "hello-plugin",
+                    "demo-plugin",
                 );
                 eb.do_send(response);
             }
@@ -64,7 +64,7 @@ impl Plugin for HelloPlugin {
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
-    Box::new(HelloPlugin::new())
+    Box::new(DemoPlugin::new())
 }
 
 #[no_mangle]

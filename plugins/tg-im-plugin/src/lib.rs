@@ -183,10 +183,10 @@ impl ToolExecutor for SendPhotoTool {
                 "type": "object",
                 "properties": {
                     "chat_id": {"type": "integer", "description": "Telegram chat ID（可选，不传则发到当前会话）"},
-                    "photo_base64": {"type": "string", "description": "Base64 JPEG/PNG"},
+                    "photo_base64": {"type": "string", "description": "Base64 JPEG/PNG（与 file_path 二选一）"},
+                    "file_path": {"type": "string", "description": "本地图片文件路径，如 D:\\banch\\ai\\image.png（与 photo_base64 二选一）"},
                     "caption": {"type": "string", "description": "Optional caption"}
-                },
-                "required": ["photo_base64"]
+                }
             }),
         });
         &DEF
@@ -199,14 +199,21 @@ impl ToolExecutor for SendPhotoTool {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
-        let b64 = match args.get("photo_base64").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
-            None => return ToolResult::err("missing: photo_base64"),
-        };
         let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
-        let data = match base64_decode(&b64) {
-            Ok(d) => d,
-            Err(e) => return ToolResult::err(&format!("base64: {}", e)),
+
+        // 支持 photo_base64 或 file_path 两种输入
+        let data = if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+            match std::fs::read(path) {
+                Ok(d) => d,
+                Err(e) => return ToolResult::err(&format!("文件读取失败 [{}]: {}", path, e)),
+            }
+        } else if let Some(b64) = args.get("photo_base64").and_then(|v| v.as_str()) {
+            match base64_decode(b64) {
+                Ok(d) => d,
+                Err(e) => return ToolResult::err(&format!("base64: {}", e)),
+            }
+        } else {
+            return ToolResult::err("需要提供 photo_base64 或 file_path");
         };
 
         // 停止 typing 循环
@@ -659,6 +666,37 @@ impl Plugin for TgImPlugin {
                             if let Err(e) = h.send_message(chat_id, &text).await {
                                 eprintln!("[tg-im] send failed: {}", e);
                             }
+                        }
+                    });
+                });
+            }
+            return true;
+        }
+
+        // ── image.gen.complete → 自动发送图片到 TG ──
+        if event.topic == "image.gen.complete" && chat_id != 0 {
+            let path = match event.data.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => return true,
+            };
+
+            if let Some(ref handle) = self.bot_handle {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let data = match std::fs::read(&path) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("[tg-im] read image failed {}: {}", path, e);
+                            return;
+                        }
+                    };
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio");
+                    rt.block_on(async {
+                        if let Err(e) = h.send_photo(chat_id, data, None).await {
+                            eprintln!("[tg-im] send_photo failed: {}", e);
                         }
                     });
                 });

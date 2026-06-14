@@ -208,13 +208,14 @@ impl Handler<ChatRequest> for LlmActor {
         let event_bus = self.event_bus.clone();
         let store_addr = self.store_addr.clone();
 
-        // 多模态请求（图片/视频/文件）自动随机选取破限词
+        // 破限词：多模态请求或工具调用时自动随机选取
         let jailbreak = msg.jailbreak_index
             .or_else(|| {
+                let has_tools = !msg.tools.is_empty();
                 let is_multimodal = msg.image_base64.is_some()
                     || msg.video_base64.is_some()
                     || msg.file_base64.is_some();
-                if is_multimodal && !self.config.jailbreak_prompts.is_empty() {
+                if (is_multimodal || has_tools) && !self.config.jailbreak_prompts.is_empty() {
                     use rand::Rng;
                     Some(rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len()))
                 } else {

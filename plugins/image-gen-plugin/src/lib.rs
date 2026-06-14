@@ -1,0 +1,432 @@
+//! image-gen-plugin — 本地 SD 生图插件
+//!
+//! 对接 ComfyUI API，支持 TXT2IMG + ReActor 换脸。
+//! 注册 Tool: `generate_image`，LLM 可直接调用。
+//! 生成完成后发布 `image.gen.complete` 事件，IM 插件可订阅发送。
+
+use plugin_interface::*;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Runtime;
+
+// ── ComfyUI 配置 ────────────────────────────────────────────────
+const COMFY_URL: &str = "http://127.0.0.1:8188";
+const OUTPUT_DIR: &str = r"D:\banch\ai\ComfyUI\output";
+const DEFAULT_SEED: u64 = 300;
+const DEFAULT_STEPS: u64 = 25;
+const DEFAULT_CFG: f64 = 7.0;
+const DEFAULT_WIDTH: u64 = 768;
+const DEFAULT_HEIGHT: u64 = 1024;
+
+const DEFAULT_NEGATIVE: &str = "easynegative, worst quality, low quality, bad anatomy, bad hands, extra fingers, deformed, ugly, blurry, watermark, signature, multiple views, multiple girls, 2girls, 3girls, crowd, group, text, speech bubble";
+
+const NSFW_NEGATIVE: &str = "worst quality, low quality, bad anatomy, bad hands, extra fingers, deformed, ugly, blurry, watermark, signature, multiple views, multiple girls, 2girls, 3girls, crowd, group, text, speech bubble";
+
+const FACE_PROMPT: &str = "masterpiece, best quality, 1girl, solo, twin tails, black hair, bob cut, red ribbon, white skin, slim, cute, round face, big eyes";
+
+// ── 工作流模板 ──────────────────────────────────────────────────
+const WORKFLOW_TEMPLATE: &str = r#"{
+  "1": {
+    "inputs": { "ckpt_name": "revAnimated_v121_vae2.safetensors" },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "2": {
+    "inputs": { "text": "PROMPT_HERE", "clip": ["1", 1] },
+    "class_type": "CLIPTextEncode"
+  },
+  "3": {
+    "inputs": { "text": "NEGATIVE_HERE", "clip": ["1", 1] },
+    "class_type": "CLIPTextEncode"
+  },
+  "4": {
+    "inputs": { "width": WIDTH_VAL, "height": HEIGHT_VAL, "batch_size": 1 },
+    "class_type": "EmptyLatentImage"
+  },
+  "5": {
+    "inputs": {
+      "seed": SEED_VAL, "steps": STEPS_VAL, "cfg": CFG_VAL,
+      "sampler_name": "euler_ancestral", "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0], "negative": ["3", 0],
+      "latent_image": ["4", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "6": {
+    "inputs": { "samples": ["5", 0], "vae": ["1", 2] },
+    "class_type": "VAEDecode"
+  },
+  "7": {
+    "inputs": { "image": "ref_face.png" },
+    "class_type": "LoadImage"
+  },
+  "8": {
+    "inputs": {
+      "enabled": true,
+      "swap_model": "inswapper_128.onnx",
+      "facedetection": "retinaface_resnet50",
+      "face_restore_model": "none",
+      "face_restore_visibility": 0.1,
+      "codeformer_weight": 0,
+      "detect_gender_input": "no",
+      "detect_gender_source": "no",
+      "input_faces_index": 0,
+      "source_faces_index": 0,
+      "console_log_level": 1,
+      "input_image": ["6", 0],
+      "source_image": ["7", 0]
+    },
+    "class_type": "ReActorFaceSwap"
+  },
+  "9": {
+    "inputs": { "filename_prefix": "ComfyUI", "images": ["8", 0] },
+    "class_type": "SaveImage"
+  }
+}"#;
+
+// ── API 类型 ────────────────────────────────────────────────────
+#[derive(Serialize)]
+struct ComfyPrompt {
+    prompt: serde_json::Value,
+    client_id: String,
+}
+
+#[derive(Deserialize)]
+struct ComfyQueueResponse {
+    prompt_id: String,
+}
+
+#[derive(Deserialize)]
+struct ComfyHistoryEntry {
+    outputs: HashMap<String, ComfyNodeOutput>,
+    status: Option<ComfyStatus>,
+}
+
+#[derive(Deserialize)]
+struct ComfyNodeOutput {
+    images: Option<Vec<ComfyImage>>,
+}
+
+#[derive(Deserialize)]
+struct ComfyImage {
+    filename: String,
+    #[allow(dead_code)]
+    subfolder: String,
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    file_type: String,
+}
+
+#[derive(Deserialize)]
+struct ComfyStatus {
+    completed: bool,
+}
+
+#[derive(Deserialize)]
+struct ComfyHistory {
+    #[serde(flatten)]
+    entries: HashMap<String, ComfyHistoryEntry>,
+}
+
+// ── 工具参数 ────────────────────────────────────────────────────
+#[derive(Deserialize, Serialize, Clone, Debug)]
+struct GenerateImageArgs {
+    prompt: String,
+    #[serde(default = "default_negative")]
+    negative: String,
+    #[serde(default = "default_seed")]
+    seed: u64,
+    #[serde(default = "default_steps")]
+    steps: u64,
+    #[serde(default = "default_cfg")]
+    cfg: f64,
+    #[serde(default = "default_width")]
+    width: u64,
+    #[serde(default = "default_height")]
+    height: u64,
+    /// 是否直接发送到 IM（默认 true，无需 LLM 手动发图）
+    #[serde(default = "default_true")]
+    auto_send: bool,
+    /// NSFW 模式：启用无限制内容生成，去掉安全过滤词
+    #[serde(default)]
+    nsfw: bool,
+}
+
+fn default_true() -> bool { true }
+
+fn default_negative() -> String { DEFAULT_NEGATIVE.to_string() }
+fn default_seed() -> u64 { DEFAULT_SEED }
+fn default_steps() -> u64 { DEFAULT_STEPS }
+fn default_cfg() -> f64 { DEFAULT_CFG }
+fn default_width() -> u64 { DEFAULT_WIDTH }
+fn default_height() -> u64 { DEFAULT_HEIGHT }
+
+// ── 共享状态 ────────────────────────────────────────────────────
+struct PluginState {
+    runtime: Runtime,
+    client: Client,
+    output_dir: String,
+    event_bus: Option<Addr<EventBus>>,
+}
+
+// ── 插件主体 ────────────────────────────────────────────────────
+
+pub struct ImageGenPlugin {
+    info: PluginInfo,
+    state: Option<PluginState>,
+}
+
+impl ImageGenPlugin {
+    fn new() -> Self {
+        Self {
+            info: PluginInfo {
+                name: "image-gen-plugin".into(),
+                version: "0.1.0".into(),
+                description: "本地 SD 生图插件，通过 ComfyUI API 生成动漫风格图片，支持 ReActor 换脸（齐悦脸型）。LLM 可通过 generate_image 工具调用。生成完成后自动发布 image.gen.complete 事件。".into(),
+                author: "BN_agent".into(),
+                min_host_version: "0.1.0".into(),
+            },
+            state: None,
+        }
+    }
+
+    fn build_workflow(
+        prompt: &str,
+        negative: &str,
+        seed: u64,
+        steps: u64,
+        cfg: f64,
+        width: u64,
+        height: u64,
+        nsfw: bool,
+    ) -> serde_json::Value {
+        let full_prompt = format!("{}, {}", FACE_PROMPT, prompt);
+        let neg = if nsfw { NSFW_NEGATIVE } else { negative };
+        let wf_str = WORKFLOW_TEMPLATE
+            .replace("PROMPT_HERE", &full_prompt)
+            .replace("NEGATIVE_HERE", neg)
+            .replace("SEED_VAL", &seed.to_string())
+            .replace("STEPS_VAL", &steps.to_string())
+            .replace("CFG_VAL", &cfg.to_string())
+            .replace("WIDTH_VAL", &width.to_string())
+            .replace("HEIGHT_VAL", &height.to_string());
+        serde_json::from_str(&wf_str).unwrap()
+    }
+
+    async fn generate_image_inner(
+        client: &Client,
+        args: &GenerateImageArgs,
+    ) -> Result<String, String> {
+        let workflow = Self::build_workflow(
+            &args.prompt, &args.negative,
+            args.seed, args.steps, args.cfg,
+            args.width, args.height,
+            args.nsfw,
+        );
+
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let body = ComfyPrompt { prompt: workflow, client_id: client_id.clone() };
+
+        let queue_resp = client
+            .post(format!("{}/prompt", COMFY_URL))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("ComfyUI 请求失败: {}", e))?
+            .json::<ComfyQueueResponse>()
+            .await
+            .map_err(|e| format!("解析响应失败: {}", e))?;
+
+        let prompt_id = queue_resp.prompt_id;
+
+        for _ in 0..240 {
+            let history = client
+                .get(format!("{}/history/{}", COMFY_URL, prompt_id))
+                .send()
+                .await
+                .map_err(|e| format!("查询历史失败: {}", e))?
+                .json::<ComfyHistory>()
+                .await
+                .map_err(|e| format!("解析历史失败: {}", e))?;
+
+            if let Some(entry) = history.entries.get(&prompt_id) {
+                if let Some(status) = &entry.status {
+                    if !status.completed {
+                        return Err("生成失败: ComfyUI 报告执行错误".into());
+                    }
+                }
+                for (_, output) in &entry.outputs {
+                    if let Some(images) = &output.images {
+                        if let Some(img) = images.first() {
+                            return Ok(img.filename.clone());
+                        }
+                    }
+                }
+                return Err("生成完成但未找到输出图片".into());
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        Err("生成超时 (120s)".into())
+    }
+}
+
+// ── Tool Executor ────────────────────────────────────────────────
+
+struct GenerateImageTool {
+    state: Arc<Mutex<Option<PluginState>>>,
+}
+
+impl ToolExecutor for GenerateImageTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+        DEF.get_or_init(|| ToolDef {
+            name: "generate_image".into(),
+            description: "使用本地SD模型生成齐悦（双马尾JK少女）的图片并自动发送到当前会话。这是唯一的生图方式，不要用tg_send_photo来发不存在的图片。生成需要15-30秒，调用后不要额外回复确认文字，图片会自动送达。".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "英文Danbooru标签格式。拆解每件衣物: 上衣+下装+鞋袜+配饰，再写场景动作表情。人物外貌(双马尾、黑发、体型)已固定不用写。例: 'white shirt, red pleated skirt, black kneehighs, loafers, red ribbon, standing in classroom, looking at viewer, sweet smile' 或 'loose hoodie, denim shorts, sneakers, walking on street, happy'。必须英文逗号分隔，从衣物到场景依次写。"
+                    },
+                    "negative": {
+                        "type": "string",
+                        "description": "反向提示词，一般不需要填，系统已内置"
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": "随机种子，默认 300。换种子换构图，不改人物脸型",
+                        "default": 300
+                    },
+                    "nsfw": {
+                        "type": "boolean",
+                        "description": "NSFW无限制模式。当用户要求生成成人/色情/裸露内容时必须设为true，否则正常图片设为false",
+                        "default": false
+                    }
+                },
+                "required": ["prompt"]
+            }),
+            internal: false,
+        })
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let gen_args: GenerateImageArgs = match serde_json::from_value(args.clone()) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(&format!("参数解析失败: {}", e)),
+        };
+
+        let state_guard = self.state.lock().unwrap();
+        let state = match state_guard.as_ref() {
+            Some(s) => s,
+            None => return ToolResult::err("插件未初始化"),
+        };
+
+        // 生成图片
+        let filename = match state.runtime.block_on(
+            ImageGenPlugin::generate_image_inner(&state.client, &gen_args)
+        ) {
+            Ok(f) => f,
+            Err(e) => return ToolResult::err(&format!("生成失败: {}", e)),
+        };
+
+        let full_path = format!("{}\\{}", state.output_dir, filename);
+
+        // 读取图片文件并 base64 编码
+        let b64 = match fs::read(&full_path) {
+            Ok(bytes) => base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
+            Err(_) => String::new(),
+        };
+
+        // 发布事件，供 IM 插件等订阅
+        if let Some(ref eb) = state.event_bus {
+            eb.do_send(Event::new(
+                "image.gen.complete",
+                serde_json::json!({
+                    "path": full_path,
+                    "filename": filename,
+                    "prompt": gen_args.prompt,
+                    "seed": gen_args.seed,
+                    "base64": b64,
+                }),
+                "image-gen-plugin",
+            ));
+        }
+
+        ToolResult::ok(&format!(
+            "图片生成成功！\n文件: {}\n尺寸: {}x{}\n种子: {}\n提示词: {}",
+            full_path, gen_args.width, gen_args.height, gen_args.seed, gen_args.prompt
+        ))
+    }
+}
+
+// ── Plugin trait ─────────────────────────────────────────────────
+
+impl Plugin for ImageGenPlugin {
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
+
+    fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
+        ctx.logger.info("image-gen-plugin 启动中...");
+
+        let rt = Runtime::new()?;
+        let client = Client::new();
+        let output_dir = OUTPUT_DIR.to_string();
+        let event_bus = Some(ctx.event_bus.clone());
+
+        let shared_state = PluginState {
+            runtime: rt,
+            client,
+            output_dir,
+            event_bus,
+        };
+
+        // 注册工具
+        if let Some(tool_registry) = &ctx.tool_registry {
+            let tool_state = Arc::new(Mutex::new(Some(PluginState {
+                runtime: Runtime::new()?,
+                client: Client::new(),
+                output_dir: OUTPUT_DIR.to_string(),
+                event_bus: Some(ctx.event_bus.clone()),
+            })));
+
+            tool_registry
+                .lock()
+                .unwrap()
+                .register(Arc::new(GenerateImageTool { state: tool_state }));
+            ctx.logger.info("工具 generate_image 已注册");
+        }
+
+        self.state = Some(shared_state);
+        ctx.logger.info("image-gen-plugin 启动完成");
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.state = None;
+    }
+
+    fn on_event(&self, event: &Event) -> bool {
+        if event.topic == "image.gen.request" {
+            // 可通过事件触发生成（未来扩展）
+        }
+        true
+    }
+}
+
+// ── FFI ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
+    Box::new(ImageGenPlugin::new())
+}
+
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn plugin_destroy(_plugin: Box<dyn Plugin>) {}

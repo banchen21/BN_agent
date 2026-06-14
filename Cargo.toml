@@ -2,7 +2,7 @@
 members = [
     "plugin-interface",
     "main-app",
-    "plugins/hello-plugin",
+    "plugins/demo-plugin",
     "plugins/logger-plugin",
     "plugins/time-plugin",
     "plugins/tg-im-plugin",
@@ -14,6 +14,7 @@ members = [
     "plugins/audio-capture-plugin",
     "plugins/webrtc-plugin",
     "plugins/image-plugin",
+    "plugins/image-gen-plugin",
     "plugins/video-plugin",
     "plugins/mcp-plugin",
     "plugins/skill-plugin",
