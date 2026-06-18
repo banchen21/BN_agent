@@ -491,10 +491,8 @@ name = "asr-tts-plugin"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "csv",
  "log",
  "plugin-interface",
- "rand 0.8.6",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -2721,6 +2719,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-plugin"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "chrono",
+ "log",
+ "plugin-interface",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3264,6 +3276,7 @@ dependencies = [
  "plugin-interface",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

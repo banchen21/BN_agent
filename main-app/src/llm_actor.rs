@@ -14,7 +14,8 @@
 //! | `llm.error`     | HTTP / API / parse failure     |
 
 use actix::prelude::*;
-use crate::chat_store::{ChatStoreActor, FetchRecent, AppendPair};
+use rand::Rng;
+use crate::chat_store::{ChatStoreActor, FetchRecent, AppendJsonMessage};
 use plugin_interface::*;
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -183,7 +184,7 @@ impl Handler<LlmRequest> for LlmActor {
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
-            "temperature": msg.temperature.unwrap_or(0.7),
+            "temperature": msg.temperature.unwrap_or(rand::thread_rng().gen_range(0.7..=1.2)),
             "max_tokens": msg.max_tokens.unwrap_or(1024),
         });
 
@@ -223,8 +224,10 @@ impl Handler<ChatRequest> for LlmActor {
                 }
             })
             .and_then(|i| self.config.jailbreak_at(i));
+        // system_content 构建顺序：persona → jailbreak（如果有）→ tool_hint（在下面追加）
+        // 利用 LLM 近因效应让工具提示在后，权重更高
         let system_content = if let Some(jb) = jailbreak {
-            format!("{}\n\n{}", jb, self.config.system_prompt)
+            format!("{}\n\n{}", self.config.system_prompt, jb)
         } else {
             self.config.system_prompt.clone()
         };
@@ -233,9 +236,10 @@ impl Handler<ChatRequest> for LlmActor {
         let tools = msg.tools.clone();
 
         // 动态生成工具提示（从实际注册的工具列表中提取）
+        // 顺序：persona → jailbreak → tool_hint（近因效应让工具提示权重最高）
         let tool_hint = build_tool_hint(&tools);
         let system_content = if !tools.is_empty() {
-            format!("{}\n\n{}", tool_hint, system_content)
+            format!("{}\n\n{}", system_content, tool_hint)
         } else {
             system_content
         };
@@ -289,7 +293,34 @@ impl Handler<ChatRequest> for LlmActor {
 
             // ── 3. Recent history ──
             let records = store_addr.send(FetchRecent { limit }).await.unwrap_or_default();
+            // 过滤：去掉开头孤立的 tool/tool_calls 消息（前导被 limit 截断，没有匹配对）
+            let mut tool_calls_seen = false;
             for r in &records {
+                let role_is_tool = r.role == "tool"
+                    || r.message_json.as_deref()
+                        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                        .and_then(|v| v.get("role").and_then(|r| r.as_str()).map(|s| s == "tool"))
+                        .unwrap_or(false);
+                let role_is_tool_calls = r.message_json.as_deref()
+                    .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                    .map(|v| v.get("tool_calls").is_some())
+                    .unwrap_or(false);
+
+                // 跳过开头的孤立 tool 消息（前面没有 tool_calls）
+                if role_is_tool && !tool_calls_seen {
+                    continue;
+                }
+                if role_is_tool_calls {
+                    tool_calls_seen = true;
+                }
+
+                // 优先使用完整 JSON（支持 tool_calls 等结构），降级回退 role+content
+                if let Some(ref json_str) = r.message_json {
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        messages.push(msg);
+                        continue;
+                    }
+                }
                 messages.push(serde_json::json!({
                     "role": r.role.clone(), "content": r.content.clone()
                 }));
@@ -332,7 +363,7 @@ impl Handler<ChatRequest> for LlmActor {
 
             // ── 5. Current user message ──
 
-            let user_content = if let Some(ref img_b64) = image_base64 {
+            let user_content: serde_json::Value = if let Some(ref img_b64) = image_base64 {
                 serde_json::json!([
                     {"type": "text", "text": user_msg},
                     {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", img_b64)}}
@@ -343,7 +374,6 @@ impl Handler<ChatRequest> for LlmActor {
                     {"type": "text", "text": user_msg}
                 ])
             } else if let (Some(_fb64), Some(ref fname)) = (file_base64.as_ref(), file_name.as_ref()) {
-                // DeepSeek/MiMo API 不支持 type: "file"，改为文本提示
                 let file_hint = if user_msg.is_empty() {
                     format!("用户发送了一个文件：{}", fname)
                 } else {
@@ -381,7 +411,7 @@ impl Handler<ChatRequest> for LlmActor {
             let mut body = serde_json::json!({
                 "model": actual_model,
                 "messages": messages,
-                "temperature": 0.7,
+                "temperature": rand::thread_rng().gen_range(0.7..=1.2),
                 "max_tokens": max_tokens,
             });
             if !tools.is_empty() {
@@ -419,7 +449,7 @@ impl Handler<ChatRequest> for LlmActor {
                     let mut fallback_body = serde_json::json!({
                         "model": default_model,
                         "messages": fallback_messages,
-                        "temperature": 0.7,
+                        "temperature": rand::thread_rng().gen_range(0.7..=1.2),
                         "max_tokens": max_tokens,
                     });
                     if !tools.is_empty() {
@@ -457,7 +487,7 @@ impl Handler<ChatRequest> for LlmActor {
                     let mut fallback_body = serde_json::json!({
                         "model": default_model,
                         "messages": fallback_messages,
-                        "temperature": 0.7,
+                        "temperature": rand::thread_rng().gen_range(0.7..=1.2),
                         "max_tokens": max_tokens,
                     });
                     if !tools.is_empty() {
@@ -477,11 +507,42 @@ impl Handler<ChatRequest> for LlmActor {
             // ── 6. Persist to history ──
             if !skip_store {
                 if let Ok(ref resp) = result {
-                    // 只有有实际文本内容时才存历史；纯工具调用不存（避免干扰模型上下文）
-                    if !resp.content.trim().is_empty() {
-                        store_addr.do_send(AppendPair {
-                            user_msg: original_user_msg.clone().unwrap_or_else(|| user_msg.clone()),
-                            assistant_msg: resp.content.clone(),
+                    let user_text = original_user_msg.clone().unwrap_or_else(|| user_msg.clone());
+                    // 始终保存用户消息
+                    if !user_text.is_empty() {
+                        let user_json = serde_json::json!({
+                            "role": "user",
+                            "content": user_text
+                        });
+                        store_addr.do_send(AppendJsonMessage {
+                            message_json: user_json.to_string(),
+                        });
+                    }
+                    // 保存助手回复：带有 tool_calls 的都不存（不论是否有文本），
+                    // 等 PipelineActor 的工具循环完成后保存完整链（tool_calls + tool role 结果 + 最终文本）。
+                    // 只有纯文本回复才保存。
+                    if !resp.tool_calls.is_empty() {
+                        // 跳过，PipelineActor 会存完整链
+                    } else if !resp.content.trim().is_empty() {
+                        let mut assistant_msg = serde_json::json!({
+                            "role": "assistant",
+                            "content": resp.content.clone()
+                        });
+                        if !resp.tool_calls.is_empty() {
+                            let tc_array: Vec<serde_json::Value> = resp.tool_calls.iter().map(|tc| {
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default()
+                                    }
+                                })
+                            }).collect();
+                            assistant_msg["tool_calls"] = serde_json::Value::Array(tc_array);
+                        }
+                        store_addr.do_send(AppendJsonMessage {
+                            message_json: assistant_msg.to_string(),
                         });
                     }
                 }
@@ -782,6 +843,7 @@ fn should_fallback_to_tools(result: &Result<LlmResponse, String>) -> bool {
 }
 
 /// 从 tools JSON 数组中动态生成工具提示文本。
+/// 建立 Agent 身份意识 + 分类陈列可用工具。
 fn build_tool_hint(tools: &[serde_json::Value]) -> String {
     let mut send_tools = Vec::new();
     let mut other_tools = Vec::new();
@@ -801,19 +863,18 @@ fn build_tool_hint(tools: &[serde_json::Value]) -> String {
         }
     }
     let mut lines = vec![
-        "【重要规则】".to_string(),
-        "1. 如果用户要求你发送消息/语音/图片/视频/文件，你必须调用对应的发送工具。".to_string(),
-        "2. 发送工具本身就是你的回复——调用后不要再生成确认文字（如\"已发送\"）。".to_string(),
-        "3. 纯文字回复直接输出即可，不需要调用工具。".to_string(),
+        "【核心规则】".to_string(),
+        "你有工具。用户要你做的事（发消息、生图、查询、处理文件等），必须调用工具，禁止用文字描述来代替操作。".to_string(),
+        "调用工具后不需要发确认文字，系统会自动处理。".to_string(),
         String::new(),
     ];
     if !send_tools.is_empty() {
-        lines.push("【发送工具】".to_string());
+        lines.push("【发送工具（直接推送到用户聊天窗口）】".to_string());
         lines.extend(send_tools);
         lines.push(String::new());
     }
     if !other_tools.is_empty() {
-        lines.push("【其他工具】".to_string());
+        lines.push("【其他工具（信息查询 / 内容生成 / 处理）】".to_string());
         lines.extend(other_tools);
     }
     lines.join("\n")

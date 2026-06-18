@@ -20,6 +20,7 @@ impl BotHandle {
         Self { bot }
     }
 
+    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         log::info!("[tg-im] bot shutting down");
     }
@@ -60,7 +61,7 @@ impl BotHandle {
         // 尝试先直接发（假设内容已正确格式化），失败则转义后重发
         let result = self.bot
             .send_message(ChatId(chat_id), text)
-            .parse_mode(ParseMode::Markdown)
+            .parse_mode(ParseMode::MarkdownV2)
             .await;
 
         match result {
@@ -69,7 +70,7 @@ impl BotHandle {
                 let escaped = escape_md(text);
                 self.bot
                     .send_message(ChatId(chat_id), escaped)
-                    .parse_mode(ParseMode::Markdown)
+                    .parse_mode(ParseMode::MarkdownV2)
                     .await
                     .map_err(|e| format!("send_markdown failed: {}", e))?;
                 Ok(())
@@ -155,8 +156,8 @@ impl BotHandle {
 pub type UserMessageCallback = Arc<dyn Fn(i64, &str, &str) + Send + Sync>;
 /// Bot 收到语音消息时调用：chat_id, base64_audio, mime_type, user_name
 pub type VoiceMessageCallback = Arc<dyn Fn(i64, String, &str, &str) + Send + Sync>;
-/// Bot 收到图片时调用：chat_id, base64_jpeg, user_name
-pub type PhotoMessageCallback = Arc<dyn Fn(i64, String, &str) + Send + Sync>;
+/// Bot 收到图片时调用：chat_id, base64_jpeg, user_name, caption
+pub type PhotoMessageCallback = Arc<dyn Fn(i64, String, &str, &str) + Send + Sync>;
 /// Bot 收到文件时调用：chat_id, base64_data, file_name, user_name
 pub type FileMessageCallback = Arc<dyn Fn(i64, String, String, &str) + Send + Sync>;
 /// Bot 收到视频时调用：chat_id, base64_video, mime_type, user_name
@@ -220,45 +221,36 @@ pub fn run_bot(
                         .map(|u| u.first_name.clone())
                         .unwrap_or_else(|| "unknown".to_string());
 
+                    // 捕获 caption 文本（用于媒体消息）
+                    let caption = msg.text().or_else(|| msg.caption()).unwrap_or("").to_string();
+
                     // ── 命令处理 ──
-                    if let Some(text) = msg.text() {
-                        if text.starts_with('/') {
-                            let cmd = text.split_whitespace().next().unwrap_or("");
-                            let response = match cmd {
-                                "/start" => "👋 Hello! I'm an AI assistant. Send me a message!".into(),
-                                "/help" => "Just send me a message and I'll respond.\nCommands: /start /help /status".into(),
-                                "/status" => "✅ Bot is running.".into(),
-                                _ => format!("Unknown command: {}. Try /help", cmd),
-                            };
-                            let _ = bot.send_message(ChatId(chat_id), response).await;
-                            return respond(());
-                        }
-
-                        // ── 普通文本消息 → 发布事件 ──
-                        log::info!("text from @{}: {}", user_name, text);
-                        cb(chat_id, text, &user_name);
-
-                        // 发送"正在输入..."状态
-                        let _ = bot
-                            .send_chat_action(ChatId(chat_id), ChatAction::Typing)
-                            .await;
+                    if caption.starts_with('/') {
+                        let cmd = caption.split_whitespace().next().unwrap_or("");
+                        let response = match cmd {
+                            "/start" => "👋 Hello! I'm an AI assistant. Send me a message!".into(),
+                            "/help" => "Just send me a message and I'll respond.\nCommands: /start /help /status".into(),
+                            "/status" => "✅ Bot is running.".into(),
+                            _ => format!("Unknown command: {}. Try /help", cmd),
+                        };
+                        let _ = bot.send_message(ChatId(chat_id), response).await;
+                        return respond(());
                     }
 
-                    // ── 图片消息 → 下载最大的照片 ──
+                    // ── 按媒体类型分流：每条消息只走一个分支 ──
                     if let Some(photos) = msg.photo() {
+                        // 图片消息 → 下载最大的照片
                         if let Some(ref pcb) = photo_cb {
-                            // 发送"正在输入..."状态
                             let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
-                            // 选最大尺寸的照片
                             let best = photos.iter().max_by_key(|p| p.width * p.height).unwrap();
-                            eprintln!("[tg-im] photo from @{} ({}x{})", user_name, best.width, best.height);
+                            eprintln!("[tg-im] photo from @{} ({}x{}) caption='{}'", user_name, best.width, best.height, caption);
                             match bot.get_file(&best.file.id).await {
                                 Ok(file) => {
                                     let mut buf = Cursor::new(Vec::new());
                                     match bot.download_file(&file.path, &mut buf).await {
                                         Ok(_) => {
                                             let b64 = base64_encode(buf.get_ref());
-                                            pcb(chat_id, b64, &user_name);
+                                            pcb(chat_id, b64, &user_name, &caption);
                                         }
                                         Err(e) => eprintln!("[tg-im] photo download: {}", e),
                                     }
@@ -266,14 +258,12 @@ pub fn run_bot(
                                 Err(e) => eprintln!("[tg-im] photo get_file: {}", e),
                             }
                         }
-                    }
-
-                    // ── 文件消息 → 下载 ──
-                    if let Some(doc) = msg.document() {
+                    } else if let Some(doc) = msg.document() {
+                        // 文件消息 → 下载
                         if let Some(ref fcb) = file_cb {
                             let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
                             let fname = doc.file_name.as_deref().unwrap_or("file");
-                            eprintln!("[tg-im] file from @{}: {}", user_name, fname);
+                            eprintln!("[tg-im] file from @{}: {} caption='{}'", user_name, fname, caption);
                             match bot.get_file(&doc.file.id).await {
                                 Ok(file) => {
                                     let mut buf = Cursor::new(Vec::new());
@@ -288,16 +278,14 @@ pub fn run_bot(
                                 Err(e) => eprintln!("[tg-im] file get_file: {}", e),
                             }
                         }
-                    }
-
-                    // ── 视频消息 → 下载 ──
-                    if let Some(video) = msg.video() {
+                    } else if let Some(video) = msg.video() {
+                        // 视频消息 → 下载
                         if let Some(ref vcb) = video_cb {
                             let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
                             let mime = video.mime_type.as_ref()
                                 .map(|m| m.to_string())
                                 .unwrap_or_else(|| "video/mp4".into());
-                            eprintln!("[tg-im] video from @{} ({}x{})", user_name, video.width, video.height);
+                            eprintln!("[tg-im] video from @{} ({}x{}) caption='{}'", user_name, video.width, video.height, caption);
                             match bot.get_file(&video.file.id).await {
                                 Ok(file) => {
                                     let mut buf = Cursor::new(Vec::new());
@@ -312,10 +300,8 @@ pub fn run_bot(
                                 Err(e) => eprintln!("[tg-im] video get_file: {}", e),
                             }
                         }
-                    }
-
-                    // ── 语音消息 → 下载 + ASR ──
-                    if let Some(voice) = msg.voice() {
+                    } else if let Some(voice) = msg.voice() {
+                        // 语音消息 → 下载 + ASR
                         if let Some(ref vcb) = voice_cb {
                             let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
                             eprintln!("[tg-im] voice from @{} ({}s)", user_name, voice.duration);
@@ -336,6 +322,11 @@ pub fn run_bot(
                                 Err(e) => eprintln!("[tg-im] voice get_file: {}", e),
                             }
                         }
+                    } else if let Some(text) = msg.text() {
+                        // ── 纯文本消息 → 发布事件 ──
+                        log::info!("text from @{}: {}", user_name, text);
+                        cb(chat_id, text, &user_name);
+                        let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
                     }
 
                     respond(())

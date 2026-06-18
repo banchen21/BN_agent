@@ -50,12 +50,14 @@ pub struct WechatIncomingMessage {
     pub from_user_id: String,
     pub text: String,
     pub context_token: String,
+    #[allow(dead_code)]
     pub msg_type: i32,
 }
 
 /// get_updates 响应。
 #[derive(Debug)]
 pub struct UpdatesResponse {
+    #[allow(dead_code)]
     pub ret: i32,
     pub messages: Vec<WechatIncomingMessage>,
     pub next_buf: String,

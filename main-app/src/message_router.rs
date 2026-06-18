@@ -1,6 +1,6 @@
 //! MessageRouter — 统一消息路由层。
 //!
-//! 接收 `"route.message"` 事件，校验/补全字段后转发为 `"assistant.message"`。
+//! 接收 `"route.message"` / `"proactive.message"` 事件，校验/补全字段后转发为 `"assistant.message"`。
 //!
 //! 同时订阅 `"user.message"` 事件，自动构建通道注册表（source → chat_id）。
 //!
@@ -24,6 +24,7 @@ use std::time::Instant;
 pub struct ChannelState {
     pub source: String,
     pub chat_id: Option<String>,
+    #[allow(dead_code)]
     pub updated_at: Instant,
 }
 
@@ -44,6 +45,7 @@ impl MessageRouter {
     }
 
     /// 供外部获取通道注册表（如需要）。
+    #[allow(dead_code)]
     pub fn channels_arc(&self) -> Arc<Mutex<HashMap<String, ChannelState>>> {
         self.channels.clone()
     }
@@ -63,7 +65,7 @@ impl Handler<Event> for MessageRouter {
     fn handle(&mut self, event: Event, _ctx: &mut Self::Context) {
         match event.topic.as_str() {
             "user.message" => self.on_user_message(&event.data),
-            "route.message" => self.on_route_message(&event.data),
+            "route.message" | "proactive.message" => self.on_route_message(&event.data),
             _ => {}
         }
     }

@@ -21,6 +21,9 @@ use rusqlite::{params, Connection, Result as SqlResult};
 pub struct Record {
     pub role: String,
     pub content: String,
+    /// Full OpenAI message JSON (supports tool_calls, tool role, etc.).
+    /// NULL for legacy records.
+    pub message_json: Option<String>,
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -53,6 +56,16 @@ pub struct AppendPair {
 #[rtype(result = "usize")]
 pub struct ClearAll;
 
+/// Append a full OpenAI-format message JSON to the history.
+/// Supports tool_calls, tool role, and standard user/assistant/system messages.
+/// Also extracts role+content for backward compatibility with legacy queries.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct AppendJsonMessage {
+    /// Serialized OpenAI message JSON string.
+    pub message_json: String,
+}
+
 // ── Actor ────────────────────────────────────────────────────────────────────
 
 pub struct ChatStoreActor {
@@ -68,10 +81,13 @@ impl ChatStoreActor {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                message_json TEXT DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_created ON chat_history(created_at);",
         )?;
+        // 平滑升级旧库：追加 message_json 列（已存在则忽略）
+        let _ = conn.execute_batch("ALTER TABLE chat_history ADD COLUMN message_json TEXT DEFAULT NULL");
         Ok(Self { conn })
     }
 
@@ -97,8 +113,8 @@ impl Handler<FetchRecent> for ChatStoreActor {
     fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
         // 子查询先取最新 N 条，外层按 id ASC 恢复时间序
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT role, content FROM (
-                SELECT id, role, content FROM chat_history
+            "SELECT role, content, message_json FROM (
+                SELECT id, role, content, message_json FROM chat_history
                 ORDER BY id DESC
                 LIMIT ?1
             ) ORDER BY id ASC"
@@ -108,6 +124,7 @@ impl Handler<FetchRecent> for ChatStoreActor {
             Ok(Record {
                 role: row.get(0)?,
                 content: row.get(1)?,
+                message_json: row.get(2)?,
             })
         });
 
@@ -176,6 +193,38 @@ impl Handler<ClearAll> for ChatStoreActor {
                 log::error!("[ChatStoreActor] ClearAll failed: {}", e);
                 0
             }
+        }
+    }
+}
+
+impl Handler<AppendJsonMessage> for ChatStoreActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: AppendJsonMessage, _ctx: &mut Self::Context) {
+        // Parse the JSON to extract role + content for backward compat columns.
+        let (role, content) = match serde_json::from_str::<serde_json::Value>(&msg.message_json) {
+            Ok(val) => {
+                let r = val.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
+                let c = val.get("content")
+                    .and_then(|v| {
+                        if v.is_null() { None }
+                        else { v.as_str() }
+                    })
+                    .unwrap_or("")
+                    .to_string();
+                (r, c)
+            }
+            Err(_) => {
+                log::error!("[ChatStoreActor] AppendJsonMessage: invalid JSON, storing as 'user' fallback");
+                ("user".to_string(), msg.message_json.clone())
+            }
+        };
+
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO chat_history (role, content, message_json) VALUES (?1, ?2, ?3)",
+            params![role, content, msg.message_json],
+        ) {
+            log::error!("[ChatStoreActor] AppendJsonMessage failed: {}", e);
         }
     }
 }

@@ -32,7 +32,7 @@ Token 用量    ██████████ 完成
 - [x] **可配置 max_tokens** — LLM_MAX_TOKENS 环境变量（默认 384000）
 - [x] **工具调用稳定性** — tool_choice:auto + system prompt 工具感知提示，解决 persona 覆盖工具意识
 
-### 插件（15/15）
+### 插件（17/17）
 
 - [x] **hello-plugin** — 演示
 - [x] **logger-plugin** — 日志
@@ -44,11 +44,13 @@ Token 用量    ██████████ 完成
 - [x] **asr-tts-plugin** — 语音识别 + 合成
 - [x] **audio-capture-plugin** — 麦克风音频捕获
 - [x] **webrtc-plugin** — WebRTC P2P 通信
-- [x] **image-plugin** — 图片处理
+- [x] **image-plugin** — 图片处理 / 理解
+- [x] **image-gen-plugin** — 本地 SD 生图 (ComfyUI)
 - [x] **video-plugin** — 视频分析
 - [x] **tui-plugin** — 终端聊天界面
 - [x] **mcp-plugin** — MCP 服务器桥接
 - [x] **skill-plugin** — Markdown Skill 工具
+- [x] **proactive-plugin** — 主动消息推送
 
 ---
 
@@ -96,7 +98,8 @@ Token 用量    ██████████ 完成
 - **DeepSeek 思考模式与工具调用冲突** — `thinking: enabled` 会导致后续请求忽略工具。解决方案：默认 `LLM_THINKING=disabled`，在 system prompt 最前面插入工具感知提示
 - **响应被拆成多条 Telegram 消息** — 模型输出含 `\n` 导致视觉换行。解决方案：tg-im-plugin 发送前 `.replace('\n', "")`
 - **工具调用后对话历史断裂** — 工具调用结果未存储导致连续两条 user 消息。解决方案：`original_user_msg` 字段 + follow-up 回复关联原始消息存储
-- **Persona 覆盖工具意识** — NSFW 角色扮演过强导致模型忽略工具。解决方案：system prompt 最前面加 `tool_hint` 提醒可用工具
+- **Persona 覆盖工具意识** — NSFW 角色扮演过强导致模型忽略工具。解决方案：system prompt 顺序调整为 persona → jailbreak → tool_hint（近因效应）
+- **生图后 image_describe 竞态** — pipeline 在 EventBus 异步缓存前调用 image_describe。解决方案：ToolResult.metadata 同步传递 base64
 
 ---
 

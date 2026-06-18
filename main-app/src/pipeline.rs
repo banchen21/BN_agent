@@ -16,7 +16,7 @@ use actix::prelude::*;
 use plugin_interface::*;
 use std::sync::{Arc, Mutex};
 
-use crate::chat_store::{AppendRecord, ChatStoreActor};
+use crate::chat_store::{AppendJsonMessage, ChatStoreActor};
 use crate::metrics_actor::MetricsActor;
 use crate::rate_limit_actor::RateLimitActor;
 use crate::retry_actor::{RetryActor, RetryChatRequest};
@@ -167,7 +167,11 @@ async fn process_message(
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             log::error!("[Pipeline] LLM error: {}", e);
-            // Record error metric.
+            metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+                seconds: req_start.elapsed().as_secs_f64(),
+                model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
+                success: false,
+            });
             metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
             emit_reply(&format!("抱歉，出错了：{}", e), &source, &event_bus).await;
             return;
@@ -205,17 +209,57 @@ async fn process_message(
     // 累积全部轮次的 tool_calls 和 tool_results，每轮一起传给 LLM。
     let mut all_tool_calls: Vec<ToolCall> = Vec::new();
     let mut all_tool_results: Vec<String> = Vec::new();
+    // 是否已通过 IM 插件工具直接发送了消息（避免 emit_reply 重复发送）
+    let mut already_sent_via_im = false;
 
     loop {
         if current_resp.tool_calls.is_empty() || tool_round >= max_tool_rounds {
-            if !current_resp.content.trim().is_empty() {
-                // 最终回复：持久化 + 广播。
-                if tool_round > 0 {
-                    store_addr.do_send(AppendRecord {
-                        role: "assistant".into(),
-                        content: current_resp.content.clone(),
+            // 持久化：工具调用链（不论最终有无文本回复，都要保存）
+            if tool_round > 0 {
+                // 保存助手 tool_calls 消息（作为 tool role 结果的前导）
+                let tc_array: Vec<serde_json::Value> = all_tool_calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default()
+                        }
+                    })
+                }).collect();
+                store_addr.do_send(AppendJsonMessage {
+                    message_json: serde_json::json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tc_array
+                    }).to_string(),
+                });
+                // 保存每轮工具调用的结果（tool role 消息）
+                for (i, tc) in all_tool_calls.iter().enumerate() {
+                    let result_text = all_tool_results.get(i).cloned().unwrap_or_default();
+                    let tool_msg = serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_text,
+                    });
+                    store_addr.do_send(AppendJsonMessage {
+                        message_json: tool_msg.to_string(),
                     });
                 }
+                // 保存最终助理文本回复（可能为空，但确保链完整）
+                store_addr.do_send(AppendJsonMessage {
+                    message_json: serde_json::json!({
+                        "role": "assistant",
+                        "content": if current_resp.content.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::String(current_resp.content.clone())
+                        }
+                    }).to_string(),
+                });
+            }
+            // 广播最终回复（仅当有文本且未通过 IM 工具直接发送时）
+            if !current_resp.content.trim().is_empty() && !already_sent_via_im {
                 emit_reply(&current_resp.content, &source, &event_bus).await;
             }
             break;
@@ -255,6 +299,40 @@ async fn process_message(
             if result.success {
                 log::info!("[Pipeline] tool '{}' ok ({}ms): {}", tc.name, tool_ms, result.content);
                 round_results.push(format!("【{}】\n{}", tc.name, result.content));
+
+                // 标记：IM 插件工具已直接发送消息到用户，避免 emit_reply 重复
+                if tc.name.starts_with("tg_send_")
+                    || tc.name == "feishu_send_message"
+                    || tc.name == "wechat_send_message"
+                {
+                    already_sent_via_im = true;
+                }
+
+                if tc.name == "generate_image" {
+                    let desc_args = result.metadata.as_ref().and_then(|m| {
+                        let b64 = m.get("image_base64")?.as_str()?;
+                        if b64.is_empty() { return None; }
+                        Some(serde_json::json!({
+                            "image_base64": b64,
+                            "mime_type": m.get("mime_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("image/png"),
+                        }))
+                    });
+                    if let Some(desc_args) = desc_args {
+                        if let Ok(reg) = tool_registry.lock() {
+                            if let Some(desc_exec) = reg.get_executor("image_describe") {
+                                let desc_result = desc_exec.execute(&desc_args);
+                                if desc_result.success {
+                                    log::info!("[Pipeline] auto image_describe ok: {}", desc_result.content);
+                                    round_results.push(format!("【自动图片理解】\n{}", desc_result.content));
+                                } else if let Some(err) = &desc_result.error {
+                                    log::warn!("[Pipeline] auto image_describe failed: {}", err);
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 let err = result.error.as_deref().unwrap_or("unknown");
                 log::warn!("[Pipeline] tool '{}' failed ({}ms): {}", tc.name, tool_ms, err);
@@ -312,6 +390,11 @@ async fn process_message(
             }
             Ok(Err(e)) => {
                 log::error!("[Pipeline] tool round {} LLM error: {}", tool_round + 1, e);
+                metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+                    seconds: req_start.elapsed().as_secs_f64(),
+                    model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
+                    success: false,
+                });
                 metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
                 break;
             }

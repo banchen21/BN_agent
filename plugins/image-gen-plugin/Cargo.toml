@@ -2,7 +2,7 @@
 name = "image-gen-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "本地生图插件 — 通过 ComfyUI API 调用 SD1.5 模型生成图片，支持换脸"
+description = "本地生图插件 — 通过 ComfyUI API 调用 SD 模型生成图片"
 
 [lib]
 crate-type = ["cdylib"]

@@ -28,16 +28,14 @@ pub enum SignalingMessage {
 // ─── Signaling Handler ──────────────────────────────────────────────
 
 pub struct SignalingHandler {
-    eb: Addr<EventBus>,
     peers: Arc<Mutex<StdHashMap<String, peer::PeerHandle>>>,
 }
 
 impl SignalingHandler {
     pub fn new(
-        eb: Addr<EventBus>,
         peers: Arc<Mutex<StdHashMap<String, peer::PeerHandle>>>,
     ) -> Self {
-        Self { eb, peers }
+        Self { peers }
     }
 
     pub fn handle_event(&self, event: &Event) {
@@ -94,7 +92,6 @@ impl SignalingHandler {
 
 struct RoomPeer {
     tx: tokio::sync::mpsc::UnboundedSender<Message>,
-    role: String,
 }
 
 struct SignalingServer {
@@ -171,7 +168,7 @@ async fn handle_ws(
     {
         let mut rooms = server.rooms.lock().await;
         let room = rooms.entry(room_id.clone()).or_default();
-        room.insert(role.clone(), RoomPeer { tx: tx.clone(), role: role.clone() });
+        room.insert(role.clone(), RoomPeer { tx: tx.clone() });
     }
 
     // Auto-create Offer if answer side connects.

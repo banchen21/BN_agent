@@ -19,6 +19,7 @@ members = [
     "plugins/mcp-plugin",
     "plugins/skill-plugin",
     "plugins/proactive-plugin",
+    "plugins/memory-plugin",
 ]
 resolver = "2"
 

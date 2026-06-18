@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 #[derive(Debug, Clone)]
 enum BnStatus {
     Uninitialized,
-    WaitingQr { qr_path: String, qr_content: String },
+    WaitingQr { qr_path: String },
     Scanned,
     LoggingIn,
     Online { nick: String },
@@ -524,7 +524,6 @@ async fn qr_login_flow(
 
         *status.lock().unwrap() = BnStatus::WaitingQr {
             qr_path: qr_path.clone(),
-            qr_content: qr.img_content.clone(),
         };
 
         let deadline = now_ms() + 5 * 60_000;

@@ -4,6 +4,11 @@
 //!   - "auto"      → LLM 完全自主决策并自动发送追问消息
 //!   - "semi-auto" → 某个时间段到某个时间段内由 LLM 决定是否发送追问消息，其他时间段不发送
 //!
+//! `PROACTIVE_CHAT_ID` and `PROACTIVE_SOURCE` are optional:
+//!   - If set via env → used as override
+//!   - If empty → auto-detected from the first incoming user.message event
+//!     (chat_id and source are extracted from the event payload)
+//!
 //! Architecture:
 //!   - `on_event()` collects user/assistant messages into a shared history buffer.
 //!   - A background thread loops every 15s, sends history to LLM for decision,
@@ -147,10 +152,14 @@ struct SharedState {
     mode: ProactiveMode,
     /// Time windows for semi-auto mode.
     time_windows: Vec<TimeWindow>,
-    /// Target chat ID (from env).
+    /// Target chat ID (from env override, or auto-detected from user.message).
     chat_id: String,
-    /// Source channel name (from env).
+    /// Source channel name (from env override, or auto-detected from user.message).
     source: String,
+    /// Whether chat_id was set via env (if true, auto-detect is skipped).
+    chat_id_from_env: bool,
+    /// Whether source was set via env (if true, auto-detect is skipped).
+    source_from_env: bool,
     /// Pending LLM decision request (set by background thread, consumed by on_event).
     pending_llm_request: Option<LlmRequest>,
     /// LLM decision response (set by on_event, consumed by background thread).
@@ -193,6 +202,8 @@ impl ProactivePlugin {
                 time_windows: Vec::new(),
                 chat_id: String::new(),
                 source: String::new(),
+                chat_id_from_env: false,
+                source_from_env: false,
                 pending_llm_request: None,
                 pending_llm_response: None,
                 pending_fetch_history: false,
@@ -212,8 +223,10 @@ impl Plugin for ProactivePlugin {
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         let mode = ProactiveMode::from_env();
         let time_windows = TimeWindow::from_env();
-        let chat_id = std::env::var("PROACTIVE_CHAT_ID").unwrap_or_default();
-        let source = std::env::var("PROACTIVE_SOURCE").unwrap_or_else(|_| "unknown".into());
+        let env_chat_id = std::env::var("PROACTIVE_CHAT_ID").unwrap_or_default();
+        let env_source = std::env::var("PROACTIVE_SOURCE").unwrap_or_default();
+        let chat_id_from_env = !env_chat_id.is_empty();
+        let source_from_env = !env_source.is_empty();
 
         {
             let mut s = self.state.lock().unwrap();
@@ -223,8 +236,10 @@ impl Plugin for ProactivePlugin {
             s.logger = Some(ctx.logger.clone());
             s.mode = mode;
             s.time_windows = time_windows;
-            s.chat_id = chat_id;
-            s.source = source;
+            s.chat_id = env_chat_id.clone();
+            s.source = env_source.clone();
+            s.chat_id_from_env = chat_id_from_env;
+            s.source_from_env = source_from_env;
         }
 
         let logger = ctx.logger.clone();
@@ -234,8 +249,8 @@ impl Plugin for ProactivePlugin {
                 ProactiveMode::Auto => "auto",
                 ProactiveMode::SemiAuto => "semi-auto",
             },
-            std::env::var("PROACTIVE_CHAT_ID").unwrap_or_default(),
-            std::env::var("PROACTIVE_SOURCE").unwrap_or_else(|_| "unknown".into()),
+            if chat_id_from_env { env_chat_id.as_str() } else { "(auto-detect)" },
+            if source_from_env { env_source.as_str() } else { "(auto-detect)" },
         ));
 
         // ── Load history from DB on startup ──────────────────────────────
@@ -286,9 +301,48 @@ impl Plugin for ProactivePlugin {
         match event.topic.as_str() {
             "user.message" | "assistant.message" => {
                 if let Ok(mut s) = self.state.lock() {
+                    // ── Auto-detect chat_id from user.message ───────────
+                    if event.topic == "user.message" {
+                        if !s.chat_id_from_env {
+                            let event_cid = event.data.get("chat_id").and_then(|v| {
+                                v.as_str().map(String::from)
+                                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+                            });
+                            if let Some(ref cid) = event_cid {
+                                if s.chat_id.is_empty() {
+                                    s.chat_id = cid.clone();
+                                    if let Some(ref logger) = s.logger {
+                                        logger.info(format!("auto-detected chat_id={}", cid));
+                                    }
+                                }
+                            }
+                        }
+                        if !s.source_from_env {
+                            if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
+                                if s.source.is_empty() {
+                                    s.source = src.to_string();
+                                    if let Some(ref logger) = s.logger {
+                                        logger.info(format!("auto-detected source={}", src));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let chat_id = s.chat_id.clone();
                     if chat_id.is_empty() {
                         return true;
+                    }
+
+                    // ── Filter: only record messages for our tracked chat_id ──
+                    let event_cid = event.data.get("chat_id").and_then(|v| {
+                        v.as_str().map(String::from)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    });
+                    if let Some(ref ecid) = event_cid {
+                        if ecid != &chat_id {
+                            return true; // different chat, skip
+                        }
                     }
 
                     // Extract text from event data.
@@ -337,7 +391,7 @@ impl Plugin for ProactivePlugin {
             }
             // ── Internal: fetch history from DB ──────────────────────────
             "proactive.internal.fetch_history" => {
-                let (chat_store, logger) = {
+                let (chat_store, _logger) = {
                     let s = match self.state.lock() {
                         Ok(s) => s,
                         Err(_) => return true,
@@ -346,33 +400,39 @@ impl Plugin for ProactivePlugin {
                 };
                 if let Some(store) = chat_store {
                     let state = Arc::clone(&self.state);
-                    // We're inside actix runtime here, so we can use actix::spawn safely.
-                    actix::spawn(async move {
-                        match store.send(ChatStoreMsg::FetchRecent { limit: MAX_HISTORY }).await {
-                            Ok(ChatStoreResponse::FetchRecent(records)) => {
-                                if let Ok(mut s) = state.lock() {
-                                    s.fetch_history_result = Some(records.clone());
-                                    if let Some(ref l) = s.logger {
-                                        l.info(format!("fetched {} history records from DB", records.len()));
+                    // Use std::thread::spawn + own runtime to avoid spawn_local requirement.
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime for fetch_history");
+                        rt.block_on(async {
+                            match store.send(ChatStoreMsg::FetchRecent { limit: MAX_HISTORY }).await {
+                                Ok(ChatStoreResponse::FetchRecent(records)) => {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.fetch_history_result = Some(records.clone());
+                                        if let Some(ref l) = s.logger {
+                                            l.info(format!("fetched {} history records from DB", records.len()));
+                                        }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.fetch_history_result = Some(vec![]);
+                                        if let Some(ref l) = s.logger {
+                                            l.error(format!("failed to fetch history: {}", e));
+                                        }
                                     }
                                 }
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                if let Ok(mut s) = state.lock() {
-                                    s.fetch_history_result = Some(vec![]);
-                                    if let Some(ref l) = s.logger {
-                                        l.error(format!("failed to fetch history: {}", e));
-                                    }
-                                }
-                            }
-                        }
+                        });
                     });
                 }
             }
             // ── Internal: LLM decision request ───────────────────────────
             "proactive.internal.llm_decision" => {
-                let (llm, request, logger) = {
+                let (llm, request, _logger) = {
                     let mut s = match self.state.lock() {
                         Ok(s) => s,
                         Err(_) => return true,
@@ -384,16 +444,23 @@ impl Plugin for ProactivePlugin {
                 };
                 if let (Some(llm), Some(request)) = (llm, request) {
                     let state = Arc::clone(&self.state);
-                    actix::spawn(async move {
-                        let result = llm.send(request).await;
-                        let response = match result {
-                            Ok(Ok(resp)) => Ok(resp),
-                            Ok(Err(e)) => Err(format!("LLM error: {}", e)),
-                            Err(e) => Err(format!("LLM mailbox error: {}", e)),
-                        };
-                        if let Ok(mut s) = state.lock() {
-                            s.pending_llm_response = Some(response);
-                        }
+                    // Use std::thread::spawn + own runtime to avoid spawn_local requirement.
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime for llm_decision");
+                        rt.block_on(async {
+                            let result = llm.send(request).await;
+                            let response = match result {
+                                Ok(Ok(resp)) => Ok(resp),
+                                Ok(Err(e)) => Err(format!("LLM error: {}", e)),
+                                Err(e) => Err(format!("LLM mailbox error: {}", e)),
+                            };
+                            if let Ok(mut s) = state.lock() {
+                                s.pending_llm_response = Some(response);
+                            }
+                        });
                     });
                 }
             }

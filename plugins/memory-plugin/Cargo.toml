@@ -1,8 +1,8 @@
 [package]
-name = "proactive-plugin"
+name = "memory-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "Example plugin skeleton — subscribes to 'proactive.ping' and publishes 'proactive.pong'"
+description = "Extracts long-term memories from conversations and injects them into LLM context via [记忆] snapshot"
 
 [lib]
 crate-type = ["cdylib"]
@@ -14,4 +14,5 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 chrono = "0.4"
 actix = "0.13"
+rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["rt"] }

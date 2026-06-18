@@ -66,7 +66,6 @@ impl Plugin for WebrtcPlugin {
         // Initialize signaling handler.
         let eb = ctx.event_bus.clone();
         self.signaling = Some(signaling::SignalingHandler::new(
-            eb.clone(),
             self.peers.clone(),
         ));
 

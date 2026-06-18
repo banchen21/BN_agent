@@ -201,6 +201,7 @@ fn call_claude_sync(path: &str, message: &str, model: Option<&str>) -> Result<St
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
     Box::new(ClaudeBridgePlugin {
         info: PluginInfo {
@@ -216,4 +217,5 @@ pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
 }
 
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_destroy(_p: Box<dyn Plugin>) {}

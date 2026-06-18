@@ -144,10 +144,9 @@ impl Handler<RetryChatRequest> for RetryActor {
         let max_retries = msg.max_retries.min(10).max(1);
         let base_delay_ms = self.config.base_delay_ms;
         let max_delay_ms = self.config.max_delay_ms;
-        let circuit_threshold = self.config.circuit_breaker_threshold;
 
         let fut = async move {
-            let mut last_error = String::new();
+            let mut last_error;
             let mut attempt = 0u32;
 
             loop {

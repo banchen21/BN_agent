@@ -450,6 +450,7 @@ impl Plugin for TgImPlugin {
                         "text": text,
                         "source": "telegram",
                         "user_name": user_name,
+                        "chat_id": chat_id,
                     }),
                     "tg-im-plugin",
                 ));
@@ -493,6 +494,7 @@ impl Plugin for TgImPlugin {
                                 "text": asr_result.content,
                                 "source": "telegram",
                                 "user_name": format!("{} (语音)", un),
+                                "chat_id": chat_id,
                             }),
                             "tg-im-plugin",
                         ));
@@ -502,22 +504,30 @@ impl Plugin for TgImPlugin {
         );
 
         // 图片消息回调：下载后发布为带 image_base64 的 user.message
+        // 如有 caption 文本则作为用户问题一同发送（避免 bot.rs 中 caption 和图片双发）
         let eb_photo = ctx.event_bus.clone();
         let cc4 = self.current_chat_id.clone();
         let on_photo_message: bot::PhotoMessageCallback = Arc::new(
-            move |chat_id: i64, img_b64: String, user_name: &str| {
+            move |chat_id: i64, img_b64: String, user_name: &str, caption: &str| {
                 *cc4.lock().unwrap() = Some(chat_id);
                 let eb = eb_photo.clone();
                 let un = user_name.to_string();
+                let cap = caption.to_string();
                 std::thread::spawn(move || {
-                    eprintln!("[tg-im:photo] received from @{}", un);
+                    let text = if cap.is_empty() {
+                        format!("@{} 发送了一张图片", un)
+                    } else {
+                        format!("@{} (图片): {}", un, cap)
+                    };
+                    eprintln!("[tg-im:photo] received from @{} caption='{}'", un, cap);
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
-                            "text": format!("@{} 发送了一张图片", un),
+                            "text": text,
                             "image_base64": img_b64,
                             "source": "telegram",
                             "user_name": format!("{} (图片)", un),
+                            "chat_id": chat_id,
                         }),
                         "tg-im-plugin",
                     ));
@@ -544,6 +554,7 @@ impl Plugin for TgImPlugin {
                             "user_name": format!("{} (文件)", un),
                             "file_base64": file_b64,
                             "file_name": fn2,
+                            "chat_id": chat_id,
                         }),
                         "tg-im-plugin",
                     ));
@@ -570,6 +581,7 @@ impl Plugin for TgImPlugin {
                             "video_mime": m,
                             "source": "telegram",
                             "user_name": format!("{} (视频)", un),
+                            "chat_id": chat_id,
                         }),
                         "tg-im-plugin",
                     ));
@@ -641,13 +653,18 @@ impl Plugin for TgImPlugin {
             return true;
         }
 
-        // ── assistant.message from Telegram → 停止 typing + 发送回复 ──
+        // ── assistant.message from Telegram → 停止 typing + 逐条发送回复 ──
         if event.topic == "assistant.message" && source == "telegram" && chat_id != 0 {
             // 停止 typing 循环
             self.processing_chats.lock().unwrap().remove(&chat_id);
 
-            let text = match event.data.get("text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string().replace('\n', ""),
+            let full_text = match event.data.get("text").and_then(|v| v.as_str()) {
+                Some(t) => {
+                    let mut s = t.to_string();
+                    s = s.replace("\n---\n", "\n\n");
+                    s = s.replace("---", "———");
+                    s
+                }
                 None => return true,
             };
 
@@ -659,12 +676,33 @@ impl Plugin for TgImPlugin {
                         .build()
                         .expect("tokio");
                     rt.block_on(async {
-                        // 先发一次 typing（清除状态缓冲）
-                        let _ = h.send_typing(chat_id).await;
-                        // 尝试 Markdown 发送，失败则回退纯文本
-                        if let Err(_) = h.send_markdown(chat_id, &text).await {
-                            if let Err(e) = h.send_message(chat_id, &text).await {
-                                eprintln!("[tg-im] send failed: {}", e);
+                        // 按双换行拆分段，逐条发送
+                        let segments: Vec<String> = full_text
+                            .split("\n\n")
+                            .flat_map(|s| {
+                                // 单段过长时进一步按单换行拆分
+                                if s.len() > 200 {
+                                    s.split('\n').collect::<Vec<_>>()
+                                } else {
+                                    vec![s]
+                                }
+                            })
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        for (i, seg) in segments.iter().enumerate() {
+                            // 段间发 typing 保持存在感
+                            let _ = h.send_typing(chat_id).await;
+                            // 尝试 Markdown 发送，失败则回退纯文本
+                            if let Err(_) = h.send_markdown(chat_id, seg).await {
+                                if let Err(e) = h.send_message(chat_id, seg).await {
+                                    eprintln!("[tg-im] send failed (segment {}/{}): {}", i + 1, segments.len(), e);
+                                }
+                            }
+                            // 段间短暂延时，避免 TG 限频
+                            if i + 1 < segments.len() {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             }
                         }
                     });

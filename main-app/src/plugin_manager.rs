@@ -50,7 +50,7 @@ impl PluginManager {
         plugin_dir: String,
         chat_store: Option<Recipient<ChatStoreMsg>>,
     ) -> Self {
-        let mut pm = Self {
+        let pm = Self {
             event_bus,
             llm_recipient,
             tool_registry,
@@ -155,18 +155,19 @@ impl Actor for PluginManager {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        // Some plugins (e.g. claude-bridge-plugin) call Actor::start() for sub-actors.
-        // This must happen inside the actix runtime, not during new(),
-        // because Cdylib FFI boundary doesn't carry thread-local LocalSet.
-        self.auto_scan();
-        log::info!("[PluginManager] actor started — {} plugin(s) loaded", self.plugins.len());
-
-        // Subscribe to ALL events on EventBus, forwarding to plugins via on_event().
+        // Subscribe to ALL events BEFORE loading plugins, so that plugin.start()
+        // can use PluginLogger (which sends plugin.log events via EventBus).
         self.event_bus.do_send(Subscribe {
             topic: "*".into(),
             recipient: ctx.address().recipient(),
         });
         log::info!("[PluginManager] subscribed to '*' on EventBus");
+
+        // Some plugins (e.g. claude-bridge-plugin) call Actor::start() for sub-actors.
+        // This must happen inside the actix runtime, not during new(),
+        // because Cdylib FFI boundary doesn't carry thread-local LocalSet.
+        self.auto_scan();
+        log::info!("[PluginManager] actor started — {} plugin(s) loaded", self.plugins.len());
     }
 
     fn stopping(&mut self, _ctx: &mut Self::Context) -> Running {

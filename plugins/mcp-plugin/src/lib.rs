@@ -242,9 +242,11 @@ impl ToolExecutor for McpToolProxy {
 // ── DLL exports ──────────────────────────────────────────────────────────────
 
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
     Box::new(McpPlugin::new())
 }
 
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_destroy(_p: Box<dyn Plugin>) {}

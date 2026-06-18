@@ -411,6 +411,8 @@ fn main() -> std::io::Result<()> {
 
     let sys = actix_rt::System::new();
 
+    let sys = actix_rt::System::new();
+
     sys.block_on(async {
         // 1. EventBus.
         let event_bus = EventBus::new().start();
@@ -424,9 +426,13 @@ fn main() -> std::io::Result<()> {
         });
         event_bus.do_send(Subscribe {
             topic: "route.message".into(),
+            recipient: message_router_addr.clone().recipient(),
+        });
+        event_bus.do_send(Subscribe {
+            topic: "proactive.message".into(),
             recipient: message_router_addr.recipient(),
         });
-        log::info!("MessageRouter actor started, subscribed to 'user.message' + 'route.message'");
+        log::info!("MessageRouter actor started, subscribed to 'user.message' + 'route.message' + 'proactive.message'");
 
         // 2. ChatStoreActor (SQLite history).
         let store_addr = {

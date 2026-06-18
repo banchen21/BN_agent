@@ -35,12 +35,13 @@ logs/
 *.exe
 
 # ─── Data (runtime-generated) ─────────────────────────────
-data/*.db
-data/*.sqlite
-data/*.sqlite3
-data/*.png
-data/*.json
-data/*.wav
+**/data/*.db
+**/data/*.sqlite
+**/data/*.sqlite3
+**/data/*.png
+**/data/*.json
+**/data/*.wav
+temp_images/
 
 # ─── Plugin installation artifacts ────────────────────────
 # 已通过 *.dll 全局忽略

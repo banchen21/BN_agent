@@ -79,6 +79,8 @@ struct ToolCallStats {
 #[derive(Clone, Default, Debug)]
 struct ModelStats {
     call_count: u64,
+    successes: u64,
+    failures: u64,
     total_latency: f64,
 }
 
@@ -122,6 +124,11 @@ impl Handler<RecordLlmLatency> for MetricsActor {
         let stats = self.model_stats.entry(msg.model.clone()).or_default();
         stats.call_count += 1;
         stats.total_latency += msg.seconds;
+        if msg.success {
+            stats.successes += 1;
+        } else {
+            stats.failures += 1;
+        }
     }
 }
 
@@ -165,6 +172,8 @@ impl Handler<GetMetrics> for MetricsActor {
         lines.push("# TYPE bn_agent_llm_calls_total counter".to_string());
         for (model, stats) in &self.model_stats {
             lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\"}} {}", model, stats.call_count));
+            lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\",status=\"success\"}} {}", model, stats.successes));
+            lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\",status=\"failure\"}} {}", model, stats.failures));
         }
 
         // LLM latency.
@@ -231,6 +240,8 @@ impl Handler<GetMetricsJson> for MetricsActor {
                 "by_model": self.model_stats.iter().map(|(m, s)| {
                     (m.clone(), serde_json::json!({
                         "call_count": s.call_count,
+                        "successes": s.successes,
+                        "failures": s.failures,
                         "avg_latency_seconds": if s.call_count > 0 { s.total_latency / s.call_count as f64 } else { 0.0 },
                     }))
                 }).collect::<serde_json::Value>(),

@@ -60,11 +60,13 @@
 | `asr-tts-plugin` | 语音识别 + 合成 | `asr_transcribe`, `tts_synthesize` |
 | `audio-capture-plugin` | 麦克风音频捕获 | — |
 | `webrtc-plugin` | WebRTC P2P | `webrtc_create_peer`, `webrtc_answer_peer`... |
-| `image-plugin` | 图片处理 | `image_info`, `image_resize`, `image_convert`, `image_compress` |
+| `image-plugin` | 图片处理 | `image_info`, `image_resize`, `image_convert`, `image_compress`, `image_understand`, `image_describe` |
+| `image-gen-plugin` | 本地 SD 生图 (ComfyUI) | `generate_image` |
 | `video-plugin` | 视频分析 | `video_analyze` |
 | `tui-plugin` | 终端聊天界面 | — |
 | `mcp-plugin` | MCP 服务器桥接 | 动态 — 来自 MCP 服务器的 `tools/list` |
 | `skill-plugin` | Markdown Skill 工具 | `skill__{name}` 按 .md 文件注册 |
+| `proactive-plugin` | 主动消息推送 | — |
 
 ## 快速开始
 
@@ -112,6 +114,9 @@ cargo run -p main-app
 | `RATE_LIMIT_PER_MIN` | `30` | 每分钟每会话请求上限 |
 | `RATE_LIMIT_BURST` | `5` | 令牌桶突发容量 |
 | `SKILL_DIR` | `data/skills/` | Skill 文件目录 |
+| `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI API 地址（image-gen-plugin） |
+| `COMFYUI_OUTPUT_DIR` | `output` | ComfyUI 输出目录（image-gen-plugin） |
+| `IMAGE_GEN_OUTPUT_DIR` | `./temp_images` | 生图本地副本目录 |
 
 ### HTTP API
 
@@ -240,10 +245,12 @@ bn-agent/
 │   ├── audio-capture-plugin/ # 音频捕获
 │   ├── webrtc-plugin/        # WebRTC P2P
 │   ├── image-plugin/         # 图片处理
+│   ├── image-gen-plugin/     # 本地 SD 生图 (ComfyUI)
 │   ├── video-plugin/         # 视频分析
 │   ├── tui-plugin/           # 终端 UI
 │   ├── mcp-plugin/           # MCP 服务器桥接
-│   └── skill-plugin/         # Markdown Skill 工具
+│   ├── skill-plugin/         # Markdown Skill 工具
+│   └── proactive-plugin/     # 主动消息推送
 └── data/
     ├── skills/               # Skill .md 文件目录
     └── jailbreak_prompts.csv # 提示词注入

@@ -137,14 +137,19 @@ pub struct ToolResult {
     pub success: bool,
     pub content: String,
     pub error: Option<String>,
+    /// Structured data for host-side chaining (not sent to LLM).
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolResult {
     pub fn ok(content: &str) -> Self {
-        Self { success: true, content: content.to_string(), error: None }
+        Self { success: true, content: content.to_string(), error: None, metadata: None }
+    }
+    pub fn ok_with_metadata(content: &str, metadata: serde_json::Value) -> Self {
+        Self { success: true, content: content.to_string(), error: None, metadata: Some(metadata) }
     }
     pub fn err(msg: &str) -> Self {
-        Self { success: false, content: String::new(), error: Some(msg.to_string()) }
+        Self { success: false, content: String::new(), error: Some(msg.to_string()), metadata: None }
     }
 }
 

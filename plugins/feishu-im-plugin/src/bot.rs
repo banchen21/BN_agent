@@ -54,6 +54,7 @@ impl BotHandle {
         } else { Ok(()) }
     }
 
+    #[allow(dead_code)]
     pub async fn send_card(&self, chat_id: &str, card: &serde_json::Value) -> Result<(), String> {
         let token = self.get_token().await?;
         let resp = self.client
