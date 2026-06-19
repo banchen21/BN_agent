@@ -46,3 +46,4 @@ temp_images/
 # ─── Plugin installation artifacts ────────────────────────
 # 已通过 *.dll 全局忽略
 persona.md
+persona.md.bak
