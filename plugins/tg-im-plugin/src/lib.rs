@@ -487,18 +487,22 @@ impl Plugin for TgImPlugin {
                         }
                     };
                     eprintln!("[tg-im:voice] asr done: success={} content_len={} error={:?}", asr_result.success, asr_result.content.len(), asr_result.error);
-                    if asr_result.success && !asr_result.content.trim().is_empty() {
-                        eb.do_send(Event::new(
-                            "user.message",
-                            serde_json::json!({
-                                "text": asr_result.content,
-                                "source": "telegram",
-                                "user_name": format!("{} (语音)", un),
-                                "chat_id": chat_id,
-                            }),
-                            "tg-im-plugin",
-                        ));
-                    }
+                    let text = if asr_result.success && !asr_result.content.trim().is_empty() {
+                        asr_result.content
+                    } else {
+                        eprintln!("[tg-im:voice] ASR failed, sending fallback message");
+                        "（语音消息）".to_string()
+                    };
+                    eb.do_send(Event::new(
+                        "user.message",
+                        serde_json::json!({
+                            "text": text,
+                            "source": "telegram",
+                            "user_name": format!("{} (语音)", un),
+                            "chat_id": chat_id,
+                        }),
+                        "tg-im-plugin",
+                    ));
                 });
             },
         );
@@ -655,6 +659,11 @@ impl Plugin for TgImPlugin {
 
         // ── assistant.message from Telegram → 停止 typing + 逐条发送回复 ──
         if event.topic == "assistant.message" && source == "telegram" && chat_id != 0 {
+            // 静默事件：仅供插件（proactive 等）感知回复，不实际发送
+            if event.data.get("silent").and_then(|v| v.as_bool()).unwrap_or(false) {
+                self.processing_chats.lock().unwrap().remove(&chat_id);
+                return true;
+            }
             // 停止 typing 循环
             self.processing_chats.lock().unwrap().remove(&chat_id);
 
@@ -663,6 +672,8 @@ impl Plugin for TgImPlugin {
                     let mut s = t.to_string();
                     s = s.replace("\n---\n", "\n\n");
                     s = s.replace("---", "———");
+                    // LLM may output literal \n (two chars) instead of actual newline
+                    s = s.replace("\\n", "\n");
                     s
                 }
                 None => return true,
@@ -676,19 +687,44 @@ impl Plugin for TgImPlugin {
                         .build()
                         .expect("tokio");
                     rt.block_on(async {
-                        // 按双换行拆分段，逐条发送
-                        let segments: Vec<String> = full_text
-                            .split("\n\n")
-                            .flat_map(|s| {
-                                // 单段过长时进一步按单换行拆分
-                                if s.len() > 200 {
-                                    s.split('\n').collect::<Vec<_>>()
-                                } else {
-                                    vec![s]
+                        // Step 1: split by newline
+                        let lines: Vec<String> = if full_text.contains('\n') {
+                            full_text.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                        } else {
+                            vec![full_text.clone()]
+                        };
+                        // Step 2: split each line by sentence punctuation
+                        let mut segments = Vec::new();
+                        for line in &lines {
+                            let mut current = String::new();
+                            let mut has_punct = false;
+                            for ch in line.chars() {
+                                current.push(ch);
+                                let is_comma = ch == '，';
+                                let is_split = is_comma || ch == '。' || ch == '？' || ch == '！' || ch == '…' || ch == '?' || ch == '!';
+                                if is_split {
+                                    if is_comma {
+                                        current.pop(); // remove the comma from output
+                                    }
+                                    if !current.trim().is_empty() {
+                                        segments.push(current.trim().to_string());
+                                    }
+                                    current = String::new();
+                                    has_punct = true;
                                 }
-                            })
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
+                            }
+                            if !current.trim().is_empty() {
+                                segments.push(current.trim().to_string());
+                            } else if !has_punct && !line.trim().is_empty() {
+                                segments.push(line.trim().to_string());
+                            }
+                        }
+
+                        let raw_segments = segments;
+
+                        let segments: Vec<String> = raw_segments
+                            .into_iter()
+                            .filter(|s| s.trim().chars().count() > 1) // skip single-char fragments (e.g. standalone "…")
                             .collect();
 
                         for (i, seg) in segments.iter().enumerate() {

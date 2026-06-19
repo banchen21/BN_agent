@@ -24,7 +24,7 @@ const DEFAULT_NEGATIVE: &str = "easynegative, worst quality, low quality, bad an
 
 const NSFW_NEGATIVE: &str = "worst quality, low quality, bad anatomy, bad hands, extra fingers, deformed, ugly, blurry, watermark, signature, multiple views, multiple girls, 2girls, 3girls, crowd, group, text, speech bubble";
 
-const FACE_PROMPT: &str = "masterpiece, best quality, 1girl, solo, twin tails, black hair, bob cut, red ribbon, white skin, slim, cute, round face, big eyes";
+const FACE_PROMPT: &str = "1girl, solo, extremely long twin tails, waist length twintails, very long white hair, silver hair, bangs, white sailor shirt, unbuttoned shirt, shirt open, visible cleavage, showing cleavage, bra visible, midriff exposed, bare waist, bare midriff, red ribbon, red pleated miniskirt, white thighhighs, black mary jane shoes, medium breasts, b cup, sitting on bed, soft bed, cozy bedroom, soft indoor lighting, looking at viewer, teasing, seductive smile, soft cute face, big eyes, fair skin, flawless skin, high quality, realistic, douyin style, loli face, innocent, perfect face";
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())

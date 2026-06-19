@@ -323,6 +323,7 @@ async fn plugin_proxy(
     state: web::Data<AppState>,
     req: HttpRequest,
     path: web::Path<String>,
+    body: Option<web::Bytes>,
 ) -> impl Responder {
     let full_path = path.into_inner();
     let (plugin_name, sub_path) = full_path.split_once('/')
@@ -330,12 +331,13 @@ async fn plugin_proxy(
         .unwrap_or_else(|| (full_path, String::new()));
 
     let method = req.method().as_str().to_uppercase();
+    let body_str = body.and_then(|b| String::from_utf8(b.to_vec()).ok());
 
     match state.plugin_manager.send(ApiRequest {
         plugin: plugin_name,
         method,
         path: sub_path,
-        body: None,
+        body: body_str,
     }).await {
         Ok(Some((status, body))) => {
             HttpResponse::build(
@@ -408,8 +410,6 @@ fn main() -> std::io::Result<()> {
         .expect("failed to initialize logging");
     log::info!("Logging to stdout + {}", log_path);
     log::info!("=== actix-actor plugin system starting ===");
-
-    let sys = actix_rt::System::new();
 
     let sys = actix_rt::System::new();
 

@@ -262,6 +262,14 @@ async fn process_message(
             if !current_resp.content.trim().is_empty() && !already_sent_via_im {
                 emit_reply(&current_resp.content, &source, &event_bus).await;
             }
+            // 如果已通过 IM 工具发送，发静默事件通知插件（proactive 等）对话已完成
+            if already_sent_via_im {
+                event_bus.do_send(Event::new(
+                    "assistant.message",
+                    serde_json::json!({ "text": current_resp.content, "source": source, "silent": true }),
+                    "pipeline",
+                ));
+            }
             break;
         }
 

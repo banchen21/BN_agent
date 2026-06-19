@@ -20,6 +20,7 @@ members = [
     "plugins/skill-plugin",
     "plugins/proactive-plugin",
     "plugins/memory-plugin",
+    "plugins/toy-control-plugin",
 ]
 resolver = "2"
 

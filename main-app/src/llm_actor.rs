@@ -231,7 +231,9 @@ impl Handler<ChatRequest> for LlmActor {
         } else {
             self.config.system_prompt.clone()
         };
-        let limit = self.config.max_history_turns * 2;
+        // Immediate context: recent N messages (env IMMEDIATE_CONTEXT_MSGS, default 200 = 100 rounds).
+        let immediate_limit: usize = std::env::var("IMMEDIATE_CONTEXT_MSGS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
 
         let tools = msg.tools.clone();
 
@@ -291,9 +293,9 @@ impl Handler<ChatRequest> for LlmActor {
                 messages.push(serde_json::json!({ "role": "assistant", "content": ctx }));
             }
 
-            // ── 3. Recent history ──
-            let records = store_addr.send(FetchRecent { limit }).await.unwrap_or_default();
-            // 过滤：去掉开头孤立的 tool/tool_calls 消息（前导被 limit 截断，没有匹配对）
+            // ── 3. Recent history (last 4 messages for immediate context) ──
+            let records = store_addr.send(FetchRecent { limit: immediate_limit }).await.unwrap_or_default();
+            // Filter orphan tools at the head.
             let mut tool_calls_seen = false;
             for r in &records {
                 let role_is_tool = r.role == "tool"
@@ -305,16 +307,8 @@ impl Handler<ChatRequest> for LlmActor {
                     .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
                     .map(|v| v.get("tool_calls").is_some())
                     .unwrap_or(false);
-
-                // 跳过开头的孤立 tool 消息（前面没有 tool_calls）
-                if role_is_tool && !tool_calls_seen {
-                    continue;
-                }
-                if role_is_tool_calls {
-                    tool_calls_seen = true;
-                }
-
-                // 优先使用完整 JSON（支持 tool_calls 等结构），降级回退 role+content
+                if role_is_tool && !tool_calls_seen { continue; }
+                if role_is_tool_calls { tool_calls_seen = true; }
                 if let Some(ref json_str) = r.message_json {
                     if let Ok(msg) = serde_json::from_str::<serde_json::Value>(json_str) {
                         messages.push(msg);
@@ -863,18 +857,18 @@ fn build_tool_hint(tools: &[serde_json::Value]) -> String {
         }
     }
     let mut lines = vec![
-        "【核心规则】".to_string(),
-        "你有工具。用户要你做的事（发消息、生图、查询、处理文件等），必须调用工具，禁止用文字描述来代替操作。".to_string(),
-        "调用工具后不需要发确认文字，系统会自动处理。".to_string(),
+        "【Core Rules】".to_string(),
+        "You have tools. User requests (send msg, generate image, query info, process files, etc.) MUST use tools. Never describe operations in text.".to_string(),
+        "Do NOT send confirmation text after calling tools — the system handles delivery automatically.".to_string(),
         String::new(),
     ];
     if !send_tools.is_empty() {
-        lines.push("【发送工具（直接推送到用户聊天窗口）】".to_string());
+        lines.push("【Send Tools (direct to user chat)】".to_string());
         lines.extend(send_tools);
         lines.push(String::new());
     }
     if !other_tools.is_empty() {
-        lines.push("【其他工具（信息查询 / 内容生成 / 处理）】".to_string());
+        lines.push("【Other Tools (query / generate / process)】".to_string());
         lines.extend(other_tools);
     }
     lines.join("\n")

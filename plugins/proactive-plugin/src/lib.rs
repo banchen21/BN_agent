@@ -26,8 +26,6 @@ use std::time::{Duration, Instant};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Interval between background loop checks.
-const LOOP_INTERVAL_SECS: u64 = 15;
 /// Minimum interval between two LLM decision calls.
 const DECISION_COOLDOWN_SECS: u64 = 15;
 /// Maximum number of history entries to keep per chat.
@@ -473,7 +471,9 @@ impl Plugin for ProactivePlugin {
 // ── Background loop ──────────────────────────────────────────────────────────
 
 fn background_loop(state: Arc<Mutex<SharedState>>, running: Arc<AtomicBool>) {
-    log::info!("[proactive-plugin] background loop started");
+    let loop_interval: u64 = std::env::var("PROACTIVE_LOOP_INTERVAL")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(15);
+    log::info!("[proactive-plugin] background loop started (interval={}s)", loop_interval);
 
     // ── Wait for DB history fetch to complete ────────────────────────────
     // on_event() handles the actual fetch inside actix runtime.
@@ -526,7 +526,7 @@ fn background_loop(state: Arc<Mutex<SharedState>>, running: Arc<AtomicBool>) {
 
     while running.load(Ordering::SeqCst) {
         // Sleep in small chunks so we can respond to stop quickly.
-        for _ in 0..LOOP_INTERVAL_SECS {
+        for _ in 0..loop_interval {
             if !running.load(Ordering::SeqCst) {
                 log::info!("[proactive-plugin] background loop stopped");
                 return;
@@ -669,7 +669,7 @@ fn ask_llm_for_decision(
          - 如果对话已经自然结束（用户已得到满意答复），paused=true，不需要追问。\n\
          - 如果对话还在进行中（用户在等待回复），paused=false，但也不要追问（等用户回复）。\n\
          - 只有当 assistant 已经回复、用户沉默了一段时间，才适合追问。\n\
-         - wait_seconds 建议 120-600 秒。\n\
+         - wait_seconds 建议 30-180 秒。\n\
          - 只输出 JSON，不要输出其他内容。",
         transcript = transcript,
         last_role = last_role,
