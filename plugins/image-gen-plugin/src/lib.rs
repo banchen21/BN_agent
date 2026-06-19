@@ -295,7 +295,7 @@ impl ToolExecutor for GenerateImageTool {
         static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
         DEF.get_or_init(|| ToolDef {
             name: "generate_image".into(),
-            description: "【生成齐悦（双马尾JK少女）照片】当用户要求看照片、发自拍、换姿势、换衣服、看脸、看身体部位，或任何需要视觉呈现的请求时，必须调用此工具。这是唯一的生图方式。描述用英文Danbooru标签依次写：上衣、下装、鞋袜、配饰、场景、动作、表情。生成15-30秒，调用后不要回复确认文字，图片会自动送达。".into(),
+            description: "【生成照片】生图后根据来源平台选择发送工具：[微信用户]→wechat_send_photo, [Telegram]→tg_send_photo。不要用错平台的发送工具。英文Danbooru标签描述服装场景。生成后不要回复文字。".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -374,7 +374,7 @@ impl ToolExecutor for GenerateImageTool {
         }
 
         ToolResult::ok(&format!(
-            "图片生成成功！\n文件: {}\n尺寸: {}x{}\n种子: {}\n提示词: {}",
+            "图片生成成功！\n文件: {}\n尺寸: {}x{}\n种子: {}\n提示词: {}\n\n【重要】请根据消息来源选择发送工具：如果消息以[微信用户]开头→调用wechat_send_photo发送此图片；如果以[Telegram]开头→调用tg_send_photo。必须发送，不要只回复文字。",
             full_path, gen_args.width, gen_args.height, gen_args.seed, gen_args.prompt
         ))
     }

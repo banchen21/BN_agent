@@ -458,8 +458,14 @@ impl Handler<Event> for PipelineActor {
             return;
         }
 
-        let text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let raw_text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // Tag platform so LLM knows which tools to use (wechat vs telegram)
+        let text = match source.as_str() {
+            "wechat" => format!("[微信用户] {}", raw_text),
+            "telegram" => format!("[Telegram] {}", raw_text),
+            _ => raw_text,
+        };
         let user_name = event.data.get("user_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
         let image_base64 = event.data.get("image_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
         let video_base64 = event.data.get("video_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
