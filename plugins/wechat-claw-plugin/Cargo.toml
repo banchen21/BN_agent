@@ -1,19 +1,22 @@
 [package]
 name = "wechat-claw-plugin"
-version = "0.1.0"
-edition = "2021"
-description = "WeChat ClawBot / iLink API integration plugin"
+version = "0.2.0"
+edition = "2024"
+description = "WeChat ClawBot / iLink API integration plugin — powered by weixin-ilink-sdk"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 plugin-interface = { path = "../../plugin-interface" }
+weixin-ilink-sdk = { path = "../../weixin-ilink-sdk-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+tokio-stream = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 log = "0.4"
-rand = "0.8"
+base64 = "0.22"
+futures-util = "0.3"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = "0.25"
