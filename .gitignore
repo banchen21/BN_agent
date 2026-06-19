@@ -47,3 +47,4 @@ temp_images/
 # 已通过 *.dll 全局忽略
 persona.md
 persona.md.bak
+data/
