@@ -66,7 +66,9 @@
 | `tui-plugin` | 终端聊天界面 | — |
 | `mcp-plugin` | MCP 服务器桥接 | 动态 — 来自 MCP 服务器的 `tools/list` |
 | `skill-plugin` | Markdown Skill 工具 | `skill__{name}` 按 .md 文件注册 |
+| `memory-plugin` | 长期记忆提取（Engram 风格双时态） | —（通过 snapshot 注入） |
 | `proactive-plugin` | 主动消息推送 | — |
+| `toy-control-plugin` | 跳蛋远程控制 + Web 面板 | `toy_vibrate`, `toy_stop`, `toy_set_pattern`, `toy_status` |
 
 ## 快速开始
 
@@ -103,7 +105,15 @@ cargo run -p main-app
 | `LLM_API_KEY` | — | **必填** LLM API Key |
 | `LLM_MODEL` | `deepseek-chat` | LLM 模型名 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API 端点 |
-| `LLM_MAX_HISTORY` | `20` | 历史对话轮数 |
+| `LLM_MAX_HISTORY` | `15` | 历史对话轮数 |
+| `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
+| `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
+| `LLM_THINKING` | `disabled` | DeepSeek 思考模式 |
+| `PROACTIVE_MODE` | `auto` | 主动追问模式 (auto/semi-auto) |
+| `PROACTIVE_LOOP_INTERVAL` | `15` | 主动追问轮询间隔(秒) |
+| `MEMORY_EXTRACT_EVERY` | `10` | 记忆提取触发消息数 |
+| `MEMORY_DB_PATH` | `data/memories.db` | 记忆数据库路径 |
+| `TOY_CONTROL_PORT` | `8090` | 跳蛋 Web 控制面板端口 |
 | `PLUGIN_LOAD` | (全部) | 插件白名单，逗号分隔 |
 | `PLUGIN_SKIP` | (空) | 插件黑名单 |
 | `RETRY_MAX_ATTEMPTS` | `3` | 最大重试次数 |
@@ -250,8 +260,10 @@ bn-agent/
 │   ├── tui-plugin/           # 终端 UI
 │   ├── mcp-plugin/           # MCP 服务器桥接
 │   ├── skill-plugin/         # Markdown Skill 工具
-│   └── proactive-plugin/     # 主动消息推送
+│   ├── proactive-plugin/     # 主动消息推送
+│   ├── memory-plugin/        # 长期记忆提取（Engram 风格）
+│   └── toy-control-plugin/   # 跳蛋远程控制 + Web 面板
 └── data/
     ├── skills/               # Skill .md 文件目录
-    └── jailbreak_prompts.csv # 提示词注入
+    └── jailbreak_prompts.csv # 提示词注入（已 gitignore）
 ```

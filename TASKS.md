@@ -32,7 +32,7 @@ Token 用量    ██████████ 完成
 - [x] **可配置 max_tokens** — LLM_MAX_TOKENS 环境变量（默认 384000）
 - [x] **工具调用稳定性** — tool_choice:auto + system prompt 工具感知提示，解决 persona 覆盖工具意识
 
-### 插件（17/17）
+### 插件（19/19）
 
 - [x] **hello-plugin** — 演示
 - [x] **logger-plugin** — 日志
@@ -51,6 +51,8 @@ Token 用量    ██████████ 完成
 - [x] **mcp-plugin** — MCP 服务器桥接
 - [x] **skill-plugin** — Markdown Skill 工具
 - [x] **proactive-plugin** — 主动消息推送
+- [x] **memory-plugin** — 长期记忆提取（Engram 风格双时态 + 时间分桶）
+- [x] **toy-control-plugin** — 跳蛋远程控制 + 内置 Web 面板
 
 ---
 
@@ -62,7 +64,7 @@ Token 用量    ██████████ 完成
 - [ ] **web-fetch-plugin** — URL 内容抓取
 - [ ] **exec-plugin** — 安全沙箱代码执行（Python/JS）
 - [ ] **fs-plugin** — 文件系统读写
-- [ ] **memory-plugin** — 长期记忆 / RAG（向量存储 + 语义搜索）
+- [x] **memory-plugin** — 长期记忆（Engram 双时态 + 时间分桶 + 矛盾追踪）
 - [ ] **db-plugin** — 数据库查询（SQLite / PostgreSQL）
 - [ ] **weather-plugin** — 天气查询
 - [ ] **auth-plugin** — HTTP API 鉴权
@@ -88,10 +90,11 @@ Token 用量    ██████████ 完成
 
 ## 已知问题
 
-- **流式工具调用（streaming tool_calls）** — 部分模型在流式模式下会分 chunk 发送 function call 参数，当前实现依赖 OpenAI 格式，非标准实现可能解析异常
-- **熔断状态非持久化** — 重启后重置为 closed，可能被上游 API 持续故障触发频繁重试
-- **图片/视频模型专用配置** — 需要独立配置 `IMAGE_MODEL` / `VIDEO_MODEL`，增加了部署复杂度
-- **链式工具调用** — 当前只支持一轮工具调用 + 结果回送，不支持多轮链式调用
+- **流式工具调用** — 部分模型在流式模式下分 chunk 发送 function call 参数，非标准实现可能解析异常
+- **熔断状态非持久化** — 重启后重置为 closed
+- **ASR 偶发超时** — ffmpeg 管道 + API 调用链缺乏整体超时控制
+- **chat_history 全局混存** — 不区分 chat_id，多会话可能混入历史
+- **ComfyUI 依赖外部启动** — 生图需要独立运行 ComfyUI 服务
 
 ## 已解决的问题
 
