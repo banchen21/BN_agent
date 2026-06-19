@@ -38,6 +38,7 @@ struct ToyControlPlugin {
     state: StateRef,
     event_bus: Option<Addr<EventBus>>,
     adjust_gen: Arc<AtomicU64>,
+    last_source: Arc<Mutex<Option<String>>>,
     server_handle: Option<thread::JoinHandle<()>>,
     server_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -55,6 +56,7 @@ impl ToyControlPlugin {
             state: Arc::new(Mutex::new(ToyState::default())),
             event_bus: None,
             adjust_gen: Arc::new(AtomicU64::new(0)),
+            last_source: Arc::new(Mutex::new(None)),
             server_handle: None,
             server_stop: None,
         }
@@ -189,6 +191,7 @@ impl Plugin for ToyControlPlugin {
         let state = self.state.clone();
         let event_bus = self.event_bus.clone();
         let adjust_gen = self.adjust_gen.clone();
+        let last_source = self.last_source.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         self.server_stop = Some(tx);
 
@@ -200,10 +203,12 @@ impl Plugin for ToyControlPlugin {
                     let st = state.clone();
                     let eb = event_bus.clone();
                     let ag = adjust_gen.clone();
+                    let ls = last_source.clone();
                     App::new()
                         .app_data(aweb::Data::new(st))
                         .app_data(aweb::Data::new(eb))
                         .app_data(aweb::Data::new(ag))
+                        .app_data(aweb::Data::new(ls))
                         .route("/", aweb::get().to(serve_ui))
                         .route("/status", aweb::get().to(get_status))
                         .route("/control", aweb::post().to(post_control))
@@ -234,6 +239,17 @@ impl Plugin for ToyControlPlugin {
             let _ = h.join();
         }
         log::info!("[toy-control] stopped");
+    }
+
+    fn on_event(&self, event: &Event) -> bool {
+        if event.topic == "user.message" {
+            if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
+                if !src.is_empty() {
+                    *self.last_source.lock().unwrap() = Some(src.to_string());
+                }
+            }
+        }
+        true
     }
 
     fn snapshot(&self) -> Option<String> {
@@ -274,6 +290,7 @@ async fn post_control(
     data: aweb::Data<StateRef>,
     eb: aweb::Data<Option<Addr<EventBus>>>,
     gen: aweb::Data<Arc<AtomicU64>>,
+    last_source: aweb::Data<Arc<Mutex<Option<String>>>>,
     body: aweb::Json<ControlCmd>,
 ) -> HttpResponse {
     let cmd = body.into_inner();
@@ -296,6 +313,7 @@ async fn post_control(
         let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
         let gen_clone = gen.clone();
         let eb_clone = eb.clone();
+        let ls = last_source.clone();
         let freq = s.frequency;
         let pat = s.pattern.clone();
         let locs = s.locations.clone();
@@ -305,12 +323,13 @@ async fn post_control(
             if gen_clone.load(Ordering::SeqCst) == my_gen {
                 // No newer adjustments, fire the event
                 if let Some(ref eb) = eb_clone.as_ref() {
+                    let source = ls.lock().unwrap().clone().unwrap_or_else(|| "telegram".to_string());
                     let labels: Vec<&str> = locs.iter().map(|l| loc_label(l)).collect();
                     let msg = format!("（跳蛋正在{}运行，{}%力度，{}模式。）",
                         labels.join("和"), freq, pat_label(&pat));
                     eb.do_send(Event::new(
                         "user.message",
-                        serde_json::json!({"text": msg, "source": "telegram"}),
+                        serde_json::json!({"text": msg, "source": source}),
                         "toy-control-plugin",
                     ));
                 }
