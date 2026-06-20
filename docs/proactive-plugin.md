@@ -9,7 +9,7 @@ LLM 仍然可以主动调用工具来安排未来消息：
 - `proactive_schedule_once`：一次性主动消息或定时提醒
 - `proactive_schedule_recurring`：循环主动消息
 
-此外，插件也会记录会话活跃状态；开启自主主动后，用户沉默超过阈值且冷却结束时，插件会自己发布 `proactive.trigger`，让 Pipeline 回调 LLM 生成自然开场。
+此外，插件也会记录会话活跃状态；开启自主主动后，用户沉默超过一段弹性时间且冷却结束时，插件会自己发布 `proactive.trigger`，让 Pipeline 回调 LLM 生成自然开场。自主主动不是固定秒表触发，会使用随机浮动、概率触发、每日上限和无人回应退避来减少机械感。
 
 ## 环境变量
 
@@ -24,6 +24,11 @@ LLM 仍然可以主动调用工具来安排未来消息：
 | `PROACTIVE_AUTONOMOUS_IDLE_SECS` | `1800` | 用户/助手最后互动后沉默多久才考虑主动开口 |
 | `PROACTIVE_AUTONOMOUS_COOLDOWN_SECS` | `3600` | 同一会话两次自主主动之间的最小间隔 |
 | `PROACTIVE_AUTONOMOUS_MIN_USER_MESSAGES` | `1` | 至少收到多少条用户消息后才允许自主主动 |
+| `PROACTIVE_AUTONOMOUS_IDLE_JITTER_PCT` | `45` | 空闲阈值随机浮动百分比，默认约为 16.5 到 43.5 分钟 |
+| `PROACTIVE_AUTONOMOUS_COOLDOWN_JITTER_PCT` | `35` | 冷却时间随机浮动百分比 |
+| `PROACTIVE_AUTONOMOUS_CHANCE_PCT` | `65` | 到达下一次机会时真正触发的概率；未触发会稍后再试 |
+| `PROACTIVE_AUTONOMOUS_DAILY_LIMIT` | `4` | 同一会话每天最多自主主动次数，`0` 表示不限 |
+| `PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER` | `4` | 连续自主主动无人回应时的最大退避倍数 |
 
 ## 工作流程
 
@@ -41,7 +46,8 @@ LLM 仍然可以主动调用工具来安排未来消息：
 ```text
 user.message / assistant.message 经过 EventBus
   -> proactive-plugin 记录 peer 的最后互动时间
-  -> 后台 tick 检查 idle/cooldown/min_user_messages
+  -> 为该 peer 计算下一次自主主动机会（idle/cooldown + jitter + backoff）
+  -> 后台 tick 到点后检查 daily_limit/min_user_messages/未完成定时任务/chance
   -> 满足条件时发布 proactive.trigger(reason=autonomous_idle)
   -> PipelineActor 使用自主主动提示词回调 LLM
   -> LLM 判断不适合打扰时返回内部跳过标记，不发送也不写入历史
@@ -52,6 +58,8 @@ user.message / assistant.message 经过 EventBus
 
 - `scheduled`：由工具安排的定时任务，到期后完成提醒或主动消息。
 - `autonomous_idle`：无人安排，插件根据会话空闲状态自主触发；LLM 可判断此刻不适合打扰并跳过发送。
+
+如果用户一直不回应自主主动，插件会逐步拉长下一次主动的等待时间，直到 `PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER`。用户再次发消息后，退避会重置。
 
 用户一旦回复当前会话，proactive-plugin 会取消该会话全部已安排任务，避免旧提醒在用户已经回来后继续触发。
 

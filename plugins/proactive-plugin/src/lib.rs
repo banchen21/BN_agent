@@ -14,20 +14,20 @@
 //!
 //! 自主主动（`PROACTIVE_AUTONOMOUS_ENABLED`）：
 //!   - 记录目标会话最后互动时间
-//!   - 空闲超过 `PROACTIVE_AUTONOMOUS_IDLE_SECS` 后自动发布 `proactive.trigger`
+//!   - 空闲超过弹性窗口后自动发布 `proactive.trigger`
 //!   - 由 PipelineActor 回调 LLM 生成自然主动消息
 //!
 //! 用户主动回复 → 取消该会话**全部**已安排任务（等 LLM 重新安排）。
 //!
 //! DLL 不能使用 actix actor，故用 `Arc<Mutex<>>` + 后台线程共享状态。
 
-use chrono::Timelike;
+use chrono::{Datelike, Timelike};
 use plugin_interface::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ── 模式 ─────────────────────────────────────────────────────────────────────
 
@@ -127,6 +127,10 @@ struct PeerActivity {
     last_user_at: Option<Instant>,
     last_assistant_at: Option<Instant>,
     last_autonomous_at: Option<Instant>,
+    next_autonomous_at: Option<Instant>,
+    unanswered_autonomous_count: u32,
+    autonomous_day: i32,
+    autonomous_count_today: u64,
     user_message_count: u64,
 }
 
@@ -138,6 +142,10 @@ impl PeerActivity {
             last_user_at: None,
             last_assistant_at: None,
             last_autonomous_at: None,
+            next_autonomous_at: None,
+            unanswered_autonomous_count: 0,
+            autonomous_day: current_day_key(),
+            autonomous_count_today: 0,
             user_message_count: 0,
         }
     }
@@ -148,6 +156,14 @@ impl PeerActivity {
             (Some(user_at), None) => Some(user_at),
             (None, Some(assistant_at)) => Some(assistant_at),
             (None, None) => None,
+        }
+    }
+
+    fn reset_daily_count_if_needed(&mut self) {
+        let today = current_day_key();
+        if self.autonomous_day != today {
+            self.autonomous_day = today;
+            self.autonomous_count_today = 0;
         }
     }
 }
@@ -175,6 +191,11 @@ struct SharedState {
     autonomous_idle: Duration,
     autonomous_cooldown: Duration,
     autonomous_min_user_messages: u64,
+    autonomous_idle_jitter_pct: u64,
+    autonomous_cooldown_jitter_pct: u64,
+    autonomous_chance_pct: u64,
+    autonomous_daily_limit: u64,
+    autonomous_max_backoff_multiplier: u64,
 }
 
 impl SharedState {
@@ -206,6 +227,94 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn current_day_key() -> i32 {
+    chrono::Local::now().date_naive().num_days_from_ce()
+}
+
+fn stable_hash(input: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn random_mod(max_exclusive: u64, salt: &str) -> u64 {
+    if max_exclusive == 0 {
+        return 0;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let mut value = now ^ stable_hash(salt);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d049bb133111eb);
+    value ^= value >> 31;
+    value % max_exclusive
+}
+
+fn random_percent(salt: &str) -> u64 {
+    random_mod(100, salt)
+}
+
+fn scale_duration(base: Duration, multiplier: u64) -> Duration {
+    Duration::from_secs(base.as_secs().saturating_mul(multiplier.max(1)))
+}
+
+fn jitter_duration(base: Duration, jitter_pct: u64, salt: &str) -> Duration {
+    let base_secs = base.as_secs();
+    if base_secs == 0 {
+        return base;
+    }
+    let jitter_pct = jitter_pct.min(95);
+    let radius = base_secs.saturating_mul(jitter_pct) / 100;
+    if radius == 0 {
+        return base;
+    }
+    let offset = random_mod(radius.saturating_mul(2).saturating_add(1), salt);
+    Duration::from_secs(base_secs.saturating_sub(radius).saturating_add(offset))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_next_autonomous_at(
+    peer_id: &str,
+    peer: &PeerActivity,
+    idle: Duration,
+    cooldown: Duration,
+    idle_jitter_pct: u64,
+    cooldown_jitter_pct: u64,
+    max_backoff_multiplier: u64,
+) -> Option<Instant> {
+    let last_interaction = peer.last_interaction_at()?;
+    let backoff = 2u64
+        .saturating_pow(peer.unanswered_autonomous_count.min(8))
+        .min(max_backoff_multiplier.max(1));
+    let idle_delay = jitter_duration(
+        scale_duration(idle, backoff),
+        idle_jitter_pct,
+        &format!("{}:idle:{}", peer_id, peer.unanswered_autonomous_count),
+    );
+    let mut next_at = last_interaction + idle_delay;
+
+    if let Some(last_autonomous) = peer.last_autonomous_at {
+        let cooldown_delay = jitter_duration(
+            scale_duration(cooldown, backoff),
+            cooldown_jitter_pct,
+            &format!("{}:cooldown:{}", peer_id, peer.unanswered_autonomous_count),
+        );
+        let cooldown_at = last_autonomous + cooldown_delay;
+        if cooldown_at > next_at {
+            next_at = cooldown_at;
+        }
+    }
+
+    Some(next_at)
 }
 
 fn chat_id_from_event(data: &serde_json::Value) -> Option<String> {
@@ -421,6 +530,11 @@ impl ProactivePlugin {
                 autonomous_idle: Duration::from_secs(30 * 60),
                 autonomous_cooldown: Duration::from_secs(60 * 60),
                 autonomous_min_user_messages: 1,
+                autonomous_idle_jitter_pct: 45,
+                autonomous_cooldown_jitter_pct: 35,
+                autonomous_chance_pct: 65,
+                autonomous_daily_limit: 4,
+                autonomous_max_backoff_multiplier: 4,
             })),
             running: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
@@ -444,6 +558,13 @@ impl Plugin for ProactivePlugin {
         let autonomous_idle = env_duration("PROACTIVE_AUTONOMOUS_IDLE_SECS", 30 * 60);
         let autonomous_cooldown = env_duration("PROACTIVE_AUTONOMOUS_COOLDOWN_SECS", 60 * 60);
         let autonomous_min_user_messages = env_u64("PROACTIVE_AUTONOMOUS_MIN_USER_MESSAGES", 1);
+        let autonomous_idle_jitter_pct = env_u64("PROACTIVE_AUTONOMOUS_IDLE_JITTER_PCT", 45);
+        let autonomous_cooldown_jitter_pct =
+            env_u64("PROACTIVE_AUTONOMOUS_COOLDOWN_JITTER_PCT", 35);
+        let autonomous_chance_pct = env_u64("PROACTIVE_AUTONOMOUS_CHANCE_PCT", 65).min(100);
+        let autonomous_daily_limit = env_u64("PROACTIVE_AUTONOMOUS_DAILY_LIMIT", 4);
+        let autonomous_max_backoff_multiplier =
+            env_u64("PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER", 4).max(1);
 
         {
             let mut s = self.state.lock().unwrap();
@@ -464,6 +585,11 @@ impl Plugin for ProactivePlugin {
             s.autonomous_idle = autonomous_idle;
             s.autonomous_cooldown = autonomous_cooldown;
             s.autonomous_min_user_messages = autonomous_min_user_messages;
+            s.autonomous_idle_jitter_pct = autonomous_idle_jitter_pct;
+            s.autonomous_cooldown_jitter_pct = autonomous_cooldown_jitter_pct;
+            s.autonomous_chance_pct = autonomous_chance_pct;
+            s.autonomous_daily_limit = autonomous_daily_limit;
+            s.autonomous_max_backoff_multiplier = autonomous_max_backoff_multiplier;
         }
 
         // 注册工具给 LLM。
@@ -484,7 +610,7 @@ impl Plugin for ProactivePlugin {
         }
 
         ctx.logger.info(format!(
-            "started, mode={}, chat_id={}, source={}, autonomous={}, idle={}s, cooldown={}s",
+            "started, mode={}, chat_id={}, source={}, autonomous={}, idle={}s±{}%, cooldown={}s±{}%, chance={}%, daily_limit={}, max_backoff={}x",
             mode.as_str(),
             if chat_id_from_env {
                 env_chat_id.as_str()
@@ -498,7 +624,12 @@ impl Plugin for ProactivePlugin {
             },
             autonomous_enabled,
             autonomous_idle.as_secs(),
+            autonomous_idle_jitter_pct,
             autonomous_cooldown.as_secs(),
+            autonomous_cooldown_jitter_pct,
+            autonomous_chance_pct,
+            autonomous_daily_limit,
+            autonomous_max_backoff_multiplier,
         ));
 
         // 启动后台轮询线程。
@@ -559,18 +690,41 @@ impl Plugin for ProactivePlugin {
                 } else {
                     event_source.clone()
                 };
-                let peer = s
-                    .peers
-                    .entry(peer_id.clone())
-                    .or_insert_with(|| PeerActivity::new(source.clone(), chat_id.clone()));
-                peer.source = source;
-                peer.chat_id = chat_id;
+                let autonomous_enabled = s.autonomous_enabled;
+                let autonomous_idle = s.autonomous_idle;
+                let autonomous_cooldown = s.autonomous_cooldown;
+                let autonomous_idle_jitter_pct = s.autonomous_idle_jitter_pct;
+                let autonomous_cooldown_jitter_pct = s.autonomous_cooldown_jitter_pct;
+                let autonomous_max_backoff_multiplier = s.autonomous_max_backoff_multiplier;
+                {
+                    let peer = s
+                        .peers
+                        .entry(peer_id.clone())
+                        .or_insert_with(|| PeerActivity::new(source.clone(), chat_id.clone()));
+                    peer.source = source;
+                    peer.chat_id = chat_id;
+                    if event.topic == "user.message" {
+                        peer.last_user_at = Some(now);
+                        peer.user_message_count = peer.user_message_count.saturating_add(1);
+                        peer.unanswered_autonomous_count = 0;
+                    } else {
+                        peer.last_assistant_at = Some(now);
+                    }
+                    peer.reset_daily_count_if_needed();
+                    if autonomous_enabled {
+                        peer.next_autonomous_at = compute_next_autonomous_at(
+                            &peer_id,
+                            peer,
+                            autonomous_idle,
+                            autonomous_cooldown,
+                            autonomous_idle_jitter_pct,
+                            autonomous_cooldown_jitter_pct,
+                            autonomous_max_backoff_multiplier,
+                        );
+                    }
+                }
                 if event.topic == "user.message" {
-                    peer.last_user_at = Some(now);
-                    peer.user_message_count = peer.user_message_count.saturating_add(1);
                     s.current_peer_id = peer_id;
-                } else {
-                    peer.last_assistant_at = Some(now);
                 }
             }
 
@@ -690,26 +844,77 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
             let idle_threshold = s.autonomous_idle;
             let cooldown = s.autonomous_cooldown;
             let min_user_messages = s.autonomous_min_user_messages;
+            let idle_jitter_pct = s.autonomous_idle_jitter_pct;
+            let cooldown_jitter_pct = s.autonomous_cooldown_jitter_pct;
+            let chance_pct = s.autonomous_chance_pct;
+            let daily_limit = s.autonomous_daily_limit;
+            let max_backoff_multiplier = s.autonomous_max_backoff_multiplier;
+            let peers_with_scheduled: Vec<String> = s
+                .scheduled
+                .iter()
+                .filter_map(|(peer_id, tasks)| {
+                    if tasks.is_empty() {
+                        None
+                    } else {
+                        Some(peer_id.clone())
+                    }
+                })
+                .collect();
             for (peer_id, peer) in s.peers.iter_mut() {
+                peer.reset_daily_count_if_needed();
                 if peer.user_message_count < min_user_messages {
+                    continue;
+                }
+                if daily_limit > 0 && peer.autonomous_count_today >= daily_limit {
+                    continue;
+                }
+                if peers_with_scheduled.iter().any(|p| p == peer_id) {
                     continue;
                 }
                 let Some(last_interaction) = peer.last_interaction_at() else {
                     continue;
                 };
                 let idle_for = now.saturating_duration_since(last_interaction);
-                if idle_for < idle_threshold {
+                if peer.next_autonomous_at.is_none() {
+                    peer.next_autonomous_at = compute_next_autonomous_at(
+                        peer_id,
+                        peer,
+                        idle_threshold,
+                        cooldown,
+                        idle_jitter_pct,
+                        cooldown_jitter_pct,
+                        max_backoff_multiplier,
+                    );
+                }
+                if peer.next_autonomous_at.map(|due| now < due).unwrap_or(true) {
                     continue;
                 }
-                if peer
-                    .last_autonomous_at
-                    .map(|last| now.saturating_duration_since(last) < cooldown)
-                    .unwrap_or(false)
+
+                if chance_pct < 100 && random_percent(&format!("{}:chance", peer_id)) >= chance_pct
                 {
+                    let snooze_base = Duration::from_secs((idle_threshold.as_secs() / 3).max(60));
+                    let snooze = jitter_duration(
+                        snooze_base,
+                        idle_jitter_pct.max(50),
+                        &format!("{}:snooze", peer_id),
+                    );
+                    peer.next_autonomous_at = Some(now + snooze);
                     continue;
                 }
 
                 peer.last_autonomous_at = Some(now);
+                peer.autonomous_count_today = peer.autonomous_count_today.saturating_add(1);
+                peer.unanswered_autonomous_count =
+                    peer.unanswered_autonomous_count.saturating_add(1);
+                peer.next_autonomous_at = compute_next_autonomous_at(
+                    peer_id,
+                    peer,
+                    idle_threshold,
+                    cooldown,
+                    idle_jitter_pct,
+                    cooldown_jitter_pct,
+                    max_backoff_multiplier,
+                );
                 triggers.push((
                     peer_id.clone(),
                     peer.chat_id.clone(),
@@ -752,6 +957,40 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
             }
             bus.do_send(Event::new("proactive.trigger", data, "proactive-plugin"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_duration_stays_within_bounds() {
+        let value = jitter_duration(Duration::from_secs(100), 20, "test-jitter");
+
+        assert!(value >= Duration::from_secs(80));
+        assert!(value <= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn unanswered_autonomous_backoff_extends_next_time() {
+        let now = Instant::now();
+        let mut peer = PeerActivity::new("test".into(), "chat".into());
+        peer.last_user_at = Some(now);
+        peer.unanswered_autonomous_count = 2;
+
+        let next = compute_next_autonomous_at(
+            "test:chat",
+            &peer,
+            Duration::from_secs(100),
+            Duration::from_secs(0),
+            0,
+            0,
+            4,
+        )
+        .expect("next autonomous time");
+
+        assert!(next >= now + Duration::from_secs(400));
     }
 }
 

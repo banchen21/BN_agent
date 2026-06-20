@@ -158,7 +158,7 @@ Token 用量    ██████████ 完成
 - **回复忽冷忽热** — 采样温度每次请求随机 `gen_range(0.7..=1.2)`，破限词仅多模态时随机注入，人格漂移。解决方案：固定温度 `LLM_TEMPERATURE`（默认 0.8）+ 破限词固定索引 `JAILBREAK_INDEX`（默认 0，可设 random 恢复随机）
 - **generate_image 默认发到 TG** — tg-im 硬编码订阅 `image.gen.complete` 自动发图且不校验来源，跨平台误发。解决方案：移除自动发图订阅，`generate_image` 返回本地 file_path，由 LLM 按当前平台调 `tg_send_photo`/`wechat_send_image` 发送
 - **主动消息机制重构** — 旧机制靠 `[SCHEDULE:N]` 文本标签，易被 IM 发送工具剥离而不触发。解决方案：改为工具驱动（`proactive_schedule_once`/`recurring`）+ 到期发 `proactive.trigger` 回调 LLM 按当前上下文实时生成
-- **主动插件扩展为自主主动系统** — 原先只能处理用户/LLM 安排后的定时任务。解决方案：proactive-plugin 记录 peer 最近互动，超过 `PROACTIVE_AUTONOMOUS_IDLE_SECS` 且满足冷却/最少消息条件后自主发布 `proactive.trigger(reason=autonomous_idle)`；Pipeline 使用自主主动提示词回调 LLM，允许返回内部跳过标记避免打扰
+- **主动插件扩展为自主主动系统** — 原先只能处理用户/LLM 安排后的定时任务。解决方案：proactive-plugin 记录 peer 最近互动，为每个 peer 计算带 jitter/probability/daily limit/backoff 的下一次自主主动机会，到点后自主发布 `proactive.trigger(reason=autonomous_idle)`；Pipeline 使用自主主动提示词回调 LLM，允许返回内部跳过标记避免打扰
 - **微信回复整段发送** — 不像真人。解决方案：按换行/句末标点分句逐条发送（与 tg-im 一致），段间延时防限频
 - **多人接入共享历史/记忆** — chat_history 与 memory 曾全局单桶。解决方案：引入 `peer_id={source}:{平台内id}`，历史按 peer 读写；memory-plugin 的 buffer/facts/snapshot 按 peer 分桶；首个互动者持久化为主人并注入 owner/visitor 关系守则
 
