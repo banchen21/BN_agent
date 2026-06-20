@@ -12,6 +12,11 @@
 //!   - `semi-auto` 仅在 `PROACTIVE_TIME_WINDOWS` 时间窗口内触发；
 //!                 窗口外到期的任务**顺延**，进入窗口后立即补发
 //!
+//! 自主主动（`PROACTIVE_AUTONOMOUS_ENABLED`）：
+//!   - 记录目标会话最后互动时间
+//!   - 空闲超过 `PROACTIVE_AUTONOMOUS_IDLE_SECS` 后自动发布 `proactive.trigger`
+//!   - 由 PipelineActor 回调 LLM 生成自然主动消息
+//!
 //! 用户主动回复 → 取消该会话**全部**已安排任务（等 LLM 重新安排）。
 //!
 //! DLL 不能使用 actix actor，故用 `Arc<Mutex<>>` + 后台线程共享状态。
@@ -115,11 +120,45 @@ struct ScheduledTask {
     note: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PeerActivity {
+    source: String,
+    chat_id: String,
+    last_user_at: Option<Instant>,
+    last_assistant_at: Option<Instant>,
+    last_autonomous_at: Option<Instant>,
+    user_message_count: u64,
+}
+
+impl PeerActivity {
+    fn new(source: String, chat_id: String) -> Self {
+        Self {
+            source,
+            chat_id,
+            last_user_at: None,
+            last_assistant_at: None,
+            last_autonomous_at: None,
+            user_message_count: 0,
+        }
+    }
+
+    fn last_interaction_at(&self) -> Option<Instant> {
+        match (self.last_user_at, self.last_assistant_at) {
+            (Some(user_at), Some(assistant_at)) => Some(user_at.max(assistant_at)),
+            (Some(user_at), None) => Some(user_at),
+            (None, Some(assistant_at)) => Some(assistant_at),
+            (None, None) => None,
+        }
+    }
+}
+
 // ── 共享状态 ─────────────────────────────────────────────────────────────────
 
 struct SharedState {
     /// 每会话的已安排任务。
     scheduled: HashMap<String, Vec<ScheduledTask>>,
+    /// 每会话最近互动状态，key 为 peer_id。
+    peers: HashMap<String, PeerActivity>,
     event_bus: Option<Addr<EventBus>>,
     logger: Option<PluginLogger>,
     mode: ProactiveMode,
@@ -128,8 +167,14 @@ struct SharedState {
     chat_id: String,
     /// 来源通道（env 覆盖，或自动检测）。
     source: String,
+    /// 当前工具调用应作用的会话，通常由最近一条 user.message 设置。
+    current_peer_id: String,
     chat_id_from_env: bool,
     source_from_env: bool,
+    autonomous_enabled: bool,
+    autonomous_idle: Duration,
+    autonomous_cooldown: Duration,
+    autonomous_min_user_messages: u64,
 }
 
 impl SharedState {
@@ -138,6 +183,74 @@ impl SharedState {
             l.info(msg);
         }
     }
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
+fn env_duration(name: &str, default_secs: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_secs),
+    )
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn chat_id_from_event(data: &serde_json::Value) -> Option<String> {
+    data.get("chat_id")
+        .and_then(|v| {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn source_from_event(data: &serde_json::Value) -> Option<String> {
+    data.get("source")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get("platform").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn peer_id_from_parts(source: &str, chat_id: &str) -> String {
+    if source.is_empty() {
+        chat_id.to_string()
+    } else {
+        format!("{}:{}", source, chat_id)
+    }
+}
+
+fn peer_id_from_event(data: &serde_json::Value, fallback_source: &str) -> Option<String> {
+    data.get("peer_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let source = source_from_event(data).unwrap_or_else(|| fallback_source.to_string());
+            let chat_id = chat_id_from_event(data)?;
+            Some(peer_id_from_parts(&source, &chat_id))
+        })
+}
+
+fn chat_id_from_peer_id(peer_id: &str) -> String {
+    peer_id
+        .split_once(':')
+        .map(|(_, id)| id.to_string())
+        .unwrap_or_else(|| peer_id.to_string())
 }
 
 /// 解析 `seconds` + `minutes` 参数，累加为总秒数。
@@ -190,11 +303,17 @@ impl ToolExecutor for ScheduleOnceTool {
             Ok(g) => g,
             Err(_) => return ToolResult::err("state lock poisoned"),
         };
-        let chat_id = s.chat_id.clone();
-        if chat_id.is_empty() {
+        let peer_id = if !s.current_peer_id.is_empty() {
+            s.current_peer_id.clone()
+        } else if !s.chat_id.is_empty() {
+            peer_id_from_parts(&s.source, &s.chat_id)
+        } else {
+            String::new()
+        };
+        if peer_id.is_empty() {
             return ToolResult::err("尚未确定目标会话，稍后再试");
         }
-        s.scheduled.entry(chat_id).or_default().push(ScheduledTask {
+        s.scheduled.entry(peer_id).or_default().push(ScheduledTask {
             kind: ScheduleKind::Once,
             send_at: Instant::now() + Duration::from_secs(delay),
             note: note.clone(),
@@ -240,11 +359,17 @@ impl ToolExecutor for ScheduleRecurringTool {
             Ok(g) => g,
             Err(_) => return ToolResult::err("state lock poisoned"),
         };
-        let chat_id = s.chat_id.clone();
-        if chat_id.is_empty() {
+        let peer_id = if !s.current_peer_id.is_empty() {
+            s.current_peer_id.clone()
+        } else if !s.chat_id.is_empty() {
+            peer_id_from_parts(&s.source, &s.chat_id)
+        } else {
+            String::new()
+        };
+        if peer_id.is_empty() {
             return ToolResult::err("尚未确定目标会话，稍后再试");
         }
-        s.scheduled.entry(chat_id).or_default().push(ScheduledTask {
+        s.scheduled.entry(peer_id).or_default().push(ScheduledTask {
             kind: ScheduleKind::Recurring(Duration::from_secs(delay)),
             send_at: Instant::now() + Duration::from_secs(delay),
             note: note.clone(),
@@ -274,21 +399,28 @@ impl ProactivePlugin {
         Self {
             info: PluginInfo {
                 name: "proactive-plugin".into(),
-                version: "0.2.0".into(),
-                description: "LLM 主动消息：工具驱动的一次性/循环定时，auto/semi-auto 模式".into(),
+                version: "0.3.0".into(),
+                description: "LLM 主动消息：工具驱动定时 + 空闲自主主动，auto/semi-auto 模式"
+                    .into(),
                 author: "demo".into(),
                 min_host_version: "0.1.0".into(),
             },
             state: Arc::new(Mutex::new(SharedState {
                 scheduled: HashMap::new(),
+                peers: HashMap::new(),
                 event_bus: None,
                 logger: None,
                 mode: ProactiveMode::Auto,
                 time_windows: Vec::new(),
                 chat_id: String::new(),
                 source: String::new(),
+                current_peer_id: String::new(),
                 chat_id_from_env: false,
                 source_from_env: false,
+                autonomous_enabled: false,
+                autonomous_idle: Duration::from_secs(30 * 60),
+                autonomous_cooldown: Duration::from_secs(60 * 60),
+                autonomous_min_user_messages: 1,
             })),
             running: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
@@ -308,6 +440,10 @@ impl Plugin for ProactivePlugin {
         let env_source = std::env::var("PROACTIVE_SOURCE").unwrap_or_default();
         let chat_id_from_env = !env_chat_id.is_empty();
         let source_from_env = !env_source.is_empty();
+        let autonomous_enabled = env_bool("PROACTIVE_AUTONOMOUS_ENABLED", true);
+        let autonomous_idle = env_duration("PROACTIVE_AUTONOMOUS_IDLE_SECS", 30 * 60);
+        let autonomous_cooldown = env_duration("PROACTIVE_AUTONOMOUS_COOLDOWN_SECS", 60 * 60);
+        let autonomous_min_user_messages = env_u64("PROACTIVE_AUTONOMOUS_MIN_USER_MESSAGES", 1);
 
         {
             let mut s = self.state.lock().unwrap();
@@ -317,8 +453,17 @@ impl Plugin for ProactivePlugin {
             s.time_windows = time_windows;
             s.chat_id = env_chat_id.clone();
             s.source = env_source.clone();
+            s.current_peer_id = if env_chat_id.is_empty() {
+                String::new()
+            } else {
+                peer_id_from_parts(&env_source, &env_chat_id)
+            };
             s.chat_id_from_env = chat_id_from_env;
             s.source_from_env = source_from_env;
+            s.autonomous_enabled = autonomous_enabled;
+            s.autonomous_idle = autonomous_idle;
+            s.autonomous_cooldown = autonomous_cooldown;
+            s.autonomous_min_user_messages = autonomous_min_user_messages;
         }
 
         // 注册工具给 LLM。
@@ -339,7 +484,7 @@ impl Plugin for ProactivePlugin {
         }
 
         ctx.logger.info(format!(
-            "started, mode={}, chat_id={}, source={}",
+            "started, mode={}, chat_id={}, source={}, autonomous={}, idle={}s, cooldown={}s",
             mode.as_str(),
             if chat_id_from_env {
                 env_chat_id.as_str()
@@ -351,6 +496,9 @@ impl Plugin for ProactivePlugin {
             } else {
                 "(auto-detect)"
             },
+            autonomous_enabled,
+            autonomous_idle.as_secs(),
+            autonomous_cooldown.as_secs(),
         ));
 
         // 启动后台轮询线程。
@@ -370,47 +518,73 @@ impl Plugin for ProactivePlugin {
             s.event_bus = None;
             s.logger = None;
             s.scheduled.clear();
+            s.peers.clear();
         }
         log::info!("[proactive-plugin] stopped");
     }
 
     fn on_event(&self, event: &Event) -> bool {
-        // 只关心用户消息：用于自动检测 chat_id/source，以及「用户回复即取消任务」。
-        if event.topic != "user.message" {
+        // 关心用户/助手消息：用于自动检测会话、记录活跃时间，以及「用户回复即取消任务」。
+        if event.topic != "user.message" && event.topic != "assistant.message" {
             return true;
         }
 
         if let Ok(mut s) = self.state.lock() {
+            let now = Instant::now();
+            let event_source = source_from_event(&event.data).unwrap_or_else(|| s.source.clone());
+            let event_chat_id = chat_id_from_event(&event.data);
+            let event_peer_id = peer_id_from_event(&event.data, &event_source);
+
             // ── 自动检测 chat_id ──
             if !s.chat_id_from_env && s.chat_id.is_empty() {
-                if let Some(cid) = event.data.get("chat_id").and_then(|v| {
-                    v.as_str()
-                        .map(String::from)
-                        .or_else(|| v.as_i64().map(|n| n.to_string()))
-                }) {
+                if let Some(cid) = event_chat_id.clone() {
                     s.chat_id = cid.clone();
                     s.log(format!("auto-detected chat_id={}", cid));
                 }
             }
             // ── 自动检测 source ──
             if !s.source_from_env && s.source.is_empty() {
-                if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
-                    s.source = src.to_string();
+                if let Some(src) = source_from_event(&event.data) {
+                    s.source = src.clone();
                     s.log(format!("auto-detected source={}", src));
                 }
             }
 
+            if let Some(peer_id) = event_peer_id.clone() {
+                let chat_id = event_chat_id
+                    .clone()
+                    .unwrap_or_else(|| chat_id_from_peer_id(&peer_id));
+                let source = if event_source.is_empty() {
+                    s.source.clone()
+                } else {
+                    event_source.clone()
+                };
+                let peer = s
+                    .peers
+                    .entry(peer_id.clone())
+                    .or_insert_with(|| PeerActivity::new(source.clone(), chat_id.clone()));
+                peer.source = source;
+                peer.chat_id = chat_id;
+                if event.topic == "user.message" {
+                    peer.last_user_at = Some(now);
+                    peer.user_message_count = peer.user_message_count.saturating_add(1);
+                    s.current_peer_id = peer_id;
+                } else {
+                    peer.last_assistant_at = Some(now);
+                }
+            }
+
             // ── 用户回复 → 取消该会话全部已安排任务 ──
-            let chat_id = s.chat_id.clone();
-            if !chat_id.is_empty() {
-                let event_cid = event.data.get("chat_id").and_then(|v| {
-                    v.as_str()
-                        .map(String::from)
-                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+            if event.topic == "user.message" {
+                let scheduled_key = event_peer_id.unwrap_or_else(|| {
+                    if !s.chat_id.is_empty() {
+                        peer_id_from_parts(&s.source, &s.chat_id)
+                    } else {
+                        String::new()
+                    }
                 });
-                // 事件无 chat_id 时按当前会话处理；有则需匹配。
-                if event_cid.as_deref().map(|c| c == chat_id).unwrap_or(true) {
-                    if let Some(tasks) = s.scheduled.get_mut(&chat_id) {
+                if !scheduled_key.is_empty() {
+                    if let Some(tasks) = s.scheduled.get_mut(&scheduled_key) {
                         if !tasks.is_empty() {
                             tasks.clear();
                             s.log("user replied — cancelled all scheduled tasks");
@@ -449,20 +623,17 @@ fn background_loop(state: Arc<Mutex<SharedState>>, running: Arc<AtomicBool>) {
     log::info!("[proactive-plugin] background loop stopped");
 }
 
-/// 一次轮询：检查到期任务，发布 `proactive.trigger` 事件。
+/// 一次轮询：检查到期任务和自主主动条件，发布 `proactive.trigger` 事件。
 fn tick(state: &Arc<Mutex<SharedState>>) {
-    // (chat_id, source, note)
-    let mut triggers: Vec<(String, String, Option<String>)> = Vec::new();
+    // (peer_id, chat_id, source, note, reason, idle_secs)
+    let mut triggers: Vec<(String, String, String, Option<String>, String, Option<u64>)> =
+        Vec::new();
 
     let event_bus = {
         let mut s = match state.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        let chat_id = s.chat_id.clone();
-        if chat_id.is_empty() {
-            return;
-        }
 
         // 半自动模式且不在时间窗口 → 不触发，任务原样保留（顺延，进入窗口后补发）。
         let in_window = match s.mode {
@@ -473,25 +644,91 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
             return;
         }
 
-        let source = s.source.clone();
         let now = Instant::now();
-        if let Some(tasks) = s.scheduled.get_mut(&chat_id) {
-            let mut keep: Vec<ScheduledTask> = Vec::with_capacity(tasks.len());
-            for mut task in tasks.drain(..) {
-                if now >= task.send_at {
-                    triggers.push((chat_id.clone(), source.clone(), task.note.clone()));
-                    match task.kind {
-                        ScheduleKind::Once => { /* 触发后丢弃 */ }
-                        ScheduleKind::Recurring(iv) => {
-                            task.send_at = now + iv; // 重新计时，继续循环
-                            keep.push(task);
+
+        let scheduled_keys: Vec<String> = s.scheduled.keys().cloned().collect();
+        for peer_id in scheduled_keys {
+            let source = s
+                .peers
+                .get(&peer_id)
+                .map(|p| p.source.clone())
+                .unwrap_or_else(|| s.source.clone());
+            let chat_id = s
+                .peers
+                .get(&peer_id)
+                .map(|p| p.chat_id.clone())
+                .unwrap_or_else(|| chat_id_from_peer_id(&peer_id));
+
+            if let Some(tasks) = s.scheduled.get_mut(&peer_id) {
+                let mut keep: Vec<ScheduledTask> = Vec::with_capacity(tasks.len());
+                for mut task in tasks.drain(..) {
+                    if now >= task.send_at {
+                        triggers.push((
+                            peer_id.clone(),
+                            chat_id.clone(),
+                            source.clone(),
+                            task.note.clone(),
+                            "scheduled".to_string(),
+                            None,
+                        ));
+                        match task.kind {
+                            ScheduleKind::Once => { /* 触发后丢弃 */ }
+                            ScheduleKind::Recurring(iv) => {
+                                task.send_at = now + iv; // 重新计时，继续循环
+                                keep.push(task);
+                            }
                         }
+                    } else {
+                        keep.push(task);
                     }
-                } else {
-                    keep.push(task);
                 }
+                *tasks = keep;
             }
-            *tasks = keep;
+        }
+
+        if s.autonomous_enabled {
+            let idle_threshold = s.autonomous_idle;
+            let cooldown = s.autonomous_cooldown;
+            let min_user_messages = s.autonomous_min_user_messages;
+            for (peer_id, peer) in s.peers.iter_mut() {
+                if peer.user_message_count < min_user_messages {
+                    continue;
+                }
+                let Some(last_interaction) = peer.last_interaction_at() else {
+                    continue;
+                };
+                let idle_for = now.saturating_duration_since(last_interaction);
+                if idle_for < idle_threshold {
+                    continue;
+                }
+                if peer
+                    .last_autonomous_at
+                    .map(|last| now.saturating_duration_since(last) < cooldown)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                peer.last_autonomous_at = Some(now);
+                triggers.push((
+                    peer_id.clone(),
+                    peer.chat_id.clone(),
+                    peer.source.clone(),
+                    None,
+                    "autonomous_idle".to_string(),
+                    Some(idle_for.as_secs()),
+                ));
+            }
+        }
+        for (peer_id, _, _, _, reason, idle_secs) in &triggers {
+            if let Some(secs) = idle_secs {
+                s.log(format!(
+                    "triggering {} for peer={} (idle={}s)",
+                    reason, peer_id, secs
+                ));
+            } else {
+                s.log(format!("triggering {} for peer={}", reason, peer_id));
+            }
         }
         s.event_bus.clone()
     };
@@ -500,19 +737,18 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
         return;
     }
     if let Some(bus) = event_bus {
-        for (chat_id, source, note) in triggers {
-            let peer_id = if source.is_empty() {
-                String::new()
-            } else {
-                format!("{}:{}", source, chat_id)
-            };
+        for (peer_id, chat_id, source, note, reason, idle_secs) in triggers {
             let mut data = serde_json::json!({
                 "chat_id": chat_id,
                 "source": source,
                 "peer_id": peer_id,
+                "reason": reason,
             });
             if let Some(n) = note {
                 data["note"] = serde_json::json!(n);
+            }
+            if let Some(secs) = idle_secs {
+                data["idle_secs"] = serde_json::json!(secs);
             }
             bus.do_send(Event::new("proactive.trigger", data, "proactive-plugin"));
         }

@@ -23,6 +23,8 @@ use crate::rate_limit_actor::RateLimitActor;
 use crate::retry_actor::{RetryActor, RetryChatRequest};
 use crate::token_usage_actor::TokenUsageActor;
 
+const NO_PROACTIVE_MARKER: &str = "[NO_PROACTIVE]";
+
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Incoming user message from any source (IM plugin, HTTP, etc.).
@@ -109,6 +111,8 @@ async fn process_message(
     // 存库时用的真实 user 文本：传 Some(String::new()) 可让本次 user 消息不入库（主动触发用）
     original_user_msg: Option<String>,
     allow_tools: bool,
+    defer_store: bool,
+    drop_reply_marker: Option<String>,
 ) {
     // 1. Rate limit check.
     let allowed = rate_limit_addr
@@ -169,7 +173,7 @@ async fn process_message(
             message: text.clone(),
             peer_id: peer_id.clone(),
             tools: tools.clone(),
-            skip_store: false,
+            skip_store: defer_store,
             contexts,
             jailbreak_index: None,
             image_base64,
@@ -250,6 +254,12 @@ async fn process_message(
 
     loop {
         if current_resp.tool_calls.is_empty() || tool_round >= max_tool_rounds {
+            let final_text = current_resp.content.trim();
+            let drop_final_reply = drop_reply_marker
+                .as_deref()
+                .map(|marker| final_text == marker)
+                .unwrap_or(false);
+
             // 持久化：工具调用链（不论最终有无文本回复，都要保存）
             if tool_round > 0 {
                 // 保存助手 tool_calls 消息（作为 tool role 结果的前导）
@@ -299,12 +309,27 @@ async fn process_message(
                     .to_string(),
                 });
             }
+            if defer_store
+                && tool_round == 0
+                && !current_resp.content.trim().is_empty()
+                && !drop_final_reply
+            {
+                store_addr.do_send(AppendJsonMessage {
+                    peer_id: peer_id.clone(),
+                    message_json: serde_json::json!({
+                        "role": "assistant",
+                        "content": current_resp.content.clone()
+                    })
+                    .to_string(),
+                });
+            }
             // 广播最终回复（仅当有文本且未通过 IM 工具直接发送时）
-            if !current_resp.content.trim().is_empty() && !already_sent_via_im {
+            if !current_resp.content.trim().is_empty() && !already_sent_via_im && !drop_final_reply
+            {
                 emit_reply(&current_resp.content, &source, &peer_id, &event_bus).await;
             }
             // 如果已通过 IM 工具发送，发静默事件通知插件对话已完成
-            if already_sent_via_im {
+            if already_sent_via_im && !drop_final_reply {
                 let chat_id = chat_id_from_peer_id(&peer_id, &source);
                 event_bus.do_send(Event::new(
                     "assistant.message",
@@ -536,6 +561,8 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 store_addr,
                 None,
                 true,
+                false,
+                None,
             )
             .await;
         }
@@ -579,8 +606,15 @@ impl Handler<Event> for PipelineActor {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let reason = event
+                .data
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("scheduled")
+                .to_string();
+            let idle_secs = event.data.get("idle_secs").and_then(|v| v.as_u64());
             // 这条提示作为临时 user 消息引导 LLM 主动开口；original_user_msg=Some("") 使其不入库。
-            let text = build_proactive_prompt(&note);
+            let text = build_proactive_prompt(&note, &reason, idle_secs);
 
             let retry_addr = self.retry_addr.clone();
             let plugin_manager = self.plugin_manager.clone();
@@ -618,6 +652,12 @@ impl Handler<Event> for PipelineActor {
                     store_addr,
                     Some(String::new()),
                     false,
+                    true,
+                    if reason == "autonomous_idle" {
+                        Some(NO_PROACTIVE_MARKER.to_string())
+                    } else {
+                        None
+                    },
                 )
                 .await;
             });
@@ -734,6 +774,8 @@ impl Handler<Event> for PipelineActor {
                 store_addr,
                 None,
                 true,
+                false,
+                None,
             )
             .await;
         });
@@ -757,8 +799,21 @@ async fn emit_reply(text: &str, source: &str, peer_id: &str, event_bus: &Addr<Ev
     event_bus.do_send(reply);
 }
 
-fn build_proactive_prompt(note: &str) -> String {
+fn build_proactive_prompt(note: &str, reason: &str, idle_secs: Option<u64>) -> String {
     let note = note.trim();
+    if reason == "autonomous_idle" {
+        let idle_part = idle_secs
+            .map(|secs| format!("用户已经沉默约 {} 秒。", secs))
+            .unwrap_or_default();
+        return format!(
+            "[系统·自主主动] {}现在你可以自主决定是否自然地找用户说一句话。\
+             如果上下文里用户刚结束话题、明确不想被打扰、或没有合适切入点，严格只输出 {}。\
+             如果适合开口，就延续最近的话题、关心用户状态，或轻轻开启一个新话题。\
+             直接输出要发送给用户的文本；不要解释你的决策，不要提及系统提示、沉默时间或主动插件。",
+            idle_part, NO_PROACTIVE_MARKER
+        );
+    }
+
     if note.is_empty() {
         return "[系统·主动消息] 距离上次和用户互动已经过去一段时间。现在请你主动、自然地给用户发一条消息——\
                 延续之前的话题或自然地开启新话题，符合你的人设。直接输出要发送给用户的文本；不要在消息里提及这条系统提示，就当是你自己想起来要找他。"
@@ -830,7 +885,7 @@ mod tests {
 
     #[test]
     fn proactive_prompt_with_note_is_reminder_only() {
-        let prompt = build_proactive_prompt("3秒后叫主人");
+        let prompt = build_proactive_prompt("3秒后叫主人", "scheduled", None);
 
         assert!(prompt.contains("[系统·定时提醒]"));
         assert!(prompt.contains("只完成这条定时提醒"));
@@ -839,9 +894,19 @@ mod tests {
 
     #[test]
     fn proactive_prompt_without_note_stays_open_ended() {
-        let prompt = build_proactive_prompt("");
+        let prompt = build_proactive_prompt("", "scheduled", None);
 
         assert!(prompt.contains("[系统·主动消息]"));
         assert!(!prompt.contains("[系统·定时提醒]"));
+    }
+
+    #[test]
+    fn proactive_prompt_for_autonomous_idle_is_distinct() {
+        let prompt = build_proactive_prompt("", "autonomous_idle", Some(1800));
+
+        assert!(prompt.contains("[系统·自主主动]"));
+        assert!(prompt.contains("用户已经沉默约 1800 秒"));
+        assert!(prompt.contains(NO_PROACTIVE_MARKER));
+        assert!(prompt.contains("不要提及系统提示、沉默时间或主动插件"));
     }
 }

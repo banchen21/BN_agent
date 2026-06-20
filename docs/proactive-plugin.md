@@ -4,10 +4,12 @@
 
 主动插件不直接调用 LLM，也不解析 `[SCHEDULE:N]` 文本标签。它只负责注册调度工具、保存定时任务，并在任务到期后发布触发事件。
 
-LLM 需要主动调用工具来安排未来消息：
+LLM 仍然可以主动调用工具来安排未来消息：
 
 - `proactive_schedule_once`：一次性主动消息或定时提醒
 - `proactive_schedule_recurring`：循环主动消息
+
+此外，插件也会记录会话活跃状态；开启自主主动后，用户沉默超过阈值且冷却结束时，插件会自己发布 `proactive.trigger`，让 Pipeline 回调 LLM 生成自然开场。
 
 ## 环境变量
 
@@ -18,6 +20,10 @@ LLM 需要主动调用工具来安排未来消息：
 | `PROACTIVE_LOOP_INTERVAL` | `5` | 后台轮询间隔，单位秒 |
 | `PROACTIVE_CHAT_ID` | 自动检测 | 目标会话 ID，留空时从 `user.message` 提取 |
 | `PROACTIVE_SOURCE` | 自动检测 | 消息来源通道，留空时从 `user.message` 提取 |
+| `PROACTIVE_AUTONOMOUS_ENABLED` | `true` | 是否开启空闲后的自主主动触发 |
+| `PROACTIVE_AUTONOMOUS_IDLE_SECS` | `1800` | 用户/助手最后互动后沉默多久才考虑主动开口 |
+| `PROACTIVE_AUTONOMOUS_COOLDOWN_SECS` | `3600` | 同一会话两次自主主动之间的最小间隔 |
+| `PROACTIVE_AUTONOMOUS_MIN_USER_MESSAGES` | `1` | 至少收到多少条用户消息后才允许自主主动 |
 
 ## 工作流程
 
@@ -29,6 +35,23 @@ LLM 需要主动调用工具来安排未来消息：
   -> PipelineActor 禁用工具并回调 LLM 生成主动回复文本
   -> route.message -> MessageRouter -> assistant.message -> IM 插件发送
 ```
+
+## 自主主动流程
+
+```text
+user.message / assistant.message 经过 EventBus
+  -> proactive-plugin 记录 peer 的最后互动时间
+  -> 后台 tick 检查 idle/cooldown/min_user_messages
+  -> 满足条件时发布 proactive.trigger(reason=autonomous_idle)
+  -> PipelineActor 使用自主主动提示词回调 LLM
+  -> LLM 判断不适合打扰时返回内部跳过标记，不发送也不写入历史
+  -> route.message -> MessageRouter -> assistant.message -> IM 插件发送
+```
+
+自主主动是对原有定时功能的扩展，不会替代 `proactive_schedule_once` / `proactive_schedule_recurring`。定时任务和自主触发共用 `proactive.trigger` 路由，但通过 `reason` 区分语义：
+
+- `scheduled`：由工具安排的定时任务，到期后完成提醒或主动消息。
+- `autonomous_idle`：无人安排，插件根据会话空闲状态自主触发；LLM 可判断此刻不适合打扰并跳过发送。
 
 用户一旦回复当前会话，proactive-plugin 会取消该会话全部已安排任务，避免旧提醒在用户已经回来后继续触发。
 
