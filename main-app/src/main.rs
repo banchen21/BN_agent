@@ -642,8 +642,14 @@ fn main() -> std::io::Result<()> {
                 Ok(actor) => {
                     let addr = actor.start();
                     log::info!("ChatStoreActor started");
-                    // Clear history on startup (development convenience).
-                    addr.do_send(ClearAll);
+                    let clear_history_on_start = std::env::var("CHAT_HISTORY_CLEAR_ON_START")
+                        .ok()
+                        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                        .unwrap_or(false);
+                    if clear_history_on_start {
+                        log::warn!("CHAT_HISTORY_CLEAR_ON_START=true; clearing chat history");
+                        addr.do_send(ClearAll);
+                    }
                     addr
                 }
                 Err(e) => {

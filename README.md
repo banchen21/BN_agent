@@ -107,6 +107,7 @@ cargo run -p main-app
 | `LLM_MODEL` | `deepseek-chat` | LLM 模型名 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API 端点 |
 | `LLM_MAX_HISTORY` | `15` | 历史对话轮数 |
+| `CHAT_HISTORY_CLEAR_ON_START` | `false` | 启动时是否清空短期聊天历史，默认保留 |
 | `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
 | `AGENT_LOOP_MAX_SLEEP_SECS` | `60` | Agent Loop 单步 sleep 上限 |
