@@ -1,6 +1,6 @@
 //! proactive-plugin — LLM 主动消息插件（工具驱动）。
 //!
-//! LLM 通过两个工具自行安排主动消息（**只设定冷却时间，不预写内容**）：
+//! LLM 通过两个工具自行安排主动消息（只设定冷却时间，可带到期备注）：
 //!   - `proactive_schedule_once`      一次性：经过 N 秒/分钟后触发一次
 //!   - `proactive_schedule_recurring` 循环：每隔 N 秒/分钟触发一次
 //!
@@ -165,14 +165,14 @@ impl ToolExecutor for ScheduleOnceTool {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
             ToolDef {
             name: "proactive_schedule_once".into(),
-            description: "安排一次性主动消息：经过指定冷却时间后，你会被再次唤起，根据当时的对话上下文主动给用户发一条消息。用于「过一会儿再主动找用户」。seconds 与 minutes 可同时给出，累加为总冷却时间。用户一旦回复，所有已安排任务都会被取消。".into(),
+            description: "安排一次性主动消息或定时提醒：经过指定冷却时间后，你会被再次唤起，根据当时的对话上下文主动给用户发一条消息。用于「过一会儿再主动找用户」或「几秒/几分钟后提醒、叫用户」。seconds 与 minutes 可同时给出，累加为总冷却时间。用户一旦回复，所有已安排任务都会被取消。".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "seconds": {"type": "integer", "description": "冷却秒数（与 minutes 累加）", "minimum": 0},
                     "minutes": {"type": "integer", "description": "冷却分钟数（与 seconds 累加）", "minimum": 0},
-                    "note": {"type": "string", "description": "可选：给未来的自己留一句备注，提示到时想聊什么"}
+                    "note": {"type": "string", "description": "可选：到期时要完成的提醒内容或主动联系目的。用户说“三秒后叫我”时，写“三秒到了，叫用户”这类到期任务，不要写成新的延迟安排。"}
                 }
             }),
         }
@@ -222,7 +222,7 @@ impl ToolExecutor for ScheduleRecurringTool {
                 "properties": {
                     "seconds": {"type": "integer", "description": "间隔秒数（与 minutes 累加）", "minimum": 0},
                     "minutes": {"type": "integer", "description": "间隔分钟数（与 seconds 累加）", "minimum": 0},
-                    "note": {"type": "string", "description": "可选：给未来的自己留一句备注"}
+                    "note": {"type": "string", "description": "可选：每次到期时要完成的提醒内容或主动联系目的。"}
                 }
             }),
         }

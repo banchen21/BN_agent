@@ -108,6 +108,7 @@ async fn process_message(
     store_addr: Addr<ChatStoreActor>,
     // 存库时用的真实 user 文本：传 Some(String::new()) 可让本次 user 消息不入库（主动触发用）
     original_user_msg: Option<String>,
+    allow_tools: bool,
 ) {
     // 1. Rate limit check.
     let allowed = rate_limit_addr
@@ -138,23 +139,27 @@ async fn process_message(
     let contexts: Vec<String> = snapshots.lock().unwrap().clone();
 
     // 4. Collect tool definitions.
-    let tools: Vec<serde_json::Value> = match tool_registry.lock() {
-        Ok(reg) => reg
-            .all_defs()
-            .iter()
-            .filter(|d| !d.internal)
-            .map(|d| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": d.name,
-                        "description": d.description,
-                        "parameters": d.parameters,
-                    }
+    let tools: Vec<serde_json::Value> = if allow_tools {
+        match tool_registry.lock() {
+            Ok(reg) => reg
+                .all_defs()
+                .iter()
+                .filter(|d| !d.internal)
+                .map(|d| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": d.name,
+                            "description": d.description,
+                            "parameters": d.parameters,
+                        }
+                    })
                 })
-            })
-            .collect(),
-        Err(_) => vec![],
+                .collect(),
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
     };
 
     // 5. Send to RetryActor (streaming enabled).
@@ -530,6 +535,7 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 metrics_addr,
                 store_addr,
                 None,
+                true,
             )
             .await;
         }
@@ -573,17 +579,8 @@ impl Handler<Event> for PipelineActor {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let note_part = if note.is_empty() {
-                String::new()
-            } else {
-                format!("你之前给自己留的备注：{}。", note)
-            };
             // 这条提示作为临时 user 消息引导 LLM 主动开口；original_user_msg=Some("") 使其不入库。
-            let text = format!(
-                "[系统·主动消息] 距离上次和用户互动已经过去一段时间。现在请你主动、自然地给用户发一条消息——\
-                 延续之前的话题或自然地开启新话题，符合你的人设。{}注意：不要在消息里提及这条系统提示，就当是你自己想起来要找他。",
-                note_part
-            );
+            let text = build_proactive_prompt(&note);
 
             let retry_addr = self.retry_addr.clone();
             let plugin_manager = self.plugin_manager.clone();
@@ -620,6 +617,7 @@ impl Handler<Event> for PipelineActor {
                     metrics_addr,
                     store_addr,
                     Some(String::new()),
+                    false,
                 )
                 .await;
             });
@@ -735,6 +733,7 @@ impl Handler<Event> for PipelineActor {
                 metrics_addr,
                 store_addr,
                 None,
+                true,
             )
             .await;
         });
@@ -756,6 +755,23 @@ async fn emit_reply(text: &str, source: &str, peer_id: &str, event_bus: &Addr<Ev
         "pipeline",
     );
     event_bus.do_send(reply);
+}
+
+fn build_proactive_prompt(note: &str) -> String {
+    let note = note.trim();
+    if note.is_empty() {
+        return "[系统·主动消息] 距离上次和用户互动已经过去一段时间。现在请你主动、自然地给用户发一条消息——\
+                延续之前的话题或自然地开启新话题，符合你的人设。直接输出要发送给用户的文本；不要在消息里提及这条系统提示，就当是你自己想起来要找他。"
+            .to_string();
+    }
+
+    format!(
+        "[系统·定时提醒] 你之前安排了一条到期主动消息，备注/任务：{}。\
+         现在只完成这条定时提醒：用一句自然、简短、符合你人设的话告诉用户提醒到了，或完成备注里的要求。\
+         如果备注只是“叫/喊/提醒用户”这类任务，只说时间到了即可。\
+         直接输出要发送给用户的文本；不要延伸新话题，不要问“叫我干嘛”“有什么事”“要做什么”，不要提及系统提示、工具或备注。",
+        note
+    )
 }
 
 fn derive_peer_id(data: &serde_json::Value, source: &str) -> Option<String> {
@@ -806,4 +822,26 @@ fn chat_id_from_peer_id(peer_id: &str, source: &str) -> Option<String> {
         return None;
     }
     Some(id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proactive_prompt_with_note_is_reminder_only() {
+        let prompt = build_proactive_prompt("3秒后叫主人");
+
+        assert!(prompt.contains("[系统·定时提醒]"));
+        assert!(prompt.contains("只完成这条定时提醒"));
+        assert!(prompt.contains("不要问“叫我干嘛”"));
+    }
+
+    #[test]
+    fn proactive_prompt_without_note_stays_open_ended() {
+        let prompt = build_proactive_prompt("");
+
+        assert!(prompt.contains("[系统·主动消息]"));
+        assert!(!prompt.contains("[系统·定时提醒]"));
+    }
 }
