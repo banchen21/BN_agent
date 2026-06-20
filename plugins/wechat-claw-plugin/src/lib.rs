@@ -1,7 +1,7 @@
 //! wechat-claw-plugin — 微信 iLink Bot API 插件
 //!
-//! Powered by weixin-ilink-sdk for full protocol support (QR login, long-poll,
-//! text + media messaging, CDN upload/download, voice decoding).
+//! Powered by a private iLink implementation for QR login, long-poll,
+//! text + media messaging, CDN upload/download, and voice handling.
 //!
 //! ## 事件流转
 //!
@@ -20,6 +20,7 @@
 //! ```
 
 mod client;
+mod ilink_sdk;
 
 use client::*;
 use plugin_interface::*;
@@ -370,7 +371,7 @@ impl Plugin for WechatClawPlugin {
         PluginInfo {
             name: "wechat-claw-plugin".into(),
             version: "0.2.0".into(),
-            description: "WeChat IM plugin — iLink Bot API (powered by weixin-ilink-sdk)".into(),
+            description: "WeChat IM plugin — iLink Bot API with private client".into(),
             author: "BN Team".into(),
             min_host_version: "0.1.0".into(),
         }
@@ -984,7 +985,7 @@ async fn poll_loop(
 
 // ── Incoming media handlers ──────────────────────────────────────────────────
 
-use weixin_ilink_sdk::types::{FileItem, ImageItem, MessageItemType, VideoItem, VoiceItem};
+use crate::ilink_sdk::types::{FileItem, ImageItem, MessageItemType, VideoItem, VoiceItem};
 
 async fn handle_incoming_image(
     wechat: &WeChatClient,

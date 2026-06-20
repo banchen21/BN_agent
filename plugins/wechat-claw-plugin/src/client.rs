@@ -1,4 +1,4 @@
-//! SDK adapter layer — wraps weixin-ilink-sdk for the clawbot plugin system.
+//! Private iLink adapter layer for the clawbot plugin system.
 //!
 //! Provides a non-generic [`WeChatClient`] that encapsulates:
 //! - QR login via iLink Bot API
@@ -9,14 +9,15 @@
 //! - Typing indicator
 //! - Session persistence (JSON file)
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::ilink_sdk::ILinkClient;
+use crate::ilink_sdk::auth::{LoginHandler, LoginResult};
+use crate::ilink_sdk::types::{GetUpdatesResponse, MessageItem, TypingStatus};
+use crate::ilink_sdk::voice;
 use serde::{Deserialize, Serialize};
-use weixin_ilink_sdk::auth::{LoginHandler, LoginResult};
-use weixin_ilink_sdk::types::{GetUpdatesResponse, Message, MessageItem, MessageItemType, TypingStatus};
-use weixin_ilink_sdk::ILinkClient;
 
 // ── Session Info ───────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ pub struct WeChatClient {
     pub session: WechatSessionInfo,
 }
 
+#[allow(dead_code)]
 impl WeChatClient {
     // ── Login ──────────────────────────────────────────────────────────
 
@@ -90,7 +92,7 @@ impl WeChatClient {
             inner: Arc::new(client),
             session: WechatSessionInfo {
                 token,
-                base_url: weixin_ilink_sdk::client::DEFAULT_BASE_URL.to_string(),
+                base_url: crate::ilink_sdk::client::DEFAULT_BASE_URL.to_string(),
                 account_id: String::new(),
                 user_id: String::new(),
             },
@@ -98,9 +100,7 @@ impl WeChatClient {
     }
 
     /// Login with a handler that also captures the full `LoginResult`.
-    pub async fn login_with_result(
-        handler: &PluginLoginHandler,
-    ) -> Result<Self, String> {
+    pub async fn login_with_result(handler: &PluginLoginHandler) -> Result<Self, String> {
         let client = ILinkClient::builder()
             .login(handler as &dyn LoginHandler)
             .await
@@ -121,7 +121,7 @@ impl WeChatClient {
                     .base_url
                     .clone()
                     .filter(|u| !u.is_empty())
-                    .unwrap_or_else(|| weixin_ilink_sdk::client::DEFAULT_BASE_URL.to_string()),
+                    .unwrap_or_else(|| crate::ilink_sdk::client::DEFAULT_BASE_URL.to_string()),
                 account_id: result.ilink_bot_id,
                 user_id: result.user_id.unwrap_or_default(),
             },
@@ -144,11 +144,7 @@ impl WeChatClient {
     // ── Messaging ──────────────────────────────────────────────────────
 
     /// Long-poll for new messages.
-    pub async fn poll_messages(
-        &self,
-        buf: &str,
-        timeout_secs: u64,
-    ) -> Result<PollResult, String> {
+    pub async fn poll_messages(&self, buf: &str, timeout_secs: u64) -> Result<PollResult, String> {
         let timeout = Duration::from_secs(timeout_secs);
         let resp: GetUpdatesResponse = self
             .inner
@@ -181,19 +177,11 @@ impl WeChatClient {
             }
         }
 
-        Ok(PollResult {
-            messages,
-            next_buf,
-        })
+        Ok(PollResult { messages, next_buf })
     }
 
     /// Send a plain text message.
-    pub async fn send_text(
-        &self,
-        to: &str,
-        text: &str,
-        context_token: &str,
-    ) -> Result<(), String> {
+    pub async fn send_text(&self, to: &str, text: &str, context_token: &str) -> Result<(), String> {
         self.inner
             .send_text(to, text, context_token)
             .await
@@ -314,9 +302,13 @@ impl WeChatClient {
         encrypt_query_param: &str,
         aes_key_base64: &str,
     ) -> Result<Vec<u8>, String> {
-        weixin_ilink_sdk::cdn::download_and_decrypt(&self.inner, encrypt_query_param, aes_key_base64)
-            .await
-            .map_err(|e| format!("cdn download: {e}"))
+        crate::ilink_sdk::cdn::download_and_decrypt(
+            &self.inner,
+            encrypt_query_param,
+            aes_key_base64,
+        )
+        .await
+        .map_err(|e| format!("cdn download: {e}"))
     }
 
     /// Download and decrypt a CDN media file using hex-encoded AES key (images).
@@ -325,28 +317,28 @@ impl WeChatClient {
         encrypt_query_param: &str,
         aeskey_hex: &str,
     ) -> Result<Vec<u8>, String> {
-        weixin_ilink_sdk::cdn::download_and_decrypt_hex_key(&self.inner, encrypt_query_param, aeskey_hex)
-            .await
-            .map_err(|e| format!("cdn download (hex): {e}"))
+        crate::ilink_sdk::cdn::download_and_decrypt_hex_key(
+            &self.inner,
+            encrypt_query_param,
+            aeskey_hex,
+        )
+        .await
+        .map_err(|e| format!("cdn download (hex): {e}"))
     }
 
     /// Download a voice message: CDN → decrypt → decode SILK → WAV.
     pub async fn download_voice(
         &self,
-        voice_item: &weixin_ilink_sdk::types::VoiceItem,
+        voice_item: &crate::ilink_sdk::types::VoiceItem,
     ) -> Result<Vec<u8>, String> {
         #[cfg(feature = "voice")]
         let decoder: Option<&voice::DefaultSilkDecoder> = Some(&voice::DefaultSilkDecoder);
         #[cfg(not(feature = "voice"))]
         let decoder: Option<&dyn voice::SilkDecoder> = None;
 
-        let data = voice::download_voice(
-            &self.inner,
-            voice_item,
-            decoder,
-        )
-        .await
-        .map_err(|e| format!("voice download: {e}"))?;
+        let data = voice::download_voice(&self.inner, voice_item, decoder)
+            .await
+            .map_err(|e| format!("voice download: {e}"))?;
         Ok(data.data)
     }
 
@@ -496,6 +488,3 @@ mod session_persist {
 }
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
-
-pub use weixin_ilink_sdk::types::MessageItemType as SdkMessageItemType;
-pub use weixin_ilink_sdk::voice;

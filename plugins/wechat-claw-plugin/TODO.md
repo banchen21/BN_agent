@@ -1,20 +1,20 @@
 # 微信插件开发计划
 
-> 状态：v0.2.0 | iLink Bot API（腾讯官方协议）| 基于 weixin-ilink-sdk
+> 状态：v0.2.0 | iLink Bot API（腾讯官方协议）| 插件内置私有实现
 > 基座：`https://ilinkai.weixin.qq.com`
 
 ## ✅ 已完成
 
 ### 登录
-- [x] QR 码登录流程（SDK: `ILinkClient::builder().login()`）
+- [x] QR 码登录流程（私有 `ILinkClient::builder().login()`）
 - [x] 二维码 PNG 生成（终端/文件）
-- [x] 自动刷新过期二维码（SDK 内部处理，最多 3 次）
+- [x] 自动刷新过期二维码（私有实现内部处理，最多 3 次）
 - [x] token 持久化到 `data/wechat_session.json`，重启免扫码
 
 ### 文本消息
 - [x] 长轮询收消息（35s 挂起）
 - [x] 发送文本消息（含 context_token）
-- [x] 自动管理 context_token（SDK 内置缓存）
+- [x] 自动管理 context_token（私有实现内置缓存）
 - [x] 断线检测（errcode -14）→ 自动清除 token → 重新登录
 - [x] `wechat_send_message` 工具
 
@@ -29,30 +29,30 @@
 - [x] `wechat_qrcode` 工具
 - [x] 后台登录/轮询线程
 
-### SDK 集成
-- [x] 迁移至 `weixin-ilink-sdk-rust`（类型安全 + 完整协议支持）
+### iLink 实现
+- [x] iLink 客户端内聚到插件内（类型安全 + 完整协议支持）
 - [x] 删除 hand-rolled `protocol.rs`（~510 行）
-- [x] SDK 适配层 `client.rs`（`WeChatClient` 包装器）
+- [x] 插件适配层 `client.rs`（`WeChatClient` 包装器）
 
 ## 🔧 待完善
 
 ### 图片消息
-- [x] 基础设施：CDN 下载 + AES-128-ECB 解密 → base64（SDK 已集成）
-- [x] 发送端：`wechat_send_image` 工具 + CDN 上传管线（SDK 已集成）
+- [x] 基础设施：CDN 下载 + AES-128-ECB 解密 → base64（私有实现已集成）
+- [x] 发送端：`wechat_send_image` 工具 + CDN 上传管线（私有实现已集成）
 - [ ] **联调验证**：真实微信环境端到端测试
 - [ ] 缩略图处理
 - [ ] 大图/原图下载（hd_size 字段）
 
 ### 语音消息
-- [x] 基础设施：CDN 下载 + 解密 → SILK → WAV（SDK 已集成，voice feature 可选）
+- [x] 基础设施：CDN 下载 + 解密 → SILK → WAV（私有实现已集成，voice feature 可选）
 - [ ] **联调验证**：真实微信环境端到端测试
 - [ ] 启用 `voice` feature（需 libclang → silk-codec 编译）
 - [ ] 与 asr-tts-plugin 深度集成（语音识别/合成 pipeline）
 - [ ] 语音发送工具（WAV → SILK 编码 + CDN 上传）
 
 ### 视频消息
-- [x] 基础设施：CDN 下载 + 解密 → base64（SDK 已集成）
-- [x] 发送端：CDN 上传管线（SDK 已集成）
+- [x] 基础设施：CDN 下载 + 解密 → base64（私有实现已集成）
+- [x] 发送端：CDN 上传管线（私有实现已集成）
 - [ ] **联调验证**：真实微信环境端到端测试
 - [ ] 视频缩略图处理
 
