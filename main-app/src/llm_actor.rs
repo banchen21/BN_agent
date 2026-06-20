@@ -29,7 +29,11 @@ pub struct LlmConfig {
     pub max_history_turns: usize,
     pub max_tokens: u32,
     pub thinking: bool,
+    /// 固定采样温度，避免回复风格忽冷忽热。
+    pub temperature: f32,
     pub jailbreak_prompts: Vec<String>,
+    /// 破限词默认索引；None 表示每次随机。
+    pub jailbreak_default_index: Option<usize>,
     pub image_model: String,
     pub image_base_url: String,
     pub image_api_key: String,
@@ -54,6 +58,14 @@ impl LlmConfig {
 
         let jailbreak_prompts = Self::load_jailbreak_prompts();
 
+        // 破限词默认索引：固定一条，避免人格在多模态请求间漂移。
+        // 默认 0（第一条）；设为 JAILBREAK_INDEX=random（或 -1）可恢复每次随机。
+        let jailbreak_default_index = match std::env::var("JAILBREAK_INDEX").ok().as_deref() {
+            Some("random") | Some("-1") => None,
+            Some(s) => Some(s.parse().unwrap_or(0)),
+            None => Some(0),
+        };
+
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
 
@@ -64,6 +76,10 @@ impl LlmConfig {
             .ok().map(|v| v.to_lowercase())
             .map(|v| v == "enabled" || v == "true" || v == "1")
             .unwrap_or(false);
+
+        // 固定采样温度，避免回复风格忽冷忽热。默认 0.8，可用 LLM_TEMPERATURE 覆盖。
+        let temperature = std::env::var("LLM_TEMPERATURE")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(0.8);
 
         let image_model = std::env::var("IMAGE_MODEL")
             .unwrap_or_else(|_| "mimo-v2.5".into());
@@ -80,7 +96,8 @@ impl LlmConfig {
 
         Ok(Self {
             api_key, model, base_url, system_prompt, max_history_turns, max_tokens, thinking,
-            jailbreak_prompts, image_model, image_base_url, image_api_key,
+            temperature, jailbreak_prompts, jailbreak_default_index,
+            image_model, image_base_url, image_api_key,
             video_model, video_base_url, video_api_key,
         })
     }
@@ -184,7 +201,7 @@ impl Handler<LlmRequest> for LlmActor {
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
-            "temperature": msg.temperature.unwrap_or(rand::thread_rng().gen_range(0.7..=1.2)),
+            "temperature": msg.temperature.unwrap_or(self.config.temperature),
             "max_tokens": msg.max_tokens.unwrap_or(1024),
         });
 
@@ -209,42 +226,46 @@ impl Handler<ChatRequest> for LlmActor {
         let event_bus = self.event_bus.clone();
         let store_addr = self.store_addr.clone();
 
-        // 破限词：多模态请求或工具调用时自动随机选取
+        // 破限词：仅在多模态请求时随机选取，不在纯文本工具调用时注入
         let jailbreak = msg.jailbreak_index
             .or_else(|| {
-                let has_tools = !msg.tools.is_empty();
                 let is_multimodal = msg.image_base64.is_some()
                     || msg.video_base64.is_some()
                     || msg.file_base64.is_some();
-                if (is_multimodal || has_tools) && !self.config.jailbreak_prompts.is_empty() {
-                    use rand::Rng;
-                    Some(rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len()))
+                if is_multimodal && !self.config.jailbreak_prompts.is_empty() {
+                    // 固定索引，避免人格在多模态请求间漂移；
+                    // 仅当 jailbreak_default_index 为 None（JAILBREAK_INDEX=random）时才随机
+                    match self.config.jailbreak_default_index {
+                        Some(i) => Some(i),
+                        None => Some(rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len())),
+                    }
                 } else {
                     None
                 }
             })
             .and_then(|i| self.config.jailbreak_at(i));
-        // system_content 构建顺序：persona → jailbreak（如果有）→ tool_hint（在下面追加）
-        // 利用 LLM 近因效应让工具提示在后，权重更高
-        let system_content = if let Some(jb) = jailbreak {
-            format!("{}\n\n{}", self.config.system_prompt, jb)
+        let tools = msg.tools.clone();
+
+        // system_content 构建顺序：tool_hint → jailbreak → persona
+        // persona 在最后，近因效应让它权重最高，工具提示不覆盖人设
+        let persona = self.config.system_prompt.clone();
+        let tool_hint = if !tools.is_empty() {
+            build_tool_hint(&tools, &msg.source)
         } else {
-            self.config.system_prompt.clone()
+            String::new()
         };
+        let mut system_parts: Vec<String> = Vec::new();
+        if !tool_hint.is_empty() {
+            system_parts.push(tool_hint);
+        }
+        if let Some(jb) = jailbreak {
+            system_parts.push(jb.to_string());
+        }
+        system_parts.push(persona);
+        let system_content = system_parts.join("\n\n");
         // Immediate context: recent N messages (env IMMEDIATE_CONTEXT_MSGS, default 200 = 100 rounds).
         let immediate_limit: usize = std::env::var("IMMEDIATE_CONTEXT_MSGS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
-
-        let tools = msg.tools.clone();
-
-        // 动态生成工具提示（从实际注册的工具列表中提取）
-        // 顺序：persona → jailbreak → tool_hint（近因效应让工具提示权重最高）
-        let tool_hint = build_tool_hint(&tools);
-        let system_content = if !tools.is_empty() {
-            format!("{}\n\n{}", system_content, tool_hint)
-        } else {
-            system_content
-        };
         let user_msg = msg.message.clone();
         let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
@@ -266,6 +287,7 @@ impl Handler<ChatRequest> for LlmActor {
         let base_url = self.config.base_url.clone();
         let api_key = self.config.api_key.clone();
         let thinking = self.config.thinking;
+        let temperature = self.config.temperature;
 
         event_bus.do_send(Event::new("llm.request", serde_json::json!({
             "model": model, "mode": "chat",
@@ -285,13 +307,17 @@ impl Handler<ChatRequest> for LlmActor {
                 }
             }
 
-            // ── 2. System + memory fragments ──
-            let mut messages: Vec<serde_json::Value> = vec![
-                serde_json::json!({ "role": "system", "content": system_content }),
-            ];
+            // ── 2. System message with all plugin contexts baked in ──
+            let mut full_system = system_content.clone();
             for ctx in &memory_ctx {
-                messages.push(serde_json::json!({ "role": "assistant", "content": ctx }));
+                full_system.push_str(&format!("\n\n[记忆] {}", ctx));
             }
+            for ctx in &other_ctx {
+                full_system.push_str(&format!("\n\n[上下文] {}", ctx));
+            }
+            let mut messages: Vec<serde_json::Value> = vec![
+                serde_json::json!({ "role": "system", "content": full_system }),
+            ];
 
             // ── 3. Recent history (last 4 messages for immediate context) ──
             let records = store_addr.send(FetchRecent { limit: immediate_limit }).await.unwrap_or_default();
@@ -320,12 +346,7 @@ impl Handler<ChatRequest> for LlmActor {
                 }));
             }
 
-            // ── 4. Other plugin contexts ──
-            for ctx in &other_ctx {
-                messages.push(serde_json::json!({ "role": "assistant", "content": ctx }));
-            }
-
-            // ── 4b. Follow-up: assistant tool_calls + tool results (DeepSeek API spec) ──
+            // ── 4. Follow-up: assistant tool_calls + tool results (DeepSeek API spec) ──
             let assistant_tool_calls = msg.assistant_tool_calls.clone();
             let tool_results = msg.tool_results.clone();
             if !assistant_tool_calls.is_empty() {
@@ -405,7 +426,7 @@ impl Handler<ChatRequest> for LlmActor {
             let mut body = serde_json::json!({
                 "model": actual_model,
                 "messages": messages,
-                "temperature": rand::thread_rng().gen_range(0.7..=1.2),
+                "temperature": temperature,
                 "max_tokens": max_tokens,
             });
             if !tools.is_empty() {
@@ -443,7 +464,7 @@ impl Handler<ChatRequest> for LlmActor {
                     let mut fallback_body = serde_json::json!({
                         "model": default_model,
                         "messages": fallback_messages,
-                        "temperature": rand::thread_rng().gen_range(0.7..=1.2),
+                        "temperature": temperature,
                         "max_tokens": max_tokens,
                     });
                     if !tools.is_empty() {
@@ -481,7 +502,7 @@ impl Handler<ChatRequest> for LlmActor {
                     let mut fallback_body = serde_json::json!({
                         "model": default_model,
                         "messages": fallback_messages,
-                        "temperature": rand::thread_rng().gen_range(0.7..=1.2),
+                        "temperature": temperature,
                         "max_tokens": max_tokens,
                     });
                     if !tools.is_empty() {
@@ -836,42 +857,47 @@ fn should_fallback_to_tools(result: &Result<LlmResponse, String>) -> bool {
     }
 }
 
-/// 从 tools JSON 数组中动态生成工具提示文本。
-/// 建立 Agent 身份意识 + 分类陈列可用工具。
-fn build_tool_hint(tools: &[serde_json::Value]) -> String {
-    let mut send_tools = Vec::new();
-    let mut other_tools = Vec::new();
+/// 精简的工具提示，放最前面不抢人设权重。
+fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
+    let mut names: Vec<&str> = Vec::new();
     for tool in tools {
-        let func = match tool.get("function") {
-            Some(f) => f,
-            None => continue,
-        };
-        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let desc = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        if name.is_empty() { continue; }
-        let line = format!("- {}：{}", name, desc);
-        if name.contains("send") || name.contains("message") || name.contains("voice") {
-            send_tools.push(line);
-        } else {
-            other_tools.push(line);
+        if let Some(func) = tool.get("function") {
+            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
         }
     }
-    let mut lines = vec![
-        "【Core Rules】".to_string(),
-        "You have tools. User requests (send msg, generate image, query info, process files, etc.) MUST use tools. Never describe operations in text.".to_string(),
-        "Do NOT send confirmation text after calling tools — the system handles delivery automatically.".to_string(),
-        String::new(),
-    ];
-    if !send_tools.is_empty() {
-        lines.push("【Send Tools (direct to user chat)】".to_string());
-        lines.extend(send_tools);
-        lines.push(String::new());
+    if names.is_empty() {
+        return String::new();
     }
-    if !other_tools.is_empty() {
-        lines.push("【Other Tools (query / generate / process)】".to_string());
-        lines.extend(other_tools);
-    }
-    lines.join("\n")
+
+    let platform_name = match source {
+        "telegram" => "Telegram",
+        "wechat" => "微信",
+        "feishu" => "飞书",
+        _ => source,
+    };
+
+    let send_names: Vec<_> = names.iter().filter(|n| n.contains("send") || n.contains("message") || n.contains("voice")).collect();
+    let send_str = if send_names.is_empty() {
+        String::new()
+    } else {
+        format!("发消息用 {}；", send_names.iter().map(|n| n.replace("tg_", "").replace("feishu_", "").replace("wechat_", "")).collect::<Vec<_>>().join("、"))
+    };
+
+    let other_names: Vec<_> = names.iter().filter(|n| !n.contains("send") && !n.contains("message") && !n.contains("voice")).collect();
+    let other_str = if other_names.is_empty() {
+        String::new()
+    } else {
+        other_names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("、")
+    };
+
+    format!(
+        "你在 {platform_name} 上和用户聊天。{send_str}{}如果回复后想隔一会儿再追问，在最后加一行 [SCHEDULE:秒数] 想说的话，比如 [SCHEDULE:120] 在干嘛呀。不想追问就不加。",
+        if other_names.is_empty() { String::new() } else { format!("其他可用：{}。", other_str) }
+    )
 }
 
 fn truncate_preview(s: &str, max: usize) -> &str {
