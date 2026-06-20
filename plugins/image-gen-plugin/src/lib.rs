@@ -26,6 +26,9 @@ const NSFW_NEGATIVE: &str = "worst quality, low quality, bad anatomy, bad hands,
 
 const FACE_PROMPT: &str = "1girl, solo, extremely long twin tails, waist length twintails, very long white hair, silver hair, bangs, white sailor shirt, unbuttoned shirt, shirt open, visible cleavage, showing cleavage, bra visible, midriff exposed, bare waist, bare midriff, red ribbon, red pleated miniskirt, white thighhighs, black mary jane shoes, medium breasts, b cup, sitting on bed, soft bed, cozy bedroom, soft indoor lighting, looking at viewer, teasing, seductive smile, soft cute face, big eyes, fair skin, flawless skin, high quality, realistic, douyin style, loli face, innocent, perfect face";
 
+/// NSFW 模式用：只保留人物特征（头发、脸、身材），不含任何服装。
+const NSFW_FACE_PROMPT: &str = "1girl, solo, extremely long twin tails, waist length twintails, very long white hair, silver hair, bangs, medium breasts, b cup, looking at viewer, seductive smile, soft cute face, big eyes, fair skin, flawless skin, high quality, realistic, douyin style, loli face, innocent, perfect face";
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())
 }
@@ -202,7 +205,8 @@ impl ImageGenPlugin {
         height: u64,
         nsfw: bool,
     ) -> serde_json::Value {
-        let full_prompt = format!("{}, {}", FACE_PROMPT, prompt);
+        let face = if nsfw { NSFW_FACE_PROMPT } else { FACE_PROMPT };
+        let full_prompt = format!("{}, {}", face, prompt);
         let neg = if nsfw { NSFW_NEGATIVE } else { negative };
         let wf_str = WORKFLOW_TEMPLATE
             .replace("PROMPT_HERE", &full_prompt)
@@ -295,7 +299,7 @@ impl ToolExecutor for GenerateImageTool {
         static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
         DEF.get_or_init(|| ToolDef {
             name: "generate_image".into(),
-            description: "【生成照片】生图后根据来源平台选择发送工具：[微信用户]→wechat_send_photo, [Telegram]→tg_send_photo。不要用错平台的发送工具。英文Danbooru标签描述服装场景。生成后不要回复文字。".into(),
+            description: "Generate an anime-style image. Describe clothing+scene+pose in English Danbooru tags. The tool returns the saved local file path; after generating you MUST send it to the user by calling the current platform's send tool (tg_send_photo for Telegram, wechat_send_image for WeChat) with that path as the file_path argument. Do not describe the result in text — just send it.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -362,7 +366,7 @@ impl ToolExecutor for GenerateImageTool {
             eb.do_send(Event::new(
                 "image.gen.complete",
                 serde_json::json!({
-                    "path": full_path,
+                    "path": full_path.clone(),
                     "filename": filename,
                     "prompt": gen_args.prompt,
                     "seed": gen_args.seed,
@@ -374,8 +378,8 @@ impl ToolExecutor for GenerateImageTool {
         }
 
         ToolResult::ok(&format!(
-            "图片生成成功！\n文件: {}\n尺寸: {}x{}\n种子: {}\n提示词: {}\n\n【重要】请根据消息来源选择发送工具：如果消息以[微信用户]开头→调用wechat_send_photo发送此图片；如果以[Telegram]开头→调用tg_send_photo。必须发送，不要只回复文字。",
-            full_path, gen_args.width, gen_args.height, gen_args.seed, gen_args.prompt
+            "图片已生成 ({}x{} seed={})，本地文件路径：{}。请立即调用当前平台的发送图片工具（Telegram 用 tg_send_photo，微信用 wechat_send_image），把该路径作为 file_path 参数发送给用户；不要用文字描述图片内容。",
+            gen_args.width, gen_args.height, gen_args.seed, full_path
         ))
     }
 }
