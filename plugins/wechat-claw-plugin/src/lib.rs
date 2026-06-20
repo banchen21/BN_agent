@@ -78,10 +78,19 @@ impl ToolExecutor for SendWechatMessage {
             None => return ToolResult::err("微信未登录，请先扫码"),
         };
 
-        let text = match args.get("text").and_then(|v| v.as_str()) {
+        let mut text = match args.get("text").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(),
             None => return ToolResult::err("missing: text"),
         };
+        // Strip [SCHEDULE:N] line
+        if let Some(tag_pos) = text.find("[SCHEDULE:") {
+            if let Some(newline_pos) = text[..tag_pos].rfind('\n') {
+                text.truncate(newline_pos);
+            } else {
+                text.truncate(tag_pos);
+            }
+            text = text.trim().to_string();
+        }
 
         let to_user = args
             .get("to_user")
@@ -464,7 +473,19 @@ impl Plugin for WechatClawPlugin {
             }
 
             let text = match event.data.get("text").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
+                Some(t) => {
+                    let mut s = t.to_string();
+                    // Strip [SCHEDULE:N] line from end
+                    if let Some(tag_pos) = s.find("[SCHEDULE:") {
+                        if let Some(newline_pos) = s[..tag_pos].rfind('\n') {
+                            s.truncate(newline_pos);
+                        } else {
+                            s.truncate(tag_pos);
+                        }
+                        s = s.trim().to_string();
+                    }
+                    s
+                }
                 None => return true,
             };
 
@@ -536,11 +557,58 @@ impl Plugin for WechatClawPlugin {
                     }
                 });
             } else {
+                // 分行逐条发送（与 tg-im-plugin 一致）
+                let full_text = text;
+                // Step 1: split by newline
+                let lines: Vec<String> = if full_text.contains('\n') {
+                    full_text.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                } else {
+                    vec![full_text.clone()]
+                };
+                // Step 2: split each line by sentence punctuation
+                let mut segments = Vec::new();
+                for line in &lines {
+                    let mut current = String::new();
+                    let mut has_punct = false;
+                    for ch in line.chars() {
+                        current.push(ch);
+                        let is_comma = ch == '，';
+                        let is_split = is_comma || ch == '。' || ch == '？' || ch == '！' || ch == '…' || ch == '?' || ch == '!';
+                        if is_split {
+                            if is_comma {
+                                current.pop();
+                            }
+                            if !current.trim().is_empty() {
+                                segments.push(current.trim().to_string());
+                            }
+                            current = String::new();
+                            has_punct = true;
+                        }
+                    }
+                    if !current.trim().is_empty() {
+                        segments.push(current.trim().to_string());
+                    } else if !has_punct && !line.trim().is_empty() {
+                        segments.push(line.trim().to_string());
+                    }
+                }
+                // Filter single-char fragments
+                let segments: Vec<String> = segments
+                    .into_iter()
+                    .filter(|s| s.trim().chars().count() > 1)
+                    .collect();
+
                 rt.block_on(async {
-                    if let Err(e) = wechat.send_text(&chat_id, &text, &ctx_token).await {
-                        log::error!("[wechat] reply failed: {}", e);
-                        if e.contains("-14") {
-                            WeChatClient::clear_saved();
+                    for (i, seg) in segments.iter().enumerate() {
+                        if let Err(e) = wechat.send_text(&chat_id, seg, &ctx_token).await {
+                            log::error!("[wechat] send segment {}/{} failed: {}", i + 1, segments.len(), e);
+                            if e.contains("-14") {
+                                WeChatClient::clear_saved();
+                                break;
+                            }
+                        }
+                        // 段间短暂延时，避免微信限频
+                        if i + 1 < segments.len() {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
                     }
                 });
