@@ -757,8 +757,13 @@ async fn stream_llm(
                         usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
                     prompt_cache_miss_tokens =
                         usage["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
-                    log::info!("[stream_llm] usage captured: prompt={}, completion={}, cache_hit={}, cache_miss={}",
-                        prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens);
+                    log::info!(
+                        "[stream_llm] usage captured: prompt={}, completion={}, cache_hit={}, cache_miss={}",
+                        prompt_tokens,
+                        completion_tokens,
+                        prompt_cache_hit_tokens,
+                        prompt_cache_miss_tokens
+                    );
                 }
             }
 
@@ -1023,9 +1028,25 @@ fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
         )
     };
 
+    let has_proactive_once = names.iter().any(|n| *n == "proactive_schedule_once");
+    let has_proactive_recurring = names.iter().any(|n| *n == "proactive_schedule_recurring");
+    let proactive_str = match (has_proactive_once, has_proactive_recurring) {
+        (true, true) => {
+            "用户让你过一会儿提醒/叫他，或你想稍后主动追问时，调用 proactive_schedule_once；需要周期性主动联系时，调用 proactive_schedule_recurring。不要输出 [SCHEDULE:N] 标签。"
+        }
+        (true, false) => {
+            "用户让你过一会儿提醒/叫他，或你想稍后主动追问时，调用 proactive_schedule_once。不要输出 [SCHEDULE:N] 标签。"
+        }
+        (false, true) => {
+            "需要周期性主动联系时，调用 proactive_schedule_recurring。不要输出 [SCHEDULE:N] 标签。"
+        }
+        (false, false) => "",
+    };
+
     let other_names: Vec<_> = names
         .iter()
         .filter(|n| !n.contains("send") && !n.contains("message") && !n.contains("voice"))
+        .filter(|n| !n.starts_with("proactive_schedule_"))
         .collect();
     let other_str = if other_names.is_empty() {
         String::new()
@@ -1038,8 +1059,12 @@ fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
     };
 
     format!(
-        "你在 {platform_name} 上和用户聊天。{send_str}{}如果回复后想隔一会儿再追问，在最后加一行 [SCHEDULE:秒数] 想说的话，比如 [SCHEDULE:120] 在干嘛呀。不想追问就不加。",
-        if other_names.is_empty() { String::new() } else { format!("其他可用：{}。", other_str) }
+        "你在 {platform_name} 上和用户聊天。{send_str}{proactive_str}{}",
+        if other_names.is_empty() {
+            String::new()
+        } else {
+            format!("其他可用：{}。", other_str)
+        }
     )
 }
 
