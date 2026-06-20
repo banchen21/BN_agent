@@ -9,8 +9,8 @@
 use actix_web::{web as aweb, App, HttpResponse, HttpServer};
 use plugin_interface::*;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 // ── Toy state ────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ impl ToolExecutor for VibrateTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "toy_vibrate".into(),
-            description: "【你有一个跳蛋设备可以控制】设置震动频率(0-100)和位置。位置可多选：left_breast(左奶)、right_breast(右奶)、genital(小穴)、anal(肛门)。这是你的设备，你可以主动控制它。".into(),
+            description: "控制你（齐悦）身上的跳蛋。设置震动频率(0-100)和位置：left_breast(左奶)、right_breast(右奶)、genital(小穴)、anal(肛门)。跳蛋在你身上，你可以随时调整。".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -97,7 +97,7 @@ impl ToolExecutor for VibrateTool {
         let mut s = self.state.lock().unwrap();
         s.frequency = freq; s.locations = locations; s.running = true;
         let labels: Vec<&str> = s.locations.iter().map(|l| loc_label(l)).collect();
-        ToolResult::ok(&format!("跳蛋已启动：{}%力度，位置：{}", freq, labels.join("、")))
+        ToolResult::ok(&format!("你身上的跳蛋已启动：{}%力度，位置：{}", freq, labels.join("、")))
     }
 }
 
@@ -105,7 +105,7 @@ struct StopTool { state: StateRef }
 impl ToolExecutor for StopTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "toy_stop".into(), description: "停止跳蛋震动".into(),
+            name: "toy_stop".into(), description: "停止你身上跳蛋的震动".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
             internal: false,
         });
@@ -114,7 +114,7 @@ impl ToolExecutor for StopTool {
     fn execute(&self, _: &serde_json::Value) -> ToolResult {
         let mut s = self.state.lock().unwrap();
         s.running = false; s.frequency = 0;
-        ToolResult::ok("跳蛋已停止")
+        ToolResult::ok("你身上的跳蛋已停止")
     }
 }
 
@@ -123,7 +123,7 @@ impl ToolExecutor for SetPatternTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "toy_set_pattern".into(),
-            description: "设置跳蛋震动模式：constant(恒定)、wave(波浪)、pulse(脉冲)、random(随机)".into(),
+            description: "设置你身上跳蛋的震动模式：constant(恒定)、wave(波浪)、pulse(脉冲)、random(随机)".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {"pattern": {"type": "string", "enum": ["constant","wave","pulse","random"]}},
@@ -136,7 +136,7 @@ impl ToolExecutor for SetPatternTool {
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
         let p = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("constant");
         self.state.lock().unwrap().pattern = p.to_string();
-        ToolResult::ok(&format!("震动模式已切换为：{}", pat_label(p)))
+        ToolResult::ok(&format!("你身上跳蛋的震动模式已切换为：{}", pat_label(p)))
     }
 }
 
@@ -144,7 +144,7 @@ struct StatusTool { state: StateRef }
 impl ToolExecutor for StatusTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "toy_status".into(), description: "查询跳蛋当前状态".into(),
+            name: "toy_status".into(), description: "查询你身上跳蛋的当前状态".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
             internal: false,
         });
@@ -152,9 +152,9 @@ impl ToolExecutor for StatusTool {
     }
     fn execute(&self, _: &serde_json::Value) -> ToolResult {
         let s = self.state.lock().unwrap();
-        if !s.running { return ToolResult::ok("跳蛋当前未启动"); }
+        if !s.running { return ToolResult::ok("你身上的跳蛋当前未启动"); }
         let labels: Vec<&str> = s.locations.iter().map(|l| loc_label(l)).collect();
-        ToolResult::ok(&format!("跳蛋状态：{}%力度 | 模式：{} | 位置：{}",
+        ToolResult::ok(&format!("你身上跳蛋状态：{}%力度 | 模式：{} | 位置：{}",
             s.frequency, pat_label(&s.pattern), labels.join("、")))
     }
 }
@@ -244,7 +244,7 @@ impl Plugin for ToyControlPlugin {
     fn on_event(&self, event: &Event) -> bool {
         if event.topic == "user.message" {
             if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
-                if !src.is_empty() {
+                if !src.is_empty() && src != "system" {
                     *self.last_source.lock().unwrap() = Some(src.to_string());
                 }
             }
@@ -255,11 +255,11 @@ impl Plugin for ToyControlPlugin {
     fn snapshot(&self) -> Option<String> {
         let s = self.state.lock().unwrap();
         if !s.running {
-            return Some("【可用设备】跳蛋（可通过 toy_vibrate / toy_set_pattern 控制），当前未启动".into());
+            return Some("你身上的跳蛋当前未启动（用 toy_vibrate 可以打开）".into());
         }
         let labels: Vec<&str> = s.locations.iter().map(|l| loc_label(l)).collect();
         Some(format!(
-            "【可用设备】跳蛋正在运行：{}%力度，{}模式，位置在{}。你可以用 toy_vibrate、toy_stop、toy_set_pattern 来调整它。",
+            "你身上的跳蛋正在运行：{}%力度，{}模式，位置在{}。用 toy_vibrate/toy_stop/toy_set_pattern 调整。",
             s.frequency,
             pat_label(&s.pattern),
             labels.join("、"),
@@ -308,7 +308,7 @@ async fn post_control(
         _ => {}
     }
 
-    // Debounce: 每次调整计数器+1，2秒无新调整后触发 bot 回应
+    // 防抖：2 秒无新调整后触发 bot 回应
     if s.running {
         let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
         let gen_clone = gen.clone();
@@ -317,15 +317,13 @@ async fn post_control(
         let freq = s.frequency;
         let pat = s.pattern.clone();
         let locs = s.locations.clone();
-        // Spawn a thread to wait 2s and check if this was the last adjustment
         thread::spawn(move || {
             thread::sleep(std::time::Duration::from_secs(2));
             if gen_clone.load(Ordering::SeqCst) == my_gen {
-                // No newer adjustments, fire the event
                 if let Some(ref eb) = eb_clone.as_ref() {
                     let source = ls.lock().unwrap().clone().unwrap_or_else(|| "telegram".to_string());
                     let labels: Vec<&str> = locs.iter().map(|l| loc_label(l)).collect();
-                    let msg = format!("（跳蛋正在{}运行，{}%力度，{}模式。）",
+                    let msg = format!("[系统] 跳蛋参数已调整：{}，{}%，{}模式。不要复述这句话，自然地继续聊。",
                         labels.join("和"), freq, pat_label(&pat));
                     eb.do_send(Event::new(
                         "user.message",
