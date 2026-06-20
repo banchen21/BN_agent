@@ -16,6 +16,12 @@ Token 用量    ██████████ 完成
 结构化观测    ██████████ 完成（Prometheus 指标）
 ```
 
+### 最新进展（2026-06-20）
+
+- [x] **Agent Loop MVP 已落地** — `8950b7d feat(agent-loop): add goal loop actor mvp`，新增目标循环 actor、HTTP 控制接口、step observation 与事件发布
+- [x] **主动系统升级完成** — 已从定时提醒扩展到带 jitter / probability / daily cap / backoff 的自主主动触发
+- [ ] **下一阶段重点** — Agent Loop 状态持久化、暂停/恢复、规划器、工具超时与测试体系
+
 ---
 
 ## 已完成功能
@@ -75,8 +81,10 @@ Token 用量    ██████████ 完成
 - [x] **Claude CLI 后端** — `LLM_BACKEND=claude` 用 `--resume` 复用原生会话，工具提示词注入
 - [x] **Agent Loop MVP** — `AgentLoopActor` 支持目标启动、observe/decide/act 循环、工具调用、step observation、状态查询与停止
 - [ ] **流式推送至 IM** — 将 `llm.chunk` 事件转发到 Telegram/飞书/微信
-- [ ] **Agent Loop 持久化队列** — loop 状态落库，支持重启恢复、暂停/恢复、按 peer 归档
-- [ ] **Agent Loop 规划器** — 引入 plan/task tree、反思压缩、失败自我修正策略
+- [ ] **Agent Loop 持久化队列** — loop 状态落库，支持重启恢复、按 peer 归档
+- [ ] **Agent Loop 暂停/恢复** — 在 `running/stopping/stopped` 之外补齐 `paused` 控制语义和 API
+- [ ] **Agent Loop 规划器** — 引入 plan/task tree、step reflection、失败自我修正策略
+- [ ] **Agent Loop 与主动系统联动** — 允许 proactive 触发受控 loop，而不是只能生成一条即时消息
 - [ ] **LLM 重试持久化** — 熔断状态重启后保持
 - [ ] **Token 预算控制** — 按天/周/月设置 token 上限
 - [ ] **会话管理** — 对话标题、自动摘要、长时间未活动会话回收
@@ -99,11 +107,13 @@ Token 用量    ██████████ 完成
 ### P0 — 正确性与健壮性（阻塞成熟版）
 
 - [x] **多 Peer 关系隔离** — `peer_id` 已贯穿 IM 插件 → pipeline → ChatRequest → chat_store → memory；按人隔离对话历史与记忆，首个互动者自动绑定为主人。详见下方「多 Peer 关系」设计
+- [ ] **Agent Loop 状态持久化** — 当前 loop 仍在内存中，主进程重启会丢失运行中目标；成熟版需要 SQLite 状态表与恢复策略
 - [ ] **收敛 panic 面** — 关键路径 `.lock().unwrap()` 改用 `parking_lot::Mutex`（不中毒）或优雅降级，避免单线程 panic 级联崩溃
 - [ ] **熔断状态持久化** — 重启后保持 open/half-open，避免雪崩后立即重试
 
 ### P1 — 测试体系（质量保障，详见上方「测试类」）
 
+- [ ] Agent Loop 单元测试：状态转换、预算耗尽、停止请求、JSON 决策解析
 - [ ] 单元测试：PipelineActor / LlmActor / 工具注册-调用链
 - [ ] 集成测试：mock LLM 端点跑端到端工具执行
 - [ ] 插件测试框架：模拟 PluginContext
