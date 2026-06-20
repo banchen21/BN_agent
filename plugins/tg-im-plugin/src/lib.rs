@@ -34,7 +34,7 @@ impl ToolExecutor for SendMessageTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_message".into(),
-            description: "Send a text message to a Telegram chat. 调用此工具后不要额外回复确认文字。如果只需文字回复，直接回复即可不需要调用此工具。".into(),
+            description: "Send a text message to this Telegram chat.".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -55,10 +55,19 @@ impl ToolExecutor for SendMessageTool {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
-        let text = match args.get("text").and_then(|v| v.as_str()) {
+        let mut text = match args.get("text").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(),
             None => return ToolResult::err("missing: text"),
         };
+        // Strip [SCHEDULE:N] line
+        if let Some(tag_pos) = text.find("[SCHEDULE:") {
+            if let Some(newline_pos) = text[..tag_pos].rfind('\n') {
+                text.truncate(newline_pos);
+            } else {
+                text.truncate(tag_pos);
+            }
+            text = text.trim().to_string();
+        }
         // 停止 typing 循环
         self.processing_chats.lock().unwrap().remove(&chat_id);
 
@@ -89,7 +98,7 @@ impl ToolExecutor for SendVoiceTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_voice".into(),
-            description: "Convert text to speech and send as voice message to Telegram. 用户明确要求发语音时必须使用此工具。调用后不要额外回复确认文字。".into(),
+            description: "Convert text to speech and send as voice message to Telegram. Use when the user asks for voice.".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -177,7 +186,7 @@ impl ToolExecutor for SendPhotoTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_photo".into(),
-            description: "Send a photo to a Telegram chat. 调用此工具后不要额外回复确认文字。".into(),
+            description: "Send a photo to this Telegram chat.".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -245,7 +254,7 @@ impl ToolExecutor for SendVideoTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "tg_send_video".into(),
-            description: "Send a video to a Telegram chat. 调用此工具后不要额外回复确认文字。".into(),
+            description: "Send a video to this Telegram chat.".into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -672,8 +681,16 @@ impl Plugin for TgImPlugin {
                     let mut s = t.to_string();
                     s = s.replace("\n---\n", "\n\n");
                     s = s.replace("---", "———");
-                    // LLM may output literal \n (two chars) instead of actual newline
                     s = s.replace("\\n", "\n");
+                    // Strip [SCHEDULE:N] line from end
+                    if let Some(tag_pos) = s.find("[SCHEDULE:") {
+                        if let Some(newline_pos) = s[..tag_pos].rfind('\n') {
+                            s.truncate(newline_pos);
+                        } else {
+                            s.truncate(tag_pos);
+                        }
+                        s = s.trim().to_string();
+                    }
                     s
                 }
                 None => return true,
@@ -747,36 +764,9 @@ impl Plugin for TgImPlugin {
             return true;
         }
 
-        // ── image.gen.complete → 自动发送图片到 TG ──
-        if event.topic == "image.gen.complete" && chat_id != 0 {
-            let path = match event.data.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p.to_string(),
-                None => return true,
-            };
-
-            if let Some(ref handle) = self.bot_handle {
-                let h = handle.clone();
-                std::thread::spawn(move || {
-                    let data = match std::fs::read(&path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            eprintln!("[tg-im] read image failed {}: {}", path, e);
-                            return;
-                        }
-                    };
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("tokio");
-                    rt.block_on(async {
-                        if let Err(e) = h.send_photo(chat_id, data, None).await {
-                            eprintln!("[tg-im] send_photo failed: {}", e);
-                        }
-                    });
-                });
-            }
-            return true;
-        }
+        // ── image.gen.complete 不再由 TG 自动发送 ──
+        // 生图后由 LLM 根据当前会话平台主动调用 tg_send_photo / wechat_send_image
+        // （携生图工具返回的 file_path）发送，避免跨平台误发到 TG。
 
         true
     }
