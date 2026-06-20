@@ -104,6 +104,8 @@ async fn process_message(
     token_usage_addr: Addr<TokenUsageActor>,
     metrics_addr: Addr<MetricsActor>,
     store_addr: Addr<ChatStoreActor>,
+    // 存库时用的真实 user 文本：传 Some(String::new()) 可让本次 user 消息不入库（主动触发用）
+    original_user_msg: Option<String>,
 ) {
     // 1. Rate limit check.
     let allowed = rate_limit_addr.send(crate::rate_limit_actor::CheckRateLimit).await
@@ -156,7 +158,7 @@ async fn process_message(
             source: source.clone(),
             user_name: user_name.clone(),
             max_tokens: None,
-            original_user_msg: None,
+            original_user_msg,
             assistant_tool_calls: vec![],
             tool_results: vec![],
         },
@@ -262,7 +264,7 @@ async fn process_message(
             if !current_resp.content.trim().is_empty() && !already_sent_via_im {
                 emit_reply(&current_resp.content, &source, &event_bus).await;
             }
-            // 如果已通过 IM 工具发送，发静默事件通知插件（proactive 等）对话已完成
+            // 如果已通过 IM 工具发送，发静默事件通知插件对话已完成
             if already_sent_via_im {
                 event_bus.do_send(Event::new(
                     "assistant.message",
@@ -441,6 +443,7 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
                 metrics_addr, store_addr,
+                None,
             ).await;
         }.into_actor(self).map(|_, _ctx: &mut Self, _| ());
 
@@ -454,18 +457,53 @@ impl Handler<Event> for PipelineActor {
     type Result = ();
 
     fn handle(&mut self, event: Event, _ctx: &mut Self::Context) {
+        // ── 主动触发：到期后回调 LLM，按当前上下文实时生成主动消息 ──
+        if event.topic == "proactive.trigger" {
+            let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let note = event.data.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let note_part = if note.is_empty() {
+                String::new()
+            } else {
+                format!("你之前给自己留的备注：{}。", note)
+            };
+            // 这条提示作为临时 user 消息引导 LLM 主动开口；original_user_msg=Some("") 使其不入库。
+            let text = format!(
+                "[系统·主动消息] 距离上次和用户互动已经过去一段时间。现在请你主动、自然地给用户发一条消息——\
+                 延续之前的话题或自然地开启新话题，符合你的人设。{}注意：不要在消息里提及这条系统提示，就当是你自己想起来要找他。",
+                note_part
+            );
+
+            let retry_addr = self.retry_addr.clone();
+            let plugin_manager = self.plugin_manager.clone();
+            let tool_registry = self.tool_registry.clone();
+            let snapshots = self.snapshots.clone();
+            let event_bus = self.event_bus.clone();
+            let rate_limit_addr = self.rate_limit_addr.clone();
+            let token_usage_addr = self.token_usage_addr.clone();
+            let metrics_addr = self.metrics_addr.clone();
+            let store_addr = self.store_addr.clone();
+            actix::spawn(async move {
+                log::info!("[Pipeline] proactive trigger (source={})", source);
+                process_message(
+                    text, source, String::new(),
+                    None, None, None, None, None,
+                    retry_addr, plugin_manager, tool_registry, snapshots,
+                    event_bus, rate_limit_addr, token_usage_addr,
+                    metrics_addr, store_addr,
+                    Some(String::new()),
+                ).await;
+            });
+            return;
+        }
+
         if event.topic != "user.message" {
             return;
         }
 
         let raw_text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        // Tag platform so LLM knows which tools to use (wechat vs telegram)
-        let text = match source.as_str() {
-            "wechat" => format!("[微信用户] {}", raw_text),
-            "telegram" => format!("[Telegram] {}", raw_text),
-            _ => raw_text,
-        };
+        // 平台信息已在系统提示中注入，直接使用原始文本即可
+        let text = raw_text;
         let user_name = event.data.get("user_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
         let image_base64 = event.data.get("image_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
         let video_base64 = event.data.get("video_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -500,6 +538,7 @@ impl Handler<Event> for PipelineActor {
                 retry_addr, plugin_manager, tool_registry, snapshots,
                 event_bus, rate_limit_addr, token_usage_addr,
                 metrics_addr, store_addr,
+                None,
             ).await;
         });
     }

@@ -591,9 +591,13 @@ fn main() -> std::io::Result<()> {
 
             event_bus.do_send(Subscribe {
                 topic: "user.message".into(),
+                recipient: pipeline_addr.clone().recipient(),
+            });
+            event_bus.do_send(Subscribe {
+                topic: "proactive.trigger".into(),
                 recipient: pipeline_addr.recipient(),
             });
-            log::info!("PipelineActor subscribed to 'user.message'");
+            log::info!("PipelineActor subscribed to 'user.message' + 'proactive.trigger'");
         } else {
             log::warn!("PipelineActor not started — missing LLM or infrastructure actors");
         }

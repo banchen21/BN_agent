@@ -1,37 +1,30 @@
-//! proactive-plugin — LLM-driven proactive messaging plugin.
+//! proactive-plugin — LLM 主动消息插件（工具驱动）。
 //!
-//! Reads `PROACTIVE_MODE` from env:
-//!   - "auto"      → LLM 完全自主决策并自动发送追问消息
-//!   - "semi-auto" → 某个时间段到某个时间段内由 LLM 决定是否发送追问消息，其他时间段不发送
+//! LLM 通过两个工具自行安排主动消息（**只设定冷却时间，不预写内容**）：
+//!   - `proactive_schedule_once`      一次性：经过 N 秒/分钟后触发一次
+//!   - `proactive_schedule_recurring` 循环：每隔 N 秒/分钟触发一次
 //!
-//! `PROACTIVE_CHAT_ID` and `PROACTIVE_SOURCE` are optional:
-//!   - If set via env → used as override
-//!   - If empty → auto-detected from the first incoming user.message event
-//!     (chat_id and source are extracted from the event payload)
+//! 到期后插件发布 `proactive.trigger` 事件，PipelineActor 回调 LLM
+//! 按**当前对话上下文实时生成**并发送主动消息。
 //!
-//! Architecture:
-//!   - `on_event()` collects user/assistant messages into a shared history buffer.
-//!   - A background thread loops every 15s, sends history to LLM for decision,
-//!     and schedules/sends proactive follow-up messages.
-//!   - Uses `Arc<Mutex<>>` for thread-safe state sharing (DLLs can't use actix actors).
+//! 模式（`PROACTIVE_MODE`）：
+//!   - `auto`      全时段触发
+//!   - `semi-auto` 仅在 `PROACTIVE_TIME_WINDOWS` 时间窗口内触发；
+//!                 窗口外到期的任务**顺延**，进入窗口后立即补发
+//!
+//! 用户主动回复 → 取消该会话**全部**已安排任务（等 LLM 重新安排）。
+//!
+//! DLL 不能使用 actix actor，故用 `Arc<Mutex<>>` + 后台线程共享状态。
 
-use plugin_interface::*;
 use chrono::Timelike;
-use serde::Deserialize;
+use plugin_interface::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-/// Minimum interval between two LLM decision calls.
-const DECISION_COOLDOWN_SECS: u64 = 15;
-/// Maximum number of history entries to keep per chat.
-const MAX_HISTORY: usize = 100;
-
-// ── Proactive mode ───────────────────────────────────────────────────────────
+// ── 模式 ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProactiveMode {
@@ -41,33 +34,40 @@ enum ProactiveMode {
 
 impl ProactiveMode {
     fn from_env() -> Self {
-        match std::env::var("PROACTIVE_MODE").unwrap_or_default().to_lowercase().as_str() {
+        match std::env::var("PROACTIVE_MODE")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
             "semi-auto" | "semi_auto" | "semiauto" => ProactiveMode::SemiAuto,
             _ => ProactiveMode::Auto,
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ProactiveMode::Auto => "auto",
+            ProactiveMode::SemiAuto => "semi-auto",
+        }
+    }
 }
 
-// ── Time window for semi-auto mode ───────────────────────────────────────────
+// ── 时间窗口（semi-auto 模式）────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct TimeWindow {
-    start_hour: u32,
     start_min: u32,
-    end_hour: u32,
     end_min: u32,
 }
 
 impl TimeWindow {
+    /// 解析 `PROACTIVE_TIME_WINDOWS`，如 `09:00-12:00,14:00-22:00`。默认 09:00-22:00。
     fn from_env() -> Vec<Self> {
         let raw = std::env::var("PROACTIVE_TIME_WINDOWS").unwrap_or_default();
         if raw.is_empty() {
-            // Default: 09:00-22:00
             return vec![TimeWindow {
-                start_hour: 9,
-                start_min: 0,
-                end_hour: 22,
-                end_min: 0,
+                start_min: 9 * 60,
+                end_min: 22 * 60,
             }];
         }
         raw.split(',')
@@ -76,13 +76,15 @@ impl TimeWindow {
                 if parts.len() != 2 {
                     return None;
                 }
-                let start: Vec<&str> = parts[0].split(':').collect();
-                let end: Vec<&str> = parts[1].split(':').collect();
+                let parse_hm = |s: &str| -> Option<u32> {
+                    let p: Vec<&str> = s.split(':').collect();
+                    let h: u32 = p.first()?.trim().parse().ok()?;
+                    let m: u32 = p.get(1).and_then(|x| x.trim().parse().ok()).unwrap_or(0);
+                    Some(h * 60 + m)
+                };
                 Some(TimeWindow {
-                    start_hour: start[0].parse().ok()?,
-                    start_min: start.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    end_hour: end[0].parse().ok()?,
-                    end_min: end.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+                    start_min: parse_hm(parts[0])?,
+                    end_min: parse_hm(parts[1])?,
                 })
             })
             .collect()
@@ -90,91 +92,173 @@ impl TimeWindow {
 
     fn contains_now(&self) -> bool {
         let now = chrono::Local::now();
-        let now_minutes = now.hour() * 60 + now.minute();
-        let start_minutes = self.start_hour * 60 + self.start_min;
-        let end_minutes = self.end_hour * 60 + self.end_min;
-        now_minutes >= start_minutes && now_minutes <= end_minutes
+        let m = now.hour() * 60 + now.minute();
+        m >= self.start_min && m <= self.end_min
     }
 }
 
-// ── History entry ────────────────────────────────────────────────────────────
+// ── 定时任务 ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct HistoryEntry {
-    role: String,
-    text: String,
-    timestamp: Instant,
+enum ScheduleKind {
+    /// 触发一次后丢弃。
+    Once,
+    /// 每隔 `Duration` 循环触发。
+    Recurring(Duration),
 }
 
-// ── Scheduled proactive action ───────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
-struct ScheduledAction {
-    message: String,
+struct ScheduledTask {
+    kind: ScheduleKind,
     send_at: Instant,
+    /// LLM 给未来的自己留的备注（可选）。
+    note: Option<String>,
 }
 
-// ── LLM decision output ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize)]
-struct LlmDecision {
-    paused: bool,
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    wait_seconds: u64,
-    #[serde(default)]
-    continue_: bool,
-    #[serde(default)]
-    reason: String,
-}
-
-// ── Shared state (thread-safe) ───────────────────────────────────────────────
+// ── 共享状态 ─────────────────────────────────────────────────────────────────
 
 struct SharedState {
-    /// Chat history per chat_id: Vec<(role, text, timestamp)>
-    history: HashMap<String, Vec<HistoryEntry>>,
-    /// Scheduled proactive messages per chat_id.
-    scheduled: HashMap<String, ScheduledAction>,
-    /// Last LLM decision time per chat_id (for cooldown).
-    last_decision: HashMap<String, Instant>,
-    /// EventBus address for publishing messages.
+    /// 每会话的已安排任务。
+    scheduled: HashMap<String, Vec<ScheduledTask>>,
     event_bus: Option<Addr<EventBus>>,
-    /// LLM backend recipient for decision calls.
-    llm: Option<Recipient<LlmRequest>>,
-    /// Chat store — unified read/write (Append + FetchRecent).
-    chat_store: Option<Recipient<ChatStoreMsg>>,
-    /// Plugin logger.
     logger: Option<PluginLogger>,
-    /// Proactive mode.
     mode: ProactiveMode,
-    /// Time windows for semi-auto mode.
     time_windows: Vec<TimeWindow>,
-    /// Target chat ID (from env override, or auto-detected from user.message).
+    /// 目标会话 ID（env 覆盖，或从 user.message 自动检测）。
     chat_id: String,
-    /// Source channel name (from env override, or auto-detected from user.message).
+    /// 来源通道（env 覆盖，或自动检测）。
     source: String,
-    /// Whether chat_id was set via env (if true, auto-detect is skipped).
     chat_id_from_env: bool,
-    /// Whether source was set via env (if true, auto-detect is skipped).
     source_from_env: bool,
-    /// Pending LLM decision request (set by background thread, consumed by on_event).
-    pending_llm_request: Option<LlmRequest>,
-    /// LLM decision response (set by on_event, consumed by background thread).
-    pending_llm_response: Option<Result<LlmResponse, String>>,
-    /// Pending DB fetch flag (set by background thread, consumed by on_event).
-    pending_fetch_history: bool,
-    /// DB fetch result (set by on_event, consumed by background thread).
-    fetch_history_result: Option<Vec<ChatHistoryRecord>>,
 }
 
-// ── Plugin struct ────────────────────────────────────────────────────────────
+impl SharedState {
+    fn log(&self, msg: impl std::fmt::Display) {
+        if let Some(ref l) = self.logger {
+            l.info(msg);
+        }
+    }
+}
+
+/// 解析 `seconds` + `minutes` 参数，累加为总秒数。
+fn parse_delay_secs(args: &serde_json::Value) -> u64 {
+    let secs = args.get("seconds").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mins = args.get("minutes").and_then(|v| v.as_u64()).unwrap_or(0);
+    secs + mins * 60
+}
+
+fn parse_note(args: &serde_json::Value) -> Option<String> {
+    args.get("note")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+// ── 工具：一次性定时 ─────────────────────────────────────────────────────────
+
+struct ScheduleOnceTool {
+    state: Arc<Mutex<SharedState>>,
+}
+
+impl ToolExecutor for ScheduleOnceTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+            name: "proactive_schedule_once".into(),
+            description: "安排一次性主动消息：经过指定冷却时间后，你会被再次唤起，根据当时的对话上下文主动给用户发一条消息。用于「过一会儿再主动找用户」。seconds 与 minutes 可同时给出，累加为总冷却时间。用户一旦回复，所有已安排任务都会被取消。".into(),
+            internal: false,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "integer", "description": "冷却秒数（与 minutes 累加）", "minimum": 0},
+                    "minutes": {"type": "integer", "description": "冷却分钟数（与 seconds 累加）", "minimum": 0},
+                    "note": {"type": "string", "description": "可选：给未来的自己留一句备注，提示到时想聊什么"}
+                }
+            }),
+        });
+        &DEF
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let delay = parse_delay_secs(args);
+        if delay == 0 {
+            return ToolResult::err("seconds/minutes 至少给一个且大于 0");
+        }
+        let note = parse_note(args);
+        let mut s = match self.state.lock() {
+            Ok(g) => g,
+            Err(_) => return ToolResult::err("state lock poisoned"),
+        };
+        let chat_id = s.chat_id.clone();
+        if chat_id.is_empty() {
+            return ToolResult::err("尚未确定目标会话，稍后再试");
+        }
+        s.scheduled.entry(chat_id).or_default().push(ScheduledTask {
+            kind: ScheduleKind::Once,
+            send_at: Instant::now() + Duration::from_secs(delay),
+            note: note.clone(),
+        });
+        s.log(format!("scheduled once in {}s (note={:?})", delay, note));
+        ToolResult::ok(&format!("已安排：{} 秒后主动找用户一次", delay))
+    }
+}
+
+// ── 工具：循环定时 ───────────────────────────────────────────────────────────
+
+struct ScheduleRecurringTool {
+    state: Arc<Mutex<SharedState>>,
+}
+
+impl ToolExecutor for ScheduleRecurringTool {
+    fn def(&self) -> &ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+            name: "proactive_schedule_recurring".into(),
+            description: "安排循环主动消息：每隔指定冷却时间就把你唤起一次，根据当时上下文主动给用户发消息，循环往复，直到用户回复（用户一回复即全部取消）。seconds 与 minutes 累加为间隔时间。".into(),
+            internal: false,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "integer", "description": "间隔秒数（与 minutes 累加）", "minimum": 0},
+                    "minutes": {"type": "integer", "description": "间隔分钟数（与 seconds 累加）", "minimum": 0},
+                    "note": {"type": "string", "description": "可选：给未来的自己留一句备注"}
+                }
+            }),
+        });
+        &DEF
+    }
+
+    fn execute(&self, args: &serde_json::Value) -> ToolResult {
+        let delay = parse_delay_secs(args);
+        if delay == 0 {
+            return ToolResult::err("seconds/minutes 至少给一个且大于 0");
+        }
+        let note = parse_note(args);
+        let mut s = match self.state.lock() {
+            Ok(g) => g,
+            Err(_) => return ToolResult::err("state lock poisoned"),
+        };
+        let chat_id = s.chat_id.clone();
+        if chat_id.is_empty() {
+            return ToolResult::err("尚未确定目标会话，稍后再试");
+        }
+        s.scheduled.entry(chat_id).or_default().push(ScheduledTask {
+            kind: ScheduleKind::Recurring(Duration::from_secs(delay)),
+            send_at: Instant::now() + Duration::from_secs(delay),
+            note: note.clone(),
+        });
+        s.log(format!("scheduled recurring every {}s (note={:?})", delay, note));
+        ToolResult::ok(&format!(
+            "已安排：每 {} 秒主动找用户一次（用户回复即停止）",
+            delay
+        ))
+    }
+}
+
+// ── 插件 ─────────────────────────────────────────────────────────────────────
 
 struct ProactivePlugin {
     info: PluginInfo,
     state: Arc<Mutex<SharedState>>,
     running: Arc<AtomicBool>,
-    /// Handle to the background thread.
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -183,18 +267,14 @@ impl ProactivePlugin {
         Self {
             info: PluginInfo {
                 name: "proactive-plugin".into(),
-                version: "0.1.0".into(),
-                description: "LLM-driven proactive messaging: auto or semi-auto mode".into(),
+                version: "0.2.0".into(),
+                description: "LLM 主动消息：工具驱动的一次性/循环定时，auto/semi-auto 模式".into(),
                 author: "demo".into(),
                 min_host_version: "0.1.0".into(),
             },
             state: Arc::new(Mutex::new(SharedState {
-                history: HashMap::new(),
                 scheduled: HashMap::new(),
-                last_decision: HashMap::new(),
                 event_bus: None,
-                llm: None,
-                chat_store: None,
                 logger: None,
                 mode: ProactiveMode::Auto,
                 time_windows: Vec::new(),
@@ -202,10 +282,6 @@ impl ProactivePlugin {
                 source: String::new(),
                 chat_id_from_env: false,
                 source_from_env: false,
-                pending_llm_request: None,
-                pending_llm_response: None,
-                pending_fetch_history: false,
-                fetch_history_result: None,
             })),
             running: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
@@ -229,8 +305,6 @@ impl Plugin for ProactivePlugin {
         {
             let mut s = self.state.lock().unwrap();
             s.event_bus = Some(ctx.event_bus.clone());
-            s.llm = ctx.llm.clone();
-            s.chat_store = ctx.chat_store.clone();
             s.logger = Some(ctx.logger.clone());
             s.mode = mode;
             s.time_windows = time_windows;
@@ -240,624 +314,196 @@ impl Plugin for ProactivePlugin {
             s.source_from_env = source_from_env;
         }
 
-        let logger = ctx.logger.clone();
-        logger.info(format!(
-            "started, mode={}, chat_id={}, source={}",
-            match mode {
-                ProactiveMode::Auto => "auto",
-                ProactiveMode::SemiAuto => "semi-auto",
-            },
-            if chat_id_from_env { env_chat_id.as_str() } else { "(auto-detect)" },
-            if source_from_env { env_source.as_str() } else { "(auto-detect)" },
-        ));
-
-        // ── Load history from DB on startup ──────────────────────────────
-        // Set a flag; on_event() will pick it up and do the actual fetch
-        // inside the actix runtime, then store the result.
-        {
-            let mut s = self.state.lock().unwrap();
-            if s.chat_store.is_some() {
-                s.pending_fetch_history = true;
+        // 注册工具给 LLM。
+        if let Some(ref registry) = ctx.tool_registry {
+            if let Ok(mut reg) = registry.lock() {
+                reg.register(Arc::new(ScheduleOnceTool {
+                    state: Arc::clone(&self.state),
+                }));
+                reg.register(Arc::new(ScheduleRecurringTool {
+                    state: Arc::clone(&self.state),
+                }));
             }
+            ctx.logger
+                .info("registered tools: proactive_schedule_once, proactive_schedule_recurring");
+        } else {
+            ctx.logger
+                .error("tool_registry unavailable — proactive tools NOT registered");
         }
 
-        // ── Spawn background loop thread ─────────────────────────────────
+        ctx.logger.info(format!(
+            "started, mode={}, chat_id={}, source={}",
+            mode.as_str(),
+            if chat_id_from_env {
+                env_chat_id.as_str()
+            } else {
+                "(auto-detect)"
+            },
+            if source_from_env {
+                env_source.as_str()
+            } else {
+                "(auto-detect)"
+            },
+        ));
+
+        // 启动后台轮询线程。
         self.running.store(true, Ordering::SeqCst);
         let state = Arc::clone(&self.state);
         let running = Arc::clone(&self.running);
-
-        let handle = thread::spawn(move || {
-            background_loop(state, running);
-        });
-
-        self.thread_handle = Some(handle);
+        self.thread_handle = Some(thread::spawn(move || background_loop(state, running)));
         Ok(())
     }
 
     fn stop(&mut self) {
-        // Signal the background thread to stop.
         self.running.store(false, Ordering::SeqCst);
-
-        // Wait for the thread to finish (with timeout).
         if let Some(handle) = self.thread_handle.take() {
-            // Give the thread up to 5 seconds to clean up.
             let _ = handle.join();
         }
-
-        // Clear state.
         if let Ok(mut s) = self.state.lock() {
             s.event_bus = None;
-            s.llm = None;
-            s.chat_store = None;
             s.logger = None;
+            s.scheduled.clear();
         }
-
         log::info!("[proactive-plugin] stopped");
     }
 
     fn on_event(&self, event: &Event) -> bool {
-        match event.topic.as_str() {
-            "user.message" | "assistant.message" => {
-                if let Ok(mut s) = self.state.lock() {
-                    // ── Auto-detect chat_id from user.message ───────────
-                    if event.topic == "user.message" {
-                        if !s.chat_id_from_env {
-                            let event_cid = event.data.get("chat_id").and_then(|v| {
-                                v.as_str().map(String::from)
-                                    .or_else(|| v.as_i64().map(|n| n.to_string()))
-                            });
-                            if let Some(ref cid) = event_cid {
-                                if s.chat_id.is_empty() {
-                                    s.chat_id = cid.clone();
-                                    if let Some(ref logger) = s.logger {
-                                        logger.info(format!("auto-detected chat_id={}", cid));
-                                    }
-                                }
-                            }
+        // 只关心用户消息：用于自动检测 chat_id/source，以及「用户回复即取消任务」。
+        if event.topic != "user.message" {
+            return true;
+        }
+
+        if let Ok(mut s) = self.state.lock() {
+            // ── 自动检测 chat_id ──
+            if !s.chat_id_from_env && s.chat_id.is_empty() {
+                if let Some(cid) = event.data.get("chat_id").and_then(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+                }) {
+                    s.chat_id = cid.clone();
+                    s.log(format!("auto-detected chat_id={}", cid));
+                }
+            }
+            // ── 自动检测 source ──
+            if !s.source_from_env && s.source.is_empty() {
+                if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
+                    s.source = src.to_string();
+                    s.log(format!("auto-detected source={}", src));
+                }
+            }
+
+            // ── 用户回复 → 取消该会话全部已安排任务 ──
+            let chat_id = s.chat_id.clone();
+            if !chat_id.is_empty() {
+                let event_cid = event.data.get("chat_id").and_then(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+                });
+                // 事件无 chat_id 时按当前会话处理；有则需匹配。
+                if event_cid.as_deref().map(|c| c == chat_id).unwrap_or(true) {
+                    if let Some(tasks) = s.scheduled.get_mut(&chat_id) {
+                        if !tasks.is_empty() {
+                            tasks.clear();
+                            s.log("user replied — cancelled all scheduled tasks");
                         }
-                        if !s.source_from_env {
-                            if let Some(src) = event.data.get("source").and_then(|v| v.as_str()) {
-                                if s.source.is_empty() {
-                                    s.source = src.to_string();
-                                    if let Some(ref logger) = s.logger {
-                                        logger.info(format!("auto-detected source={}", src));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let chat_id = s.chat_id.clone();
-                    if chat_id.is_empty() {
-                        return true;
-                    }
-
-                    // ── Filter: only record messages for our tracked chat_id ──
-                    let event_cid = event.data.get("chat_id").and_then(|v| {
-                        v.as_str().map(String::from)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    });
-                    if let Some(ref ecid) = event_cid {
-                        if ecid != &chat_id {
-                            return true; // different chat, skip
-                        }
-                    }
-
-                    // Extract text from event data.
-                    let text = event
-                        .data
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    if text.is_empty() {
-                        return true;
-                    }
-
-                    let role = if event.topic == "user.message" {
-                        "user"
-                    } else {
-                        "assistant"
-                    };
-
-                    let entry = HistoryEntry {
-                        role: role.to_string(),
-                        text,
-                        timestamp: Instant::now(),
-                    };
-
-                    let history = s.history.entry(chat_id.clone()).or_default();
-                    history.push(entry);
-                    if history.len() > MAX_HISTORY {
-                        history.remove(0);
-                    }
-
-                    // If user replied, cancel any scheduled action.
-                    if role == "user" {
-                        s.scheduled.remove(&chat_id);
-                    }
-
-                    if let Some(ref logger) = s.logger {
-                        logger.info(format!(
-                            "recorded {} message (history len={})",
-                            role,
-                            s.history.get(&chat_id).map(|h| h.len()).unwrap_or(0),
-                        ));
                     }
                 }
             }
-            // ── Internal: fetch history from DB ──────────────────────────
-            "proactive.internal.fetch_history" => {
-                let (chat_store, _logger) = {
-                    let s = match self.state.lock() {
-                        Ok(s) => s,
-                        Err(_) => return true,
-                    };
-                    (s.chat_store.clone(), s.logger.clone())
-                };
-                if let Some(store) = chat_store {
-                    let state = Arc::clone(&self.state);
-                    // Use std::thread::spawn + own runtime to avoid spawn_local requirement.
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("tokio runtime for fetch_history");
-                        rt.block_on(async {
-                            match store.send(ChatStoreMsg::FetchRecent { limit: MAX_HISTORY }).await {
-                                Ok(ChatStoreResponse::FetchRecent(records)) => {
-                                    if let Ok(mut s) = state.lock() {
-                                        s.fetch_history_result = Some(records.clone());
-                                        if let Some(ref l) = s.logger {
-                                            l.info(format!("fetched {} history records from DB", records.len()));
-                                        }
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    if let Ok(mut s) = state.lock() {
-                                        s.fetch_history_result = Some(vec![]);
-                                        if let Some(ref l) = s.logger {
-                                            l.error(format!("failed to fetch history: {}", e));
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    });
-                }
-            }
-            // ── Internal: LLM decision request ───────────────────────────
-            "proactive.internal.llm_decision" => {
-                let (llm, request, _logger) = {
-                    let mut s = match self.state.lock() {
-                        Ok(s) => s,
-                        Err(_) => return true,
-                    };
-                    let llm = s.llm.clone();
-                    let request = s.pending_llm_request.take();
-                    let logger = s.logger.clone();
-                    (llm, request, logger)
-                };
-                if let (Some(llm), Some(request)) = (llm, request) {
-                    let state = Arc::clone(&self.state);
-                    // Use std::thread::spawn + own runtime to avoid spawn_local requirement.
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("tokio runtime for llm_decision");
-                        rt.block_on(async {
-                            let result = llm.send(request).await;
-                            let response = match result {
-                                Ok(Ok(resp)) => Ok(resp),
-                                Ok(Err(e)) => Err(format!("LLM error: {}", e)),
-                                Err(e) => Err(format!("LLM mailbox error: {}", e)),
-                            };
-                            if let Ok(mut s) = state.lock() {
-                                s.pending_llm_response = Some(response);
-                            }
-                        });
-                    });
-                }
-            }
-            _ => {}
         }
         true
     }
 }
 
-// ── Background loop ──────────────────────────────────────────────────────────
+// ── 后台循环 ─────────────────────────────────────────────────────────────────
 
 fn background_loop(state: Arc<Mutex<SharedState>>, running: Arc<AtomicBool>) {
-    let loop_interval: u64 = std::env::var("PROACTIVE_LOOP_INTERVAL")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(15);
-    log::info!("[proactive-plugin] background loop started (interval={}s)", loop_interval);
-
-    // ── Wait for DB history fetch to complete ────────────────────────────
-    // on_event() handles the actual fetch inside actix runtime.
-    // We poll here until the result is ready.
-    {
-        let mut fired = false;
-        loop {
-            if !running.load(Ordering::SeqCst) {
-                return;
-            }
-            {
-                let mut s = state.lock().unwrap();
-                if s.pending_fetch_history && !fired {
-                    // Fire the internal event to trigger fetch in on_event().
-                    if let Some(ref eb) = s.event_bus {
-                        eb.do_send(Event::new(
-                            "proactive.internal.fetch_history",
-                            serde_json::json!({}),
-                            "proactive-plugin",
-                        ));
-                        fired = true;
-                    }
-                    s.pending_fetch_history = false;
-                }
-                if let Some(ref records) = s.fetch_history_result {
-                    let chat_id = s.chat_id.clone();
-                    let records = records.clone(); // release immutable borrow
-                    if !chat_id.is_empty() && !records.is_empty() {
-                        let history = s.history.entry(chat_id).or_default();
-                        for r in &records {
-                            history.push(HistoryEntry {
-                                role: r.role.clone(),
-                                text: r.content.clone(),
-                                timestamp: Instant::now()
-                                    .checked_sub(Duration::from_secs(3600))
-                                    .unwrap_or(Instant::now()),
-                            });
-                        }
-                        if let Some(ref l) = s.logger {
-                            l.info(format!("loaded {} history records from DB", records.len()));
-                        }
-                    }
-                    s.fetch_history_result = None;
-                    break; // done
-                }
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
-    }
+    let interval: u64 = std::env::var("PROACTIVE_LOOP_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    log::info!(
+        "[proactive-plugin] background loop started (interval={}s)",
+        interval
+    );
 
     while running.load(Ordering::SeqCst) {
-        // Sleep in small chunks so we can respond to stop quickly.
-        for _ in 0..loop_interval {
+        // 可中断的分段睡眠。
+        for _ in 0..interval {
             if !running.load(Ordering::SeqCst) {
                 log::info!("[proactive-plugin] background loop stopped");
                 return;
             }
             thread::sleep(Duration::from_secs(1));
         }
-
-        // ── Tick ─────────────────────────────────────────────────────────
-        if let Err(e) = tick(&state) {
-            log::error!("[proactive-plugin] tick error: {}", e);
-        }
+        tick(&state);
     }
-
     log::info!("[proactive-plugin] background loop stopped");
 }
 
-fn tick(state: &Arc<Mutex<SharedState>>) -> Result<(), String> {
-    let (chat_id, has_scheduled, send_at, scheduled_msg) = {
-        let s = state.lock().map_err(|e| e.to_string())?;
+/// 一次轮询：检查到期任务，发布 `proactive.trigger` 事件。
+fn tick(state: &Arc<Mutex<SharedState>>) {
+    // (chat_id, source, note)
+    let mut triggers: Vec<(String, String, Option<String>)> = Vec::new();
+
+    let event_bus = {
+        let mut s = match state.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
         let chat_id = s.chat_id.clone();
         if chat_id.is_empty() {
-            return Ok(());
+            return;
         }
 
-        // Check time window for semi-auto mode.
-        if s.mode == ProactiveMode::SemiAuto {
-            let in_window = s.time_windows.iter().any(|w| w.contains_now());
-            if !in_window {
-                return Ok(());
-            }
+        // 半自动模式且不在时间窗口 → 不触发，任务原样保留（顺延，进入窗口后补发）。
+        let in_window = match s.mode {
+            ProactiveMode::Auto => true,
+            ProactiveMode::SemiAuto => s.time_windows.iter().any(|w| w.contains_now()),
+        };
+        if !in_window {
+            return;
         }
 
-        let scheduled = s.scheduled.get(&chat_id).cloned();
-        let has_scheduled = scheduled.is_some();
-        let (send_at, scheduled_msg) = scheduled
-            .map(|a| (a.send_at, a.message.clone()))
-            .unwrap_or((Instant::now(), String::new()));
-
-        (chat_id, has_scheduled, send_at, scheduled_msg)
-    };
-
-    // ── Case 1: There's a scheduled action, check if it's time to send ────
-    if has_scheduled {
-        if Instant::now() >= send_at {
-            // Time to send!
-            send_proactive_message(state, &chat_id, &scheduled_msg)?;
-
-            // After sending, ask LLM for next decision.
-            let decision = ask_llm_for_decision(state, &chat_id)?;
-            apply_decision(state, &chat_id, &decision)?;
-        }
-        // else: not yet time, wait for next tick.
-        return Ok(());
-    }
-
-    // ── Case 2: No scheduled action, check cooldown ───────────────────────
-    {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        if let Some(&last) = s.last_decision.get(&chat_id) {
-            if last.elapsed() < Duration::from_secs(DECISION_COOLDOWN_SECS) {
-                return Ok(()); // still in cooldown
-            }
-        }
-    }
-
-    // ── Case 3: Ask LLM for decision ─────────────────────────────────────
-    let decision = ask_llm_for_decision(state, &chat_id)?;
-    apply_decision(state, &chat_id, &decision)?;
-
-    Ok(())
-}
-
-// ── LLM decision ─────────────────────────────────────────────────────────────
-
-fn ask_llm_for_decision(
-    state: &Arc<Mutex<SharedState>>,
-    chat_id: &str,
-) -> Result<LlmDecision, String> {
-    let (_llm, history, logger) = {
-        let s = state.lock().map_err(|e| e.to_string())?;
-        let llm = s.llm.clone().ok_or("no LLM backend")?;
-        let history = s
-            .history
-            .get(chat_id)
-            .cloned()
-            .unwrap_or_default();
-        let logger = s.logger.clone();
-        (llm, history, logger)
-    };
-
-    if history.is_empty() {
-        return Ok(LlmDecision {
-            paused: true,
-            message: String::new(),
-            wait_seconds: 0,
-            continue_: false,
-            reason: "no history".into(),
-        });
-    }
-
-    // Determine who spoke last and how long ago.
-    let last_entry = history.last().unwrap();
-    let last_role = &last_entry.role;
-    let elapsed = last_entry.timestamp.elapsed();
-    let elapsed_str = if elapsed.as_secs() < 60 {
-        format!("{} 秒前", elapsed.as_secs())
-    } else {
-        format!("{} 分钟前", elapsed.as_secs() / 60)
-    };
-
-    let now = chrono::Local::now();
-    let now_str = now.format("%H:%M").to_string();
-
-    // Build conversation transcript.
-    let mut transcript = String::new();
-    for entry in &history {
-        transcript.push_str(&format!("{}: {}\n", entry.role, entry.text));
-    }
-
-    let prompt = format!(
-        "【对话记录】\n\
-         {transcript}\n\
-         \n\
-         【状态】\n\
-         - 最后一条消息来自: {last_role}\n\
-         - 距离最后一条消息: {elapsed_str}\n\
-         - 当前时间: {now_str}\n\
-         \n\
-         【任务】\n\
-         分析以上对话。请以 JSON 格式输出以下决策：\n\
-         {{\n\
-           \"paused\": true,\n\
-           \"message\": \"追问内容\",\n\
-           \"wait_seconds\": 300,\n\
-           \"continue_\": true,\n\
-           \"reason\": \"决策理由\"\n\
-         }}\n\
-         \n\
-         规则：\n\
-         - 如果对话已经自然结束（用户已得到满意答复），paused=true，不需要追问。\n\
-         - 如果对话还在进行中（用户在等待回复），paused=false，但也不要追问（等用户回复）。\n\
-         - 只有当 assistant 已经回复、用户沉默了一段时间，才适合追问。\n\
-         - wait_seconds 建议 30-180 秒。\n\
-         - 只输出 JSON，不要输出其他内容。",
-        transcript = transcript,
-        last_role = last_role,
-        elapsed_str = elapsed_str,
-        now_str = now_str,
-    );
-
-    if let Some(ref l) = logger {
-        l.info("asking LLM for proactive decision...");
-    }
-
-    // Build LLM request.
-    let request = LlmRequest {
-        messages: vec![ChatMessage::user(prompt)],
-        model: None,
-        temperature: Some(0.7),
-        max_tokens: Some(512),
-    };
-
-    // Bridge from raw thread into actix runtime via event_bus internal event.
-    // Set pending_llm_request, fire event, then poll for pending_llm_response.
-    {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.pending_llm_request = Some(request);
-        s.pending_llm_response = None;
-        let event_bus = s.event_bus.clone().ok_or("no event bus")?;
-        drop(s);
-        event_bus.do_send(Event::new(
-            "proactive.internal.llm_decision",
-            serde_json::json!({}),
-            "proactive-plugin",
-        ));
-    }
-
-    // Poll for response with timeout.
-    let start = Instant::now();
-    let timeout = Duration::from_secs(30);
-    loop {
-        {
-            let s = state.lock().map_err(|e| e.to_string())?;
-            if let Some(ref resp) = s.pending_llm_response {
-                let llm_response = match resp {
-                    Ok(r) => r.clone(),
-                    Err(e) => return Err(e.clone()),
-                };
-
-                if let Some(ref l) = logger {
-                    l.info(format!("LLM decision response: {}", &llm_response.content));
-                }
-
-                // Parse the JSON decision from the LLM response.
-                let content = llm_response.content.trim();
-                let json_str = if let Some(start) = content.find('{') {
-                    if let Some(end) = content.rfind('}') {
-                        &content[start..=end]
-                    } else {
-                        content
+        let source = s.source.clone();
+        let now = Instant::now();
+        if let Some(tasks) = s.scheduled.get_mut(&chat_id) {
+            let mut keep: Vec<ScheduledTask> = Vec::with_capacity(tasks.len());
+            for mut task in tasks.drain(..) {
+                if now >= task.send_at {
+                    triggers.push((chat_id.clone(), source.clone(), task.note.clone()));
+                    match task.kind {
+                        ScheduleKind::Once => { /* 触发后丢弃 */ }
+                        ScheduleKind::Recurring(iv) => {
+                            task.send_at = now + iv; // 重新计时，继续循环
+                            keep.push(task);
+                        }
                     }
                 } else {
-                    content
-                };
-
-                let decision: LlmDecision = serde_json::from_str(json_str)
-                    .map_err(|e| format!("failed to parse LLM decision: {} — raw: {}", e, content))?;
-
-                return Ok(decision);
+                    keep.push(task);
+                }
             }
+            *tasks = keep;
         }
-        if start.elapsed() > timeout {
-            return Err("LLM decision timed out".into());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-// ── Apply decision ───────────────────────────────────────────────────────────
-
-fn apply_decision(
-    state: &Arc<Mutex<SharedState>>,
-    chat_id: &str,
-    decision: &LlmDecision,
-) -> Result<(), String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-
-    // Update last decision time.
-    s.last_decision
-        .insert(chat_id.to_string(), Instant::now());
-
-    if decision.paused {
-        // Conversation is paused, do nothing.
-        if let Some(ref logger) = s.logger {
-            logger.info(format!(
-                "LLM decision: paused (reason: {})",
-                decision.reason,
-            ));
-        }
-        return Ok(());
-    }
-
-    if decision.message.is_empty() {
-        if let Some(ref logger) = s.logger {
-            logger.info("LLM decision: no message to send, skipping");
-        }
-        return Ok(());
-    }
-
-    // Schedule the message.
-    let send_at = Instant::now() + Duration::from_secs(decision.wait_seconds.max(30));
-    s.scheduled.insert(
-        chat_id.to_string(),
-        ScheduledAction {
-            message: decision.message.clone(),
-            send_at,
-        },
-    );
-
-    if let Some(ref logger) = s.logger {
-        logger.info(format!(
-            "LLM decision: scheduled message in {}s (reason: {}, continue: {})",
-            decision.wait_seconds,
-            decision.reason,
-            decision.continue_,
-        ));
-    }
-
-    Ok(())
-}
-
-// ── Send proactive message ───────────────────────────────────────────────────
-
-fn send_proactive_message(
-    state: &Arc<Mutex<SharedState>>,
-    chat_id: &str,
-    message: &str,
-) -> Result<(), String> {
-    let (event_bus, source, chat_store, logger) = {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        // Remove the scheduled action.
-        s.scheduled.remove(chat_id);
-
-        let event_bus = s.event_bus.clone().ok_or("no event bus")?;
-        let source = s.source.clone();
-        let chat_store = s.chat_store.clone();
-        let logger = s.logger.clone();
-        (event_bus, source, chat_store, logger)
+        s.event_bus.clone()
     };
 
-    if let Some(ref l) = logger {
-        l.info(format!("sending proactive message: {}", message));
+    if triggers.is_empty() {
+        return;
     }
-
-    // Publish the proactive message via EventBus.
-    let event = Event::new(
-        "proactive.message",
-        serde_json::json!({
-            "text": message,
-            "chat_id": chat_id,
-            "source": source,
-        }),
-        "proactive-plugin",
-    );
-    event_bus.do_send(event);
-
-    // Persist the assistant message to chat history.
-    if let Some(ref store) = chat_store {
-        store.do_send(ChatStoreMsg::Append {
-            role: "assistant".into(),
-            content: message.to_string(),
-        });
-    }
-
-    // Also record in our own history.
-    if let Ok(mut s) = state.lock() {
-        let history = s.history.entry(chat_id.to_string()).or_default();
-        history.push(HistoryEntry {
-            role: "assistant".into(),
-            text: message.to_string(),
-            timestamp: Instant::now(),
-        });
-        if history.len() > MAX_HISTORY {
-            history.remove(0);
+    if let Some(bus) = event_bus {
+        for (chat_id, source, note) in triggers {
+            let mut data = serde_json::json!({ "chat_id": chat_id, "source": source });
+            if let Some(n) = note {
+                data["note"] = serde_json::json!(n);
+            }
+            bus.do_send(Event::new("proactive.trigger", data, "proactive-plugin"));
         }
     }
-
-    Ok(())
 }
 
-// ── FFI exports ──────────────────────────────────────────────────────────────
+// ── FFI 导出 ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
@@ -868,4 +514,3 @@ pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_destroy(_plugin: Box<dyn Plugin>) {}
-
