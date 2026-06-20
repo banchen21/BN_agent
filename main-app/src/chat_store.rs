@@ -99,8 +99,14 @@ impl ChatStoreActor {
                 peer_id TEXT DEFAULT '',
                 message_json TEXT DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_created ON chat_history(created_at);
+            );",
+        )?;
+        // 平滑升级旧库：追加 message_json/peer_id 列（已存在则忽略）
+        let _ = conn
+            .execute_batch("ALTER TABLE chat_history ADD COLUMN message_json TEXT DEFAULT NULL");
+        let _ = conn.execute_batch("ALTER TABLE chat_history ADD COLUMN peer_id TEXT DEFAULT ''");
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_created ON chat_history(created_at);
             CREATE INDEX IF NOT EXISTS idx_peer_id_id ON chat_history(peer_id, id);
             CREATE TABLE IF NOT EXISTS owner_binding (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -108,10 +114,6 @@ impl ChatStoreActor {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
         )?;
-        // 平滑升级旧库：追加 message_json/peer_id 列（已存在则忽略）
-        let _ = conn
-            .execute_batch("ALTER TABLE chat_history ADD COLUMN message_json TEXT DEFAULT NULL");
-        let _ = conn.execute_batch("ALTER TABLE chat_history ADD COLUMN peer_id TEXT DEFAULT ''");
         Ok(Self { conn })
     }
 
