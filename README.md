@@ -39,6 +39,7 @@
 | **EventBus** | 全局事件总线，topic 匹配发布/订阅 |
 | **PluginManager** | 动态加载/卸载 `cdylib` 插件，广播事件 |
 | **PipelineActor** | 编排 LLM 工具调用循环：限流→重试→LLM→工具→回复 |
+| **AgentLoopActor** | 显式目标驱动的 observe→decide→act 循环，支持预算、状态查询和停止 |
 | **LlmActor** | OpenAI 兼容 API 封装，支持流式 SSE、多模态、SQLite 历史 |
 | **RetryActor** | 指数退避重试 + 熔断器（Circuit Breaker） |
 | **TokenUsageActor** | Token 用量 SQLite 持久化及查询 |
@@ -108,6 +109,7 @@ cargo run -p main-app
 | `LLM_MAX_HISTORY` | `15` | 历史对话轮数 |
 | `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
+| `AGENT_LOOP_MAX_SLEEP_SECS` | `60` | Agent Loop 单步 sleep 上限 |
 | `LLM_THINKING` | `disabled` | DeepSeek 思考模式 |
 | `PROACTIVE_MODE` | `auto` | 主动追问模式 (auto/semi-auto) |
 | `PROACTIVE_LOOP_INTERVAL` | `15` | 主动追问轮询间隔(秒) |
@@ -143,6 +145,10 @@ cargo run -p main-app
 | POST | `/api/chat` | 带工具+历史的完整对话 |
 | GET | `/api/tools` | 列出所有已注册工具 |
 | POST | `/api/tools/call` | 直接调用工具 |
+| POST | `/api/agent-loop/start` | 启动目标驱动 Agent Loop |
+| GET | `/api/agent-loop/list` | 列出 Agent Loop 任务 |
+| GET | `/api/agent-loop/status/{id}` | 查询 Agent Loop 状态 |
+| POST | `/api/agent-loop/stop/{id}` | 请求停止 Agent Loop |
 | GET | `/api/metrics` | Prometheus 格式指标 |
 | GET | `/api/metrics/json` | JSON 格式指标 |
 | GET | `/api/token-usage` | 全局 Token 用量 |

@@ -15,6 +15,10 @@
 //! | POST   | `/api/chat`                  | Full chat with tools + history   |
 //! | GET    | `/api/tools`                 | List registered tools            |
 //! | POST   | `/api/tools/call`            | Call a tool directly             |
+//! | POST   | `/api/agent-loop/start`      | Start a goal-driven agent loop   |
+//! | GET    | `/api/agent-loop/list`       | List agent loops                 |
+//! | GET    | `/api/agent-loop/status/{id}` | Get one agent loop status       |
+//! | POST   | `/api/agent-loop/stop/{id}`  | Stop a running agent loop        |
 //! | GET    | `/api/metrics`               | Prometheus-format metrics        |
 //! | GET    | `/api/metrics/json`          | JSON-format metrics              |
 //! | GET    | `/api/token-usage`           | Global token usage summary       |
@@ -23,6 +27,7 @@
 //! | ANY    | `/api/plugin/{name}/{path:.*}` | Proxy to plugin API handler    |
 //! | POST   | `/api/shutdown`              | Graceful shutdown                |
 
+mod agent_loop_actor;
 mod cancellation_actor;
 mod chat_store;
 mod claude_backend;
@@ -39,6 +44,9 @@ mod token_usage_actor;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
+use agent_loop_actor::{
+    AgentLoopActor, GetAgentLoop, ListAgentLoops, StartAgentLoop, StopAgentLoop,
+};
 use cancellation_actor::CancellationActor;
 use chat_store::{ChatStoreActor, ClearAll};
 use llm_actor::{LlmActor, LlmConfig};
@@ -66,6 +74,7 @@ struct AppState {
     retry_addr: Option<Addr<RetryActor>>,
     cancellation_addr: Option<Addr<CancellationActor>>,
     chat_store: Option<Recipient<ChatStoreMsg>>,
+    agent_loop_addr: Option<Addr<AgentLoopActor>>,
 }
 
 // ── Health ───────────────────────────────────────────────────────────────────
@@ -332,6 +341,90 @@ async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>)
         })),
         None => HttpResponse::NotFound()
             .json(serde_json::json!({ "error": format!("tool '{}' not found", body.tool_name) })),
+    }
+}
+
+// ── Agent Loop ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct StartAgentLoopPayload {
+    goal: String,
+    peer_id: Option<String>,
+    max_steps: Option<usize>,
+    max_tool_rounds: Option<usize>,
+}
+
+async fn start_agent_loop(
+    state: web::Data<AppState>,
+    body: web::Json<StartAgentLoopPayload>,
+) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    match agent_loop_addr
+        .send(StartAgentLoop {
+            goal: body.goal.clone(),
+            peer_id: body.peer_id.clone(),
+            max_steps: body.max_steps,
+            max_tool_rounds: body.max_tool_rounds,
+        })
+        .await
+    {
+        Ok(Ok(snapshot)) => HttpResponse::Ok().json(snapshot),
+        Ok(Err(error)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": error })),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
+async fn list_agent_loops(state: web::Data<AppState>) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    match agent_loop_addr.send(ListAgentLoops).await {
+        Ok(loops) => HttpResponse::Ok().json(loops),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
+async fn get_agent_loop(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    match agent_loop_addr
+        .send(GetAgentLoop {
+            id: path.into_inner(),
+        })
+        .await
+    {
+        Ok(Some(snapshot)) => HttpResponse::Ok().json(snapshot),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({ "error": "loop not found" })),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
+async fn stop_agent_loop(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    let id = path.into_inner();
+    match agent_loop_addr.send(StopAgentLoop { id }).await {
+        Ok(true) => HttpResponse::Ok().json(serde_json::json!({ "status": "stopping" })),
+        Ok(false) => {
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "loop not found" }))
+        }
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
     }
 }
 
@@ -676,8 +769,8 @@ fn main() -> std::io::Result<()> {
             Some(addr)
         };
 
-        // ── 11. PipelineActor (if LLM is available). ──
-        if let (Some(ref retry), Some(ref tu), Some(ref metrics)) =
+        // ── 11. PipelineActor + AgentLoopActor (if LLM is available). ──
+        let agent_loop_addr = if let (Some(ref retry), Some(ref tu), Some(ref metrics)) =
             (&retry_addr, &token_usage_addr, &metrics_addr)
         {
             let pipeline = pipeline::PipelineActor::new(
@@ -703,9 +796,23 @@ fn main() -> std::io::Result<()> {
                 recipient: pipeline_addr.recipient(),
             });
             log::info!("PipelineActor subscribed to 'user.message' + 'proactive.trigger'");
+
+            let agent_loop = AgentLoopActor::new(
+                retry.clone(),
+                plugin_manager.clone(),
+                tool_registry.clone(),
+                snapshots.clone(),
+                event_bus.clone(),
+                tu.clone(),
+                metrics.clone(),
+            );
+            let agent_loop_addr = agent_loop.start();
+            log::info!("AgentLoopActor started");
+            Some(agent_loop_addr)
         } else {
             log::warn!("PipelineActor not started — missing LLM or infrastructure actors");
-        }
+            None
+        };
 
         // ── Register host-level tools (plugin management for LLM) ──
         {
@@ -729,6 +836,7 @@ fn main() -> std::io::Result<()> {
             retry_addr,
             cancellation_addr,
             chat_store: Some(store_addr.clone().recipient()),
+            agent_loop_addr,
         });
 
         log::info!("HTTP API listening on http://127.0.0.1:8080");
@@ -746,6 +854,10 @@ fn main() -> std::io::Result<()> {
                 .route("/api/chat", web::post().to(chat))
                 .route("/api/tools", web::get().to(list_tools))
                 .route("/api/tools/call", web::post().to(tool_call))
+                .route("/api/agent-loop/start", web::post().to(start_agent_loop))
+                .route("/api/agent-loop/list", web::get().to(list_agent_loops))
+                .route("/api/agent-loop/status/{id}", web::get().to(get_agent_loop))
+                .route("/api/agent-loop/stop/{id}", web::post().to(stop_agent_loop))
                 .route("/api/metrics", web::get().to(get_metrics))
                 .route("/api/metrics/json", web::get().to(get_metrics_json))
                 .route("/api/token-usage", web::get().to(get_global_token_usage))

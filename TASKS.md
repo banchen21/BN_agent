@@ -7,6 +7,7 @@
 多 IM 接入    ██████████ 完成（Telegram / 飞书 / 微信）
 多模态        ██████████ 完成（图片 / 视频 / ASR / TTS）
 工具系统      ██████████ 完成（MCP 桥接 + Skill 系统）
+Agent Loop    ██████░░░░ MVP（目标循环 + HTTP 控制）
 重试/熔断     ██████████ 完成
 Token 用量    ██████████ 完成
 流式响应      ██████████ 完成
@@ -72,7 +73,10 @@ Token 用量    ██████████ 完成
 ### 架构类
 
 - [x] **Claude CLI 后端** — `LLM_BACKEND=claude` 用 `--resume` 复用原生会话，工具提示词注入
+- [x] **Agent Loop MVP** — `AgentLoopActor` 支持目标启动、observe/decide/act 循环、工具调用、step observation、状态查询与停止
 - [ ] **流式推送至 IM** — 将 `llm.chunk` 事件转发到 Telegram/飞书/微信
+- [ ] **Agent Loop 持久化队列** — loop 状态落库，支持重启恢复、暂停/恢复、按 peer 归档
+- [ ] **Agent Loop 规划器** — 引入 plan/task tree、反思压缩、失败自我修正策略
 - [ ] **LLM 重试持久化** — 熔断状态重启后保持
 - [ ] **Token 预算控制** — 按天/周/月设置 token 上限
 - [ ] **会话管理** — 对话标题、自动摘要、长时间未活动会话回收
@@ -159,6 +163,7 @@ Token 用量    ██████████ 完成
 - **generate_image 默认发到 TG** — tg-im 硬编码订阅 `image.gen.complete` 自动发图且不校验来源，跨平台误发。解决方案：移除自动发图订阅，`generate_image` 返回本地 file_path，由 LLM 按当前平台调 `tg_send_photo`/`wechat_send_image` 发送
 - **主动消息机制重构** — 旧机制靠 `[SCHEDULE:N]` 文本标签，易被 IM 发送工具剥离而不触发。解决方案：改为工具驱动（`proactive_schedule_once`/`recurring`）+ 到期发 `proactive.trigger` 回调 LLM 按当前上下文实时生成
 - **主动插件扩展为自主主动系统** — 原先只能处理用户/LLM 安排后的定时任务。解决方案：proactive-plugin 记录 peer 最近互动，为每个 peer 计算带 jitter/probability/daily limit/backoff 的下一次自主主动机会，到点后自主发布 `proactive.trigger(reason=autonomous_idle)`；Pipeline 使用自主主动提示词回调 LLM，允许返回内部跳过标记避免打扰
+- **缺少完整 Agent Loop 模式** — 原先只有 Pipeline 单次对话工具循环和 proactive tick。解决方案：新增 `AgentLoopActor`，通过 `/api/agent-loop/start` 接收目标，执行 bounded observe→decide→act 循环，记录每步 observation，并提供 list/status/stop 控制接口
 - **微信回复整段发送** — 不像真人。解决方案：按换行/句末标点分句逐条发送（与 tg-im 一致），段间延时防限频
 - **多人接入共享历史/记忆** — chat_history 与 memory 曾全局单桶。解决方案：引入 `peer_id={source}:{平台内id}`，历史按 peer 读写；memory-plugin 的 buffer/facts/snapshot 按 peer 分桶；首个互动者持久化为主人并注入 owner/visitor 关系守则
 
