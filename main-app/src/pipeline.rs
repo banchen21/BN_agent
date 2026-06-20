@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::chat_store::{AppendJsonMessage, ChatStoreActor};
 use crate::metrics_actor::MetricsActor;
+use crate::plugin_manager::PluginManager;
 use crate::rate_limit_actor::RateLimitActor;
 use crate::retry_actor::{RetryActor, RetryChatRequest};
 use crate::token_usage_actor::TokenUsageActor;
-use crate::plugin_manager::PluginManager;
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
@@ -32,6 +32,7 @@ pub struct HandleUserMessage {
     pub text: String,
     pub source: String,
     pub user_name: String,
+    pub peer_id: String,
 }
 
 // ── Actor ────────────────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ impl Actor for PipelineActor {
 async fn process_message(
     text: String,
     source: String,
+    peer_id: String,
     user_name: String,
     image_base64: Option<String>,
     video_base64: Option<String>,
@@ -108,33 +110,49 @@ async fn process_message(
     original_user_msg: Option<String>,
 ) {
     // 1. Rate limit check.
-    let allowed = rate_limit_addr.send(crate::rate_limit_actor::CheckRateLimit).await
+    let allowed = rate_limit_addr
+        .send(crate::rate_limit_actor::CheckRateLimit)
+        .await
         .unwrap_or(true);
     if !allowed {
         log::warn!("[Pipeline] rate limited");
-        emit_reply("⏳ 请求过于频繁，请稍后再试。", &source, &event_bus).await;
+        emit_reply(
+            "⏳ 请求过于频繁，请稍后再试。",
+            &source,
+            &peer_id,
+            &event_bus,
+        )
+        .await;
         return;
     }
 
     // 2. Generate request_id and register with cancellation.
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // 3. Refresh snapshots.
-    let _ = plugin_manager.send(RefreshSnapshots).await;
+    // 3. Refresh peer-scoped snapshots.
+    let _ = plugin_manager
+        .send(RefreshSnapshotsForPeer {
+            peer_id: peer_id.clone(),
+        })
+        .await;
     let contexts: Vec<String> = snapshots.lock().unwrap().clone();
 
     // 4. Collect tool definitions.
     let tools: Vec<serde_json::Value> = match tool_registry.lock() {
-        Ok(reg) => reg.all_defs().iter()
+        Ok(reg) => reg
+            .all_defs()
+            .iter()
             .filter(|d| !d.internal)
-            .map(|d| serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.parameters,
-                }
-            }))
+            .map(|d| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": d.name,
+                        "description": d.description,
+                        "parameters": d.parameters,
+                    }
+                })
+            })
             .collect(),
         Err(_) => vec![],
     };
@@ -144,6 +162,7 @@ async fn process_message(
     let retry_msg = RetryChatRequest {
         request: ChatRequest {
             message: text.clone(),
+            peer_id: peer_id.clone(),
             tools: tools.clone(),
             skip_store: false,
             contexts,
@@ -174,8 +193,16 @@ async fn process_message(
                 model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
                 success: false,
             });
-            metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
-            emit_reply(&format!("抱歉，出错了：{}", e), &source, &event_bus).await;
+            metrics_addr.do_send(crate::metrics_actor::RecordError {
+                category: "llm_api".into(),
+            });
+            emit_reply(
+                &format!("抱歉，出错了：{}", e),
+                &source,
+                &peer_id,
+                &event_bus,
+            )
+            .await;
             return;
         }
         Err(e) => {
@@ -204,7 +231,9 @@ async fn process_message(
 
     // 7. Tool call loop — 最多 LLM_MAX_TOOL_ROUNDS 轮（默认 20）。
     let max_tool_rounds: usize = std::env::var("LLM_MAX_TOOL_ROUNDS")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
 
     let mut current_resp = resp;
     let mut tool_round: usize = 0;
@@ -230,11 +259,13 @@ async fn process_message(
                     })
                 }).collect();
                 store_addr.do_send(AppendJsonMessage {
+                    peer_id: peer_id.clone(),
                     message_json: serde_json::json!({
                         "role": "assistant",
                         "content": null,
                         "tool_calls": tc_array
-                    }).to_string(),
+                    })
+                    .to_string(),
                 });
                 // 保存每轮工具调用的结果（tool role 消息）
                 for (i, tc) in all_tool_calls.iter().enumerate() {
@@ -245,11 +276,13 @@ async fn process_message(
                         "content": result_text,
                     });
                     store_addr.do_send(AppendJsonMessage {
+                        peer_id: peer_id.clone(),
                         message_json: tool_msg.to_string(),
                     });
                 }
                 // 保存最终助理文本回复（可能为空，但确保链完整）
                 store_addr.do_send(AppendJsonMessage {
+                    peer_id: peer_id.clone(),
                     message_json: serde_json::json!({
                         "role": "assistant",
                         "content": if current_resp.content.is_empty() {
@@ -257,28 +290,42 @@ async fn process_message(
                         } else {
                             serde_json::Value::String(current_resp.content.clone())
                         }
-                    }).to_string(),
+                    })
+                    .to_string(),
                 });
             }
             // 广播最终回复（仅当有文本且未通过 IM 工具直接发送时）
             if !current_resp.content.trim().is_empty() && !already_sent_via_im {
-                emit_reply(&current_resp.content, &source, &event_bus).await;
+                emit_reply(&current_resp.content, &source, &peer_id, &event_bus).await;
             }
             // 如果已通过 IM 工具发送，发静默事件通知插件对话已完成
             if already_sent_via_im {
+                let chat_id = chat_id_from_peer_id(&peer_id, &source);
                 event_bus.do_send(Event::new(
                     "assistant.message",
-                    serde_json::json!({ "text": current_resp.content, "source": source, "silent": true }),
+                    serde_json::json!({
+                        "text": current_resp.content,
+                        "source": source,
+                        "peer_id": peer_id,
+                        "chat_id": chat_id,
+                        "silent": true
+                    }),
                     "pipeline",
                 ));
             }
             break;
         }
 
-        log::info!("[Pipeline] tool round {}/{} — {} tool call(s): {:?}",
-            tool_round + 1, max_tool_rounds,
+        log::info!(
+            "[Pipeline] tool round {}/{} — {} tool call(s): {:?}",
+            tool_round + 1,
+            max_tool_rounds,
             current_resp.tool_calls.len(),
-            current_resp.tool_calls.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+            current_resp
+                .tool_calls
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
         );
 
         // 执行本轮工具调用。
@@ -307,7 +354,12 @@ async fn process_message(
             });
 
             if result.success {
-                log::info!("[Pipeline] tool '{}' ok ({}ms): {}", tc.name, tool_ms, result.content);
+                log::info!(
+                    "[Pipeline] tool '{}' ok ({}ms): {}",
+                    tc.name,
+                    tool_ms,
+                    result.content
+                );
                 round_results.push(format!("【{}】\n{}", tc.name, result.content));
 
                 // 标记：IM 插件工具已直接发送消息到用户，避免 emit_reply 重复
@@ -321,7 +373,9 @@ async fn process_message(
                 if tc.name == "generate_image" {
                     let desc_args = result.metadata.as_ref().and_then(|m| {
                         let b64 = m.get("image_base64")?.as_str()?;
-                        if b64.is_empty() { return None; }
+                        if b64.is_empty() {
+                            return None;
+                        }
                         Some(serde_json::json!({
                             "image_base64": b64,
                             "mime_type": m.get("mime_type")
@@ -334,8 +388,12 @@ async fn process_message(
                             if let Some(desc_exec) = reg.get_executor("image_describe") {
                                 let desc_result = desc_exec.execute(&desc_args);
                                 if desc_result.success {
-                                    log::info!("[Pipeline] auto image_describe ok: {}", desc_result.content);
-                                    round_results.push(format!("【自动图片理解】\n{}", desc_result.content));
+                                    log::info!(
+                                        "[Pipeline] auto image_describe ok: {}",
+                                        desc_result.content
+                                    );
+                                    round_results
+                                        .push(format!("【自动图片理解】\n{}", desc_result.content));
                                 } else if let Some(err) = &desc_result.error {
                                     log::warn!("[Pipeline] auto image_describe failed: {}", err);
                                 }
@@ -345,7 +403,12 @@ async fn process_message(
                 }
             } else {
                 let err = result.error.as_deref().unwrap_or("unknown");
-                log::warn!("[Pipeline] tool '{}' failed ({}ms): {}", tc.name, tool_ms, err);
+                log::warn!(
+                    "[Pipeline] tool '{}' failed ({}ms): {}",
+                    tc.name,
+                    tool_ms,
+                    err
+                );
                 round_results.push(format!("【{}】错误：{}", tc.name, err));
             }
         }
@@ -356,29 +419,32 @@ async fn process_message(
 
         // 喂回 LLM（带上所有历史 tool_calls + results）。
         let req_start = std::time::Instant::now();
-        let next = retry_addr.send(RetryChatRequest {
-            request: ChatRequest {
-                message: String::new(),
-                tools: tools.clone(),
-                skip_store: true,
-                original_user_msg: None,
-                contexts: vec![],
-                jailbreak_index: None,
-                image_base64: None,
-                video_base64: None,
-                video_mime: None,
-                file_base64: None,
-                file_name: None,
-                stream: true,
-                request_id: format!("{}-t{}", request_id, tool_round + 1),
-                source: String::new(),
-                user_name: String::new(),
-                max_tokens: None,
-                assistant_tool_calls: all_tool_calls.clone(),
-                tool_results: all_tool_results.clone(),
-            },
-            max_retries: 2,
-        }).await;
+        let next = retry_addr
+            .send(RetryChatRequest {
+                request: ChatRequest {
+                    message: String::new(),
+                    peer_id: peer_id.clone(),
+                    tools: tools.clone(),
+                    skip_store: true,
+                    original_user_msg: None,
+                    contexts: vec![],
+                    jailbreak_index: None,
+                    image_base64: None,
+                    video_base64: None,
+                    video_mime: None,
+                    file_base64: None,
+                    file_name: None,
+                    stream: true,
+                    request_id: format!("{}-t{}", request_id, tool_round + 1),
+                    source: source.clone(),
+                    user_name: user_name.clone(),
+                    max_tokens: None,
+                    assistant_tool_calls: all_tool_calls.clone(),
+                    tool_results: all_tool_results.clone(),
+                },
+                max_retries: 2,
+            })
+            .await;
 
         match next {
             Ok(Ok(r)) => {
@@ -405,11 +471,17 @@ async fn process_message(
                     model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
                     success: false,
                 });
-                metrics_addr.do_send(crate::metrics_actor::RecordError { category: "llm_api".into() });
+                metrics_addr.do_send(crate::metrics_actor::RecordError {
+                    category: "llm_api".into(),
+                });
                 break;
             }
             Err(e) => {
-                log::error!("[Pipeline] tool round {} mailbox error: {:?}", tool_round + 1, e);
+                log::error!(
+                    "[Pipeline] tool round {} mailbox error: {:?}",
+                    tool_round + 1,
+                    e
+                );
                 break;
             }
         }
@@ -434,18 +506,35 @@ impl Handler<HandleUserMessage> for PipelineActor {
         let text = msg.text;
         let source = msg.source;
         let user_name = msg.user_name;
+        let peer_id = msg.peer_id;
 
         let fut = async move {
             log::info!("[Pipeline] @{}: {}", user_name, text);
             process_message(
-                text, source, user_name,
-                None, None, None, None, None,
-                retry_addr, plugin_manager, tool_registry, snapshots,
-                event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr, store_addr,
+                text,
+                source,
+                peer_id,
+                user_name,
                 None,
-            ).await;
-        }.into_actor(self).map(|_, _ctx: &mut Self, _| ());
+                None,
+                None,
+                None,
+                None,
+                retry_addr,
+                plugin_manager,
+                tool_registry,
+                snapshots,
+                event_bus,
+                rate_limit_addr,
+                token_usage_addr,
+                metrics_addr,
+                store_addr,
+                None,
+            )
+            .await;
+        }
+        .into_actor(self)
+        .map(|_, _ctx: &mut Self, _| ());
 
         Box::pin(fut)
     }
@@ -459,8 +548,31 @@ impl Handler<Event> for PipelineActor {
     fn handle(&mut self, event: Event, _ctx: &mut Self::Context) {
         // ── 主动触发：到期后回调 LLM，按当前上下文实时生成主动消息 ──
         if event.topic == "proactive.trigger" {
-            let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let note = event.data.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let source = event
+                .data
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let peer_id = event
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| derive_peer_id(&event.data, &source))
+                .unwrap_or_else(|| {
+                    if source.is_empty() {
+                        "system:proactive".to_string()
+                    } else {
+                        format!("{}:{}", source, "proactive")
+                    }
+                });
+            let note = event
+                .data
+                .get("note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let note_part = if note.is_empty() {
                 String::new()
             } else {
@@ -483,15 +595,33 @@ impl Handler<Event> for PipelineActor {
             let metrics_addr = self.metrics_addr.clone();
             let store_addr = self.store_addr.clone();
             actix::spawn(async move {
-                log::info!("[Pipeline] proactive trigger (source={})", source);
+                log::info!(
+                    "[Pipeline] proactive trigger (source={}, peer_id={})",
+                    source,
+                    peer_id
+                );
                 process_message(
-                    text, source, String::new(),
-                    None, None, None, None, None,
-                    retry_addr, plugin_manager, tool_registry, snapshots,
-                    event_bus, rate_limit_addr, token_usage_addr,
-                    metrics_addr, store_addr,
+                    text,
+                    source,
+                    peer_id,
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    retry_addr,
+                    plugin_manager,
+                    tool_registry,
+                    snapshots,
+                    event_bus,
+                    rate_limit_addr,
+                    token_usage_addr,
+                    metrics_addr,
+                    store_addr,
                     Some(String::new()),
-                ).await;
+                )
+                .await;
             });
             return;
         }
@@ -500,18 +630,71 @@ impl Handler<Event> for PipelineActor {
             return;
         }
 
-        let raw_text = event.data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let raw_text = event
+            .data
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let source = event
+            .data
+            .get("source")
+            .and_then(|v| v.as_str())
+            .or_else(|| event.data.get("platform").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
         // 平台信息已在系统提示中注入，直接使用原始文本即可
         let text = raw_text;
-        let user_name = event.data.get("user_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let image_base64 = event.data.get("image_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let video_base64 = event.data.get("video_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let video_mime = event.data.get("video_mime").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let file_base64 = event.data.get("file_base64").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let file_name = event.data.get("file_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let peer_id = event
+            .data
+            .get("peer_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| derive_peer_id(&event.data, &source))
+            .unwrap_or_else(|| {
+                if source.is_empty() {
+                    "unknown:anonymous".to_string()
+                } else {
+                    format!("{}:{}", source, "anonymous")
+                }
+            });
+        let user_name = event
+            .data
+            .get("user_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let image_base64 = event
+            .data
+            .get("image_base64")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let video_base64 = event
+            .data
+            .get("video_base64")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let video_mime = event
+            .data
+            .get("video_mime")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let file_base64 = event
+            .data
+            .get("file_base64")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let file_name = event
+            .data
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        if text.is_empty() && image_base64.is_none() && video_base64.is_none() && file_base64.is_none() {
+        if text.is_empty()
+            && image_base64.is_none()
+            && video_base64.is_none()
+            && file_base64.is_none()
+        {
             return;
         }
 
@@ -533,28 +716,94 @@ impl Handler<Event> for PipelineActor {
             }
 
             process_message(
-                text, source, user_name,
-                image_base64, video_base64, video_mime, file_base64, file_name,
-                retry_addr, plugin_manager, tool_registry, snapshots,
-                event_bus, rate_limit_addr, token_usage_addr,
-                metrics_addr, store_addr,
+                text,
+                source,
+                peer_id,
+                user_name,
+                image_base64,
+                video_base64,
+                video_mime,
+                file_base64,
+                file_name,
+                retry_addr,
+                plugin_manager,
+                tool_registry,
+                snapshots,
+                event_bus,
+                rate_limit_addr,
+                token_usage_addr,
+                metrics_addr,
+                store_addr,
                 None,
-            ).await;
+            )
+            .await;
         });
     }
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-async fn emit_reply(
-    text: &str,
-    source: &str,
-    event_bus: &Addr<EventBus>,
-) {
+async fn emit_reply(text: &str, source: &str, peer_id: &str, event_bus: &Addr<EventBus>) {
+    let chat_id = chat_id_from_peer_id(peer_id, source);
     let reply = Event::new(
         "route.message",
-        serde_json::json!({ "text": text, "source": source }),
+        serde_json::json!({
+            "text": text,
+            "source": source,
+            "peer_id": peer_id,
+            "chat_id": chat_id,
+        }),
         "pipeline",
     );
     event_bus.do_send(reply);
+}
+
+fn derive_peer_id(data: &serde_json::Value, source: &str) -> Option<String> {
+    let source = if source.is_empty() {
+        data.get("source")
+            .and_then(|v| v.as_str())
+            .or_else(|| data.get("platform").and_then(|v| v.as_str()))
+            .unwrap_or("")
+    } else {
+        source
+    };
+    if source.is_empty() {
+        return None;
+    }
+
+    let raw_id = data
+        .get("chat_id")
+        .and_then(|v| v.as_str().map(String::from))
+        .or_else(|| {
+            data.get("chat_id")
+                .and_then(|v| v.as_i64().map(|n| n.to_string()))
+        })
+        .or_else(|| {
+            data.get("from_user_id")
+                .and_then(|v| v.as_str().map(String::from))
+        })
+        .or_else(|| {
+            data.get("user_id")
+                .and_then(|v| v.as_str().map(String::from))
+        });
+
+    raw_id.and_then(|id| {
+        let id = id.trim();
+        if id.is_empty() {
+            None
+        } else {
+            Some(format!("{}:{}", source, id))
+        }
+    })
+}
+
+fn chat_id_from_peer_id(peer_id: &str, source: &str) -> Option<String> {
+    let (prefix, id) = peer_id.split_once(':')?;
+    if id.is_empty() {
+        return None;
+    }
+    if !source.is_empty() && prefix != source {
+        return None;
+    }
+    Some(id.to_string())
 }

@@ -24,6 +24,7 @@ use std::time::Instant;
 pub struct ChannelState {
     pub source: String,
     pub chat_id: Option<String>,
+    pub peer_id: Option<String>,
     #[allow(dead_code)]
     pub updated_at: Instant,
 }
@@ -96,6 +97,7 @@ impl MessageRouter {
                 data.get("chat_id")
                     .and_then(|v| v.as_i64().map(|n| n.to_string()))
             });
+        let peer_id = Self::peer_id_from_data(data, &source);
 
         let mut channels = self.channels.lock().unwrap();
         channels.insert(
@@ -103,6 +105,7 @@ impl MessageRouter {
             ChannelState {
                 source,
                 chat_id,
+                peer_id,
                 updated_at: Instant::now(),
             },
         );
@@ -134,47 +137,55 @@ impl MessageRouter {
                 data.get("chat_id")
                     .and_then(|v| v.as_i64().map(|n| n.to_string()))
             });
+        let requested_peer_id = data
+            .get("peer_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         // 4. 确定目标列表
         let channels = self.channels.lock().unwrap();
-        let targets: Vec<ChannelState> = if requested_source.is_empty()
-            || requested_source == "unknown"
-        {
-            // source 为空或 unknown → 广播到所有已知通道
-            let all: Vec<ChannelState> = channels.values().cloned().collect();
-            if all.is_empty() {
-                log::warn!("[MessageRouter] broadcast requested but no channels registered");
-            }
-            all
-        } else if let Some(state) = channels.get(&requested_source) {
-            vec![state.clone()]
-        } else if !channels.is_empty() {
-            // 指定的 source 不在注册表中 → 回退到广播
-            log::warn!(
-                "[MessageRouter] source '{}' not in registry, falling back to broadcast",
-                requested_source
-            );
-            channels.values().cloned().collect()
-        } else {
-            // 无任何通道 — 发个临时的，听天由命
-            vec![ChannelState {
-                source: requested_source.clone(),
-                chat_id: requested_chat_id.clone(),
-                updated_at: Instant::now(),
-            }]
-        };
+        let targets: Vec<ChannelState> =
+            if requested_source.is_empty() || requested_source == "unknown" {
+                // source 为空或 unknown → 广播到所有已知通道
+                let all: Vec<ChannelState> = channels.values().cloned().collect();
+                if all.is_empty() {
+                    log::warn!("[MessageRouter] broadcast requested but no channels registered");
+                }
+                all
+            } else if let Some(state) = channels.get(&requested_source) {
+                vec![state.clone()]
+            } else if !channels.is_empty() {
+                // 指定的 source 不在注册表中 → 回退到广播
+                log::warn!(
+                    "[MessageRouter] source '{}' not in registry, falling back to broadcast",
+                    requested_source
+                );
+                channels.values().cloned().collect()
+            } else {
+                // 无任何通道 — 发个临时的，听天由命
+                vec![ChannelState {
+                    source: requested_source.clone(),
+                    chat_id: requested_chat_id.clone(),
+                    peer_id: requested_peer_id.clone(),
+                    updated_at: Instant::now(),
+                }]
+            };
         drop(channels);
 
         // 5. 转发
         for target in &targets {
-            let chat_id = requested_chat_id
-                .clone()
-                .or_else(|| target.chat_id.clone());
+            let chat_id = requested_chat_id.clone().or_else(|| target.chat_id.clone());
+            let peer_id = requested_peer_id.clone().or_else(|| target.peer_id.clone());
 
             let mut payload = serde_json::json!({
                 "text": text,
                 "source": target.source,
             });
+
+            if let Some(ref pid) = peer_id {
+                payload["peer_id"] = serde_json::json!(pid);
+            }
 
             if let Some(ref cid) = chat_id {
                 // 尝试数值解析（Telegram 用 i64）
@@ -198,7 +209,44 @@ impl MessageRouter {
         }
 
         if targets.is_empty() {
-            log::warn!("[MessageRouter] no targets for route.message (source='{}', no known channels)", requested_source);
+            log::warn!(
+                "[MessageRouter] no targets for route.message (source='{}', no known channels)",
+                requested_source
+            );
         }
+    }
+
+    fn peer_id_from_data(data: &serde_json::Value, source: &str) -> Option<String> {
+        if let Some(peer_id) = data.get("peer_id").and_then(|v| v.as_str()) {
+            let peer_id = peer_id.trim();
+            if !peer_id.is_empty() {
+                return Some(peer_id.to_string());
+            }
+        }
+
+        let raw_id = data
+            .get("chat_id")
+            .and_then(|v| v.as_str().map(String::from))
+            .or_else(|| {
+                data.get("chat_id")
+                    .and_then(|v| v.as_i64().map(|n| n.to_string()))
+            })
+            .or_else(|| {
+                data.get("from_user_id")
+                    .and_then(|v| v.as_str().map(String::from))
+            })
+            .or_else(|| {
+                data.get("user_id")
+                    .and_then(|v| v.as_str().map(String::from))
+            });
+
+        raw_id.and_then(|id| {
+            let id = id.trim();
+            if source.is_empty() || id.is_empty() {
+                None
+            } else {
+                Some(format!("{}:{}", source, id))
+            }
+        })
     }
 }

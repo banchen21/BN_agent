@@ -22,8 +22,9 @@
 
 use chrono::Datelike;
 use plugin_interface::*;
-use serde::Deserialize;
 use rusqlite::{params, Connection};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -51,11 +52,19 @@ struct ExtractionResult {
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
-struct SharedState {
+#[derive(Default)]
+struct PeerBuffer {
     /// Buffered messages: Vec<(role, text)>
     buffer: Vec<(String, String)>,
     /// Total messages buffered since last extraction.
     msg_count: usize,
+    /// Whether an extraction is in flight.
+    extracting: bool,
+}
+
+struct SharedState {
+    /// Per-peer buffered messages and extraction state.
+    peers: HashMap<String, PeerBuffer>,
     /// Extraction threshold (env MEMORY_EXTRACT_EVERY).
     extract_every: usize,
     /// SQLite connection.
@@ -64,8 +73,6 @@ struct SharedState {
     llm: Option<Recipient<LlmRequest>>,
     /// Plugin logger.
     logger: Option<PluginLogger>,
-    /// Whether an extraction is in flight.
-    extracting: bool,
 }
 
 // ── Plugin struct ────────────────────────────────────────────────────────────
@@ -81,32 +88,196 @@ impl MemoryPlugin {
             info: PluginInfo {
                 name: "memory-plugin".into(),
                 version: "0.1.0".into(),
-                description: "Engram-style bi-temporal memory: marks contradictions instead of deleting".into(),
+                description:
+                    "Engram-style bi-temporal memory: marks contradictions instead of deleting"
+                        .into(),
                 author: "bn-agent".into(),
                 min_host_version: "0.1.0".into(),
             },
             state: Arc::new(Mutex::new(SharedState {
-                buffer: Vec::new(),
-                msg_count: 0,
+                peers: HashMap::new(),
                 extract_every: DEFAULT_EXTRACT_EVERY,
                 db: None,
                 llm: None,
                 logger: None,
-                extracting: false,
             })),
         }
     }
 
+    fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_id TEXT NOT NULL DEFAULT '',
+                fact TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                superseded_by INTEGER DEFAULT NULL,
+                importance INTEGER DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(peer_id, fact)
+            );",
+        )?;
+
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN peer_id TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN is_active INTEGER DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN superseded_by INTEGER DEFAULT NULL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN importance INTEGER DEFAULT 1",
+            [],
+        );
+
+        let create_sql = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+            .to_lowercase()
+            .replace(' ', "");
+
+        if !create_sql.contains("unique(peer_id,fact)") {
+            conn.execute_batch(
+                "CREATE TABLE memories_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    peer_id TEXT NOT NULL DEFAULT '',
+                    fact TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT '',
+                    is_active INTEGER DEFAULT 1,
+                    superseded_by INTEGER DEFAULT NULL,
+                    importance INTEGER DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(peer_id, fact)
+                );
+                INSERT OR IGNORE INTO memories_v2 (
+                    id, peer_id, fact, category, is_active, superseded_by, importance, created_at
+                )
+                SELECT
+                    id,
+                    COALESCE(peer_id, ''),
+                    fact,
+                    category,
+                    COALESCE(is_active, 1),
+                    superseded_by,
+                    COALESCE(importance, 1),
+                    created_at
+                FROM memories;
+                DROP TABLE memories;
+                ALTER TABLE memories_v2 RENAME TO memories;",
+            )?;
+        }
+
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_memories_peer_active ON memories(peer_id, is_active);
+             CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);",
+        )?;
+        Ok(())
+    }
+
+    fn owner_peer_id_from_chat_store() -> Option<String> {
+        let path =
+            std::env::var("CHAT_HISTORY_DB_PATH").unwrap_or_else(|_| "data/chat_history.db".into());
+        if !std::path::Path::new(&path).exists() {
+            return None;
+        }
+        let conn = Connection::open(path).ok()?;
+        conn.query_row(
+            "SELECT owner_peer_id FROM owner_binding WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    }
+
+    fn backfill_legacy_memories_to_owner(db: &Connection, logger: &Option<PluginLogger>) {
+        let Some(owner_peer_id) = Self::owner_peer_id_from_chat_store() else {
+            return;
+        };
+        match db.execute(
+            "UPDATE memories SET peer_id = ?1 WHERE peer_id IS NULL OR peer_id = ''",
+            params![owner_peer_id],
+        ) {
+            Ok(n) if n > 0 => {
+                if let Some(ref l) = logger {
+                    l.info(format!("backfilled {} legacy memories to owner peer", n));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                if let Some(ref l) = logger {
+                    l.error(format!("failed to backfill legacy memories: {}", e));
+                }
+            }
+        }
+    }
+
+    fn peer_id_from_event(data: &serde_json::Value) -> Option<String> {
+        if let Some(peer_id) = data.get("peer_id").and_then(|v| v.as_str()) {
+            let peer_id = peer_id.trim();
+            if !peer_id.is_empty() {
+                return Some(peer_id.to_string());
+            }
+        }
+
+        let source = data
+            .get("source")
+            .and_then(|v| v.as_str())
+            .or_else(|| data.get("platform").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim();
+        if source.is_empty() {
+            return None;
+        }
+
+        let raw_id = data
+            .get("chat_id")
+            .and_then(|v| v.as_str().map(String::from))
+            .or_else(|| {
+                data.get("chat_id")
+                    .and_then(|v| v.as_i64().map(|n| n.to_string()))
+            })
+            .or_else(|| {
+                data.get("from_user_id")
+                    .and_then(|v| v.as_str().map(String::from))
+            })
+            .or_else(|| {
+                data.get("user_id")
+                    .and_then(|v| v.as_str().map(String::from))
+            });
+
+        raw_id.and_then(|id| {
+            let id = id.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some(format!("{}:{}", source, id))
+            }
+        })
+    }
+
     /// Read active facts from DB and format them for the extraction prompt.
-    fn existing_facts_context(db: &Connection) -> String {
+    fn existing_facts_context(db: &Connection, peer_id: &str) -> String {
         let mut stmt = match db.prepare(
-            "SELECT id, fact, category FROM memories WHERE is_active=1 ORDER BY importance DESC, created_at DESC"
+            "SELECT id, fact, category FROM memories
+             WHERE peer_id=?1 AND is_active=1
+             ORDER BY importance DESC, created_at DESC",
         ) {
             Ok(s) => s,
             Err(_) => return String::new(),
         };
         let rows: Vec<String> = stmt
-            .query_map([], |row| {
+            .query_map(params![peer_id], |row| {
                 let id: i64 = row.get(0)?;
                 let fact: String = row.get(1)?;
                 let cat: String = row.get(2)?;
@@ -119,7 +290,10 @@ impl MemoryPlugin {
         if rows.is_empty() {
             String::new()
         } else {
-            format!("已有记忆（带 id，如新事实与某条矛盾请引用其 id）：\n{}\n", rows.join("\n"))
+            format!(
+                "已有记忆（带 id，如新事实与某条矛盾请引用其 id）：\n{}\n",
+                rows.join("\n")
+            )
         }
     }
 
@@ -159,23 +333,27 @@ impl MemoryPlugin {
                  {{\"fact\": \"小明今年21岁\", \"category\": \"个人信息\", \"supersedes\": 2}}\n\
                ]\n\
              }}",
-            existing_section,
-            conversation,
+            existing_section, conversation,
         )
     }
 
     /// Store extracted facts with Engram-style contradiction tracking.
-    fn store_facts(db: &Connection, facts: &[ExtractedFact], logger: &Option<PluginLogger>) {
+    fn store_facts(
+        db: &Connection,
+        peer_id: &str,
+        facts: &[ExtractedFact],
+        logger: &Option<PluginLogger>,
+    ) {
         for f in facts {
             // UPSERT: new fact, or bump importance + refresh timestamp on re-extraction.
             let result = db.execute(
-                "INSERT INTO memories (fact, category, is_active, importance) VALUES (?1, ?2, 1, 1)
-                 ON CONFLICT(fact) DO UPDATE SET
+                "INSERT INTO memories (peer_id, fact, category, is_active, importance) VALUES (?1, ?2, ?3, 1, 1)
+                 ON CONFLICT(peer_id, fact) DO UPDATE SET
                      category=excluded.category,
                      is_active=1,
                      importance=importance+1,
                      created_at=CURRENT_TIMESTAMP",
-                params![f.fact, f.category],
+                params![peer_id, f.fact, f.category],
             );
 
             match result {
@@ -183,8 +361,8 @@ impl MemoryPlugin {
                     // Get the id of the just-inserted/updated fact.
                     let new_id: Option<i64> = db
                         .query_row(
-                            "SELECT id FROM memories WHERE fact=?1",
-                            params![f.fact],
+                            "SELECT id FROM memories WHERE peer_id=?1 AND fact=?2",
+                            params![peer_id, f.fact],
                             |row| row.get(0),
                         )
                         .ok();
@@ -194,8 +372,8 @@ impl MemoryPlugin {
                     if let (Some(old_id), Some(nid)) = (f.supersedes, new_id) {
                         let _ = db.execute(
                             "UPDATE memories SET is_active=0, superseded_by=?1
-                             WHERE id=?2 AND is_active=1",
-                            params![nid, old_id],
+                             WHERE id=?2 AND peer_id=?3 AND is_active=1",
+                            params![nid, old_id, peer_id],
                         );
                     }
 
@@ -205,7 +383,10 @@ impl MemoryPlugin {
                         ""
                     };
                     if let Some(ref l) = logger {
-                        l.info(format!("memory stored{}: [{}] {}", supersedes_note, f.category, f.fact));
+                        l.info(format!(
+                            "memory stored{} for {}: [{}] {}",
+                            supersedes_note, peer_id, f.category, f.fact
+                        ));
                     }
                 }
                 Err(e) => {
@@ -236,9 +417,10 @@ impl Plugin for MemoryPlugin {
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         let extract_every: usize = std::env::var("MEMORY_EXTRACT_EVERY")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_EXTRACT_EVERY);
-        let db_path = std::env::var("MEMORY_DB_PATH")
-            .unwrap_or_else(|_| "data/memories.db".into());
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_EXTRACT_EVERY);
+        let db_path = std::env::var("MEMORY_DB_PATH").unwrap_or_else(|_| "data/memories.db".into());
 
         // Ensure the data directory exists.
         if let Some(parent) = std::path::Path::new(&db_path).parent() {
@@ -246,23 +428,7 @@ impl Plugin for MemoryPlugin {
         }
 
         let conn = Connection::open(&db_path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fact TEXT NOT NULL UNIQUE,
-                category TEXT NOT NULL DEFAULT '',
-                is_active INTEGER DEFAULT 1,
-                superseded_by INTEGER DEFAULT NULL,
-                importance INTEGER DEFAULT 1,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active);
-            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);",
-        )?;
-        // Smooth upgrade: add columns if they don't exist (ignore errors for existing).
-        let _ = conn.execute("ALTER TABLE memories ADD COLUMN is_active INTEGER DEFAULT 1", []);
-        let _ = conn.execute("ALTER TABLE memories ADD COLUMN superseded_by INTEGER DEFAULT NULL", []);
-        let _ = conn.execute("ALTER TABLE memories ADD COLUMN importance INTEGER DEFAULT 1", []);
+        Self::init_schema(&conn)?;
 
         let logger = ctx.logger.clone();
         logger.info(format!(
@@ -293,6 +459,10 @@ impl Plugin for MemoryPlugin {
     fn on_event(&self, event: &Event) -> bool {
         match event.topic.as_str() {
             "user.message" | "assistant.message" => {
+                let peer_id = match Self::peer_id_from_event(&event.data) {
+                    Some(id) => id,
+                    None => return true,
+                };
                 let text = event
                     .data
                     .get("text")
@@ -302,39 +472,61 @@ impl Plugin for MemoryPlugin {
                 if text.is_empty() {
                     return true;
                 }
-                let role = if event.topic == "user.message" { "user" } else { "assistant" };
+                let role = if event.topic == "user.message" {
+                    "user"
+                } else {
+                    "assistant"
+                };
 
-                let (should_extract, conversation, llm, existing_facts) = {
+                let (should_extract, conversation, llm, existing_facts, logger) = {
                     let mut s = match self.state.lock() {
                         Ok(s) => s,
                         Err(_) => return true,
                     };
 
-                    if s.extracting {
-                        return true;
-                    }
+                    let extract_every = s.extract_every;
+                    let (should_extract, conversation) = {
+                        let peer = s.peers.entry(peer_id.clone()).or_default();
+                        if peer.extracting {
+                            return true;
+                        }
 
-                    s.buffer.push((role.to_string(), text));
-                    s.msg_count += 1;
+                        peer.buffer.push((role.to_string(), text));
+                        peer.msg_count += 1;
 
-                    if s.msg_count >= s.extract_every {
-                        s.extracting = true;
-                        let conversation = s.buffer.iter()
-                            .map(|(r, t)| format!("{}: {}", r, t))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let existing = s.db.as_ref()
-                            .map(|db| Self::existing_facts_context(db))
-                            .unwrap_or_default();
-                        (true, conversation, s.llm.clone(), existing)
+                        if peer.msg_count >= extract_every {
+                            peer.extracting = true;
+                            let conversation = peer
+                                .buffer
+                                .iter()
+                                .map(|(r, t)| format!("{}: {}", r, t))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (true, conversation)
+                        } else {
+                            (false, String::new())
+                        }
+                    };
+
+                    if should_extract {
+                        let logger = s.logger.clone();
+                        if let Some(db) = s.db.as_ref() {
+                            Self::backfill_legacy_memories_to_owner(db, &logger);
+                        }
+                        let existing =
+                            s.db.as_ref()
+                                .map(|db| Self::existing_facts_context(db, &peer_id))
+                                .unwrap_or_default();
+                        (true, conversation, s.llm.clone(), existing, logger)
                     } else {
-                        (false, String::new(), None, String::new())
+                        (false, String::new(), None, String::new(), s.logger.clone())
                     }
                 };
 
                 if should_extract {
                     if let Some(llm) = llm {
                         let state = Arc::clone(&self.state);
+                        let peer_id_for_task = peer_id.clone();
                         let prompt = Self::build_extraction_prompt(&conversation, &existing_facts);
                         let request = LlmRequest {
                             messages: vec![ChatMessage::user(prompt)],
@@ -357,7 +549,9 @@ impl Plugin for MemoryPlugin {
                                             if let Some(ref l) = s.logger {
                                                 l.error(format!("LLM extraction error: {}", e));
                                             }
-                                            s.extracting = false;
+                                            if let Some(peer) = s.peers.get_mut(&peer_id_for_task) {
+                                                peer.extracting = false;
+                                            }
                                         }
                                         return;
                                     }
@@ -366,7 +560,9 @@ impl Plugin for MemoryPlugin {
                                             if let Some(ref l) = s.logger {
                                                 l.error(format!("LLM mailbox error: {}", e));
                                             }
-                                            s.extracting = false;
+                                            if let Some(peer) = s.peers.get_mut(&peer_id_for_task) {
+                                                peer.extracting = false;
+                                            }
                                         }
                                         return;
                                     }
@@ -390,18 +586,25 @@ impl Plugin for MemoryPlugin {
                                             let db = s.db.as_ref();
                                             let logger = s.logger.clone();
                                             if let Some(db) = db {
-                                                Self::store_facts(db, &extracted.facts, &logger);
+                                                Self::store_facts(
+                                                    db,
+                                                    &peer_id_for_task,
+                                                    &extracted.facts,
+                                                    &logger,
+                                                );
                                             }
-                                            s.buffer.clear();
-                                            s.msg_count = 0;
-                                            s.extracting = false;
+                                            if let Some(peer) = s.peers.get_mut(&peer_id_for_task) {
+                                                peer.buffer.clear();
+                                                peer.msg_count = 0;
+                                                peer.extracting = false;
+                                            }
                                             let fact_count = extracted.facts.len();
                                             (fact_count, logger)
                                         };
                                         if let Some(ref l) = result.1 {
                                             l.info(format!(
-                                                "extracted {} facts, buffer cleared",
-                                                result.0
+                                                "extracted {} facts for {}, buffer cleared",
+                                                result.0, peer_id_for_task
                                             ));
                                         }
                                     }
@@ -413,12 +616,26 @@ impl Plugin for MemoryPlugin {
                                                     e, content
                                                 ));
                                             }
-                                            s.extracting = false;
+                                            if let Some(peer) = s.peers.get_mut(&peer_id_for_task) {
+                                                peer.extracting = false;
+                                            }
                                         }
                                     }
                                 }
                             });
                         });
+                    } else {
+                        if let Ok(mut s) = self.state.lock() {
+                            if let Some(ref l) = logger {
+                                l.error(format!(
+                                    "LLM unavailable for memory extraction: {}",
+                                    peer_id
+                                ));
+                            }
+                            if let Some(peer) = s.peers.get_mut(&peer_id) {
+                                peer.extracting = false;
+                            }
+                        }
                     }
                 }
                 true
@@ -428,11 +645,26 @@ impl Plugin for MemoryPlugin {
     }
 
     fn snapshot(&self) -> Option<String> {
+        None
+    }
+
+    fn snapshot_for_peer(&self, peer_id: &str) -> Option<String> {
+        let peer_id = peer_id.trim();
+        if peer_id.is_empty() {
+            return None;
+        }
+
         let s = self.state.lock().ok()?;
         let db = s.db.as_ref()?;
+        let logger = s.logger.clone();
+        Self::backfill_legacy_memories_to_owner(db, &logger);
 
         let mut stmt = db
-            .prepare("SELECT fact, is_active, created_at FROM memories WHERE is_active >= 0 ORDER BY is_active DESC, importance DESC, created_at DESC")
+            .prepare(
+                "SELECT fact, is_active, created_at FROM memories
+                 WHERE peer_id=?1 AND is_active >= 0
+                 ORDER BY is_active DESC, importance DESC, created_at DESC",
+            )
             .ok()?;
 
         let mut labeled: Vec<(String, Vec<String>)> = Vec::new();
@@ -450,7 +682,7 @@ impl Plugin for MemoryPlugin {
         };
 
         let rows: Vec<(String, bool, chrono::NaiveDate)> = stmt
-            .query_map([], |row| {
+            .query_map(params![peer_id], |row| {
                 let fact: String = row.get(0)?;
                 let active: i64 = row.get(1)?;
                 let created: String = row.get(2)?;
@@ -482,7 +714,11 @@ impl Plugin for MemoryPlugin {
                 "更早".into()
             };
 
-            let prefix = if is_active { "[记忆]" } else { "[记忆][已过时]" };
+            let prefix = if is_active {
+                "[记忆]"
+            } else {
+                "[记忆][已过时]"
+            };
             let line = format!("{} {}", prefix, fact);
 
             if let Some((_, facts)) = labeled.iter_mut().find(|(l, _)| l == &label) {

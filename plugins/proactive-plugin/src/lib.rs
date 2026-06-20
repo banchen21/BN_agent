@@ -162,7 +162,8 @@ struct ScheduleOnceTool {
 
 impl ToolExecutor for ScheduleOnceTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "proactive_schedule_once".into(),
             description: "安排一次性主动消息：经过指定冷却时间后，你会被再次唤起，根据当时的对话上下文主动给用户发一条消息。用于「过一会儿再主动找用户」。seconds 与 minutes 可同时给出，累加为总冷却时间。用户一旦回复，所有已安排任务都会被取消。".into(),
             internal: false,
@@ -174,6 +175,7 @@ impl ToolExecutor for ScheduleOnceTool {
                     "note": {"type": "string", "description": "可选：给未来的自己留一句备注，提示到时想聊什么"}
                 }
             }),
+        }
         });
         &DEF
     }
@@ -210,7 +212,8 @@ struct ScheduleRecurringTool {
 
 impl ToolExecutor for ScheduleRecurringTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "proactive_schedule_recurring".into(),
             description: "安排循环主动消息：每隔指定冷却时间就把你唤起一次，根据当时上下文主动给用户发消息，循环往复，直到用户回复（用户一回复即全部取消）。seconds 与 minutes 累加为间隔时间。".into(),
             internal: false,
@@ -222,6 +225,7 @@ impl ToolExecutor for ScheduleRecurringTool {
                     "note": {"type": "string", "description": "可选：给未来的自己留一句备注"}
                 }
             }),
+        }
         });
         &DEF
     }
@@ -245,7 +249,10 @@ impl ToolExecutor for ScheduleRecurringTool {
             send_at: Instant::now() + Duration::from_secs(delay),
             note: note.clone(),
         });
-        s.log(format!("scheduled recurring every {}s (note={:?})", delay, note));
+        s.log(format!(
+            "scheduled recurring every {}s (note={:?})",
+            delay, note
+        ));
         ToolResult::ok(&format!(
             "已安排：每 {} 秒主动找用户一次（用户回复即停止）",
             delay
@@ -494,7 +501,16 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
     }
     if let Some(bus) = event_bus {
         for (chat_id, source, note) in triggers {
-            let mut data = serde_json::json!({ "chat_id": chat_id, "source": source });
+            let peer_id = if source.is_empty() {
+                String::new()
+            } else {
+                format!("{}:{}", source, chat_id)
+            };
+            let mut data = serde_json::json!({
+                "chat_id": chat_id,
+                "source": source,
+                "peer_id": peer_id,
+            });
             if let Some(n) = note {
                 data["note"] = serde_json::json!(n);
             }

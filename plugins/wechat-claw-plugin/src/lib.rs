@@ -425,9 +425,14 @@ impl Plugin for WechatClawPlugin {
                 }
             };
             rt.block_on(main_loop(
-                running, client, last_chat_id,
-                processing_users, typing_tickets, status,
-                poll_thread_holder, event_bus,
+                running,
+                client,
+                last_chat_id,
+                processing_users,
+                typing_tickets,
+                status,
+                poll_thread_holder,
+                event_bus,
             ));
         });
 
@@ -452,9 +457,7 @@ impl Plugin for WechatClawPlugin {
     fn snapshot(&self) -> Option<String> {
         let st = self.status.lock().unwrap().clone();
         match st {
-            BnStatus::Online { nick } => {
-                Some(format!("[微信插件] 已登录 | 账号：{}", nick))
-            }
+            BnStatus::Online { nick } => Some(format!("[微信插件] 已登录 | 账号：{}", nick)),
             BnStatus::WaitingQr { qr_path } => {
                 Some(format!("[微信插件] 等待扫码 ┃ 二维码：{}", qr_path))
             }
@@ -467,7 +470,11 @@ impl Plugin for WechatClawPlugin {
 
     fn on_event(&self, event: &Event) -> bool {
         if event.topic == "assistant.message" {
-            let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let source = event
+                .data
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if source != "wechat" {
                 return true;
             }
@@ -493,7 +500,12 @@ impl Plugin for WechatClawPlugin {
                 .data
                 .get("chat_id")
                 .and_then(|v| v.as_str().map(String::from))
-                .or_else(|| event.data.get("chat_id").and_then(|v| v.as_i64().map(|n| n.to_string())))
+                .or_else(|| {
+                    event
+                        .data
+                        .get("chat_id")
+                        .and_then(|v| v.as_i64().map(|n| n.to_string()))
+                })
                 .or_else(|| self.last_chat_id.lock().unwrap().clone());
 
             let chat_id = match chat_id {
@@ -521,7 +533,11 @@ impl Plugin for WechatClawPlugin {
             let image_path = event.data.get("image_path").and_then(|v| v.as_str());
             let file_path = event.data.get("file_path").and_then(|v| v.as_str());
 
-            log::info!("[wechat] replying to {}: {}", chat_id, text.chars().take(40).collect::<String>());
+            log::info!(
+                "[wechat] replying to {}: {}",
+                chat_id,
+                text.chars().take(40).collect::<String>()
+            );
 
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -536,9 +552,10 @@ impl Plugin for WechatClawPlugin {
 
             if let Some(path) = image_path {
                 rt.block_on(async {
-                    if let Err(e) = wechat.send_image(
-                        &chat_id, std::path::Path::new(path), &text, &ctx_token,
-                    ).await {
+                    if let Err(e) = wechat
+                        .send_image(&chat_id, std::path::Path::new(path), &text, &ctx_token)
+                        .await
+                    {
                         log::error!("[wechat] send_image failed: {}", e);
                         if e.contains("-14") {
                             WeChatClient::clear_saved();
@@ -547,9 +564,10 @@ impl Plugin for WechatClawPlugin {
                 });
             } else if let Some(path) = file_path {
                 rt.block_on(async {
-                    if let Err(e) = wechat.send_media(
-                        &chat_id, std::path::Path::new(path), &text, &ctx_token,
-                    ).await {
+                    if let Err(e) = wechat
+                        .send_media(&chat_id, std::path::Path::new(path), &text, &ctx_token)
+                        .await
+                    {
                         log::error!("[wechat] send_media failed: {}", e);
                         if e.contains("-14") {
                             WeChatClient::clear_saved();
@@ -561,7 +579,11 @@ impl Plugin for WechatClawPlugin {
                 let full_text = text;
                 // Step 1: split by newline
                 let lines: Vec<String> = if full_text.contains('\n') {
-                    full_text.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                    full_text
+                        .split('\n')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
                 } else {
                     vec![full_text.clone()]
                 };
@@ -573,7 +595,13 @@ impl Plugin for WechatClawPlugin {
                     for ch in line.chars() {
                         current.push(ch);
                         let is_comma = ch == '，';
-                        let is_split = is_comma || ch == '。' || ch == '？' || ch == '！' || ch == '…' || ch == '?' || ch == '!';
+                        let is_split = is_comma
+                            || ch == '。'
+                            || ch == '？'
+                            || ch == '！'
+                            || ch == '…'
+                            || ch == '?'
+                            || ch == '!';
                         if is_split {
                             if is_comma {
                                 current.pop();
@@ -600,7 +628,12 @@ impl Plugin for WechatClawPlugin {
                 rt.block_on(async {
                     for (i, seg) in segments.iter().enumerate() {
                         if let Err(e) = wechat.send_text(&chat_id, seg, &ctx_token).await {
-                            log::error!("[wechat] send segment {}/{} failed: {}", i + 1, segments.len(), e);
+                            log::error!(
+                                "[wechat] send segment {}/{} failed: {}",
+                                i + 1,
+                                segments.len(),
+                                e
+                            );
                             if e.contains("-14") {
                                 WeChatClient::clear_saved();
                                 break;
@@ -619,7 +652,11 @@ impl Plugin for WechatClawPlugin {
 
         // user.message from wechat → typing already started in poll_loop
         if event.topic == "user.message" {
-            let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let source = event
+                .data
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if source != "wechat" {
                 return true;
             }
@@ -648,22 +685,34 @@ async fn main_loop(
             let wechat = WeChatClient::restore(session_info.clone());
             log::info!("[wechat] loaded saved session: {}", session_info.account_id);
             *client.lock().unwrap() = Some(wechat.clone());
-            *status.lock().unwrap() = BnStatus::Online { nick: session_info.account_id.clone() };
+            *status.lock().unwrap() = BnStatus::Online {
+                nick: session_info.account_id.clone(),
+            };
 
             start_poll_thread(
-                &poll_thread_holder, &running, &wechat, &last_chat_id,
-                &processing_users, &typing_tickets, &status, &event_bus,
+                &poll_thread_holder,
+                &running,
+                &wechat,
+                &last_chat_id,
+                &processing_users,
+                &typing_tickets,
+                &status,
+                &event_bus,
             );
 
             wait_loop(&running, &status).await;
-            if !running.load(Ordering::SeqCst) { return; }
+            if !running.load(Ordering::SeqCst) {
+                return;
+            }
             log::warn!("[wechat] session expired, re-login required");
             WeChatClient::clear_saved();
             *client.lock().unwrap() = None;
             stop_poll_thread(&poll_thread_holder);
         }
 
-        if !running.load(Ordering::SeqCst) { return; }
+        if !running.load(Ordering::SeqCst) {
+            return;
+        }
 
         // 2. 扫码登录 (via SDK)
         log::info!("[wechat] starting QR code login...");
@@ -675,12 +724,20 @@ async fn main_loop(
                 *status.lock().unwrap() = BnStatus::Online { nick: nick.clone() };
 
                 start_poll_thread(
-                    &poll_thread_holder, &running, &wechat, &last_chat_id,
-                    &processing_users, &typing_tickets, &status, &event_bus,
+                    &poll_thread_holder,
+                    &running,
+                    &wechat,
+                    &last_chat_id,
+                    &processing_users,
+                    &typing_tickets,
+                    &status,
+                    &event_bus,
                 );
 
                 wait_loop(&running, &status).await;
-                if !running.load(Ordering::SeqCst) { return; }
+                if !running.load(Ordering::SeqCst) {
+                    return;
+                }
                 log::warn!("[wechat] session expired, re-login required");
                 WeChatClient::clear_saved();
                 *client.lock().unwrap() = None;
@@ -790,11 +847,13 @@ fn start_poll_thread(
             .build()
         {
             Ok(r) => r,
-            Err(e) => { log::error!("[wechat] poll runtime: {}", e); return; }
+            Err(e) => {
+                log::error!("[wechat] poll runtime: {}", e);
+                return;
+            }
         };
         rt.block_on(poll_loop(
-            running_c, wechat_c, last_c,
-            pu_c, tt_c, status_c, eb_c,
+            running_c, wechat_c, last_c, pu_c, tt_c, status_c, eb_c,
         ));
     });
 
@@ -829,7 +888,9 @@ async fn poll_loop(
 
                 for msg in &result.messages {
                     // Auto-cache context token via SDK
-                    wechat.inner.set_context_token(&msg.from_user_id, &msg.context_token);
+                    wechat
+                        .inner
+                        .set_context_token(&msg.from_user_id, &msg.context_token);
                     *last_chat_id.lock().unwrap() = Some(msg.from_user_id.clone());
 
                     log::info!(
@@ -843,6 +904,7 @@ async fn poll_loop(
                     let mut event_data = serde_json::json!({
                         "text": msg.text,
                         "source": "wechat",
+                        "peer_id": format!("wechat:{}", msg.from_user_id),
                         "user_name": msg.from_user_id,
                         "chat_id": msg.from_user_id,
                     });
@@ -854,29 +916,33 @@ async fn poll_loop(
                             Some(MessageItemType::Image) => {
                                 if let Some(img) = &item.image_item {
                                     handle_incoming_image(
-                                        &wechat, &msg.from_user_id, img, &mut event_data,
-                                    ).await;
+                                        &wechat,
+                                        &msg.from_user_id,
+                                        img,
+                                        &mut event_data,
+                                    )
+                                    .await;
                                 }
                             }
                             Some(MessageItemType::Voice) => {
                                 if let Some(voice) = &item.voice_item {
                                     handle_incoming_voice(
-                                        &wechat, &msg.from_user_id, voice, &mut event_data,
-                                    ).await;
+                                        &wechat,
+                                        &msg.from_user_id,
+                                        voice,
+                                        &mut event_data,
+                                    )
+                                    .await;
                                 }
                             }
                             Some(MessageItemType::Video) => {
                                 if let Some(video) = &item.video_item {
-                                    handle_incoming_video(
-                                        &wechat, video, &mut event_data,
-                                    ).await;
+                                    handle_incoming_video(&wechat, video, &mut event_data).await;
                                 }
                             }
                             Some(MessageItemType::File) => {
                                 if let Some(file) = &item.file_item {
-                                    handle_incoming_file(
-                                        &wechat, file, &mut event_data,
-                                    ).await;
+                                    handle_incoming_file(&wechat, file, &mut event_data).await;
                                 }
                             }
                             _ => {}
@@ -884,17 +950,17 @@ async fn poll_loop(
                     }
 
                     // 发布 user.message 事件
-                    event_bus.do_send(Event::new(
-                        "user.message",
-                        event_data,
-                        "wechat-claw-plugin",
-                    ));
+                    event_bus.do_send(Event::new("user.message", event_data, "wechat-claw-plugin"));
 
                     // ── 启动输入状态指示器 ──
                     start_typing(
-                        &wechat, &msg.from_user_id,
-                        &processing_users, &typing_tickets, &running,
-                    ).await;
+                        &wechat,
+                        &msg.from_user_id,
+                        &processing_users,
+                        &typing_tickets,
+                        &running,
+                    )
+                    .await;
                 }
             }
             Err(e) => {
@@ -918,9 +984,7 @@ async fn poll_loop(
 
 // ── Incoming media handlers ──────────────────────────────────────────────────
 
-use weixin_ilink_sdk::types::{
-    FileItem, ImageItem, MessageItemType, VideoItem, VoiceItem,
-};
+use weixin_ilink_sdk::types::{FileItem, ImageItem, MessageItemType, VideoItem, VoiceItem};
 
 async fn handle_incoming_image(
     wechat: &WeChatClient,
@@ -928,7 +992,11 @@ async fn handle_incoming_image(
     img: &ImageItem,
     event_data: &mut serde_json::Value,
 ) {
-    let param = match img.media.as_ref().and_then(|m| m.encrypt_query_param.as_deref()) {
+    let param = match img
+        .media
+        .as_ref()
+        .and_then(|m| m.encrypt_query_param.as_deref())
+    {
         Some(p) => p,
         None => {
             log::warn!("[wechat] image has no encrypt_query_param");
@@ -951,7 +1019,9 @@ async fn handle_incoming_image(
             let b64 = base64_encode(&bytes);
             log::info!(
                 "[wechat] image downloaded from {}: {} bytes (base64: {} chars)",
-                from_user, bytes.len(), b64.len()
+                from_user,
+                bytes.len(),
+                b64.len()
             );
             event_data["image_base64"] = serde_json::json!(b64);
         }
@@ -977,7 +1047,9 @@ async fn handle_incoming_voice(
             let b64 = base64_encode(&wav_bytes);
             log::info!(
                 "[wechat] voice downloaded from {}: {} bytes WAV (base64: {} chars)",
-                from_user, wav_bytes.len(), b64.len()
+                from_user,
+                wav_bytes.len(),
+                b64.len()
             );
             event_data["voice_base64"] = serde_json::json!(b64);
 
@@ -1003,7 +1075,11 @@ async fn handle_incoming_video(
     video: &VideoItem,
     event_data: &mut serde_json::Value,
 ) {
-    let param = match video.media.as_ref().and_then(|m| m.encrypt_query_param.as_deref()) {
+    let param = match video
+        .media
+        .as_ref()
+        .and_then(|m| m.encrypt_query_param.as_deref())
+    {
         Some(p) => p,
         None => {
             log::warn!("[wechat] video has no encrypt_query_param");
@@ -1022,7 +1098,11 @@ async fn handle_incoming_video(
     match wechat.download_media(param, aes_key).await {
         Ok(bytes) => {
             let b64 = base64_encode(&bytes);
-            log::info!("[wechat] video downloaded: {} bytes (base64: {} chars)", bytes.len(), b64.len());
+            log::info!(
+                "[wechat] video downloaded: {} bytes (base64: {} chars)",
+                bytes.len(),
+                b64.len()
+            );
             event_data["video_base64"] = serde_json::json!(b64);
         }
         Err(e) => {
@@ -1036,7 +1116,11 @@ async fn handle_incoming_file(
     file: &FileItem,
     event_data: &mut serde_json::Value,
 ) {
-    let param = match file.media.as_ref().and_then(|m| m.encrypt_query_param.as_deref()) {
+    let param = match file
+        .media
+        .as_ref()
+        .and_then(|m| m.encrypt_query_param.as_deref())
+    {
         Some(p) => p,
         None => {
             log::warn!("[wechat] file has no encrypt_query_param");
@@ -1078,7 +1162,10 @@ async fn start_typing(
     running: &Arc<AtomicBool>,
 ) {
     // 标记该用户在 processing 中
-    processing_users.lock().unwrap().insert(to_user_id.to_string());
+    processing_users
+        .lock()
+        .unwrap()
+        .insert(to_user_id.to_string());
 
     // 获取/复用 typing_ticket
     let context_token = wechat.get_context_token(to_user_id).unwrap_or_default();
@@ -1089,7 +1176,10 @@ async fn start_typing(
         } else {
             match wechat.get_typing_ticket(to_user_id, &context_token).await {
                 Ok(t) => {
-                    typing_tickets.lock().unwrap().insert(to_user_id.to_string(), t.clone());
+                    typing_tickets
+                        .lock()
+                        .unwrap()
+                        .insert(to_user_id.to_string(), t.clone());
                     t
                 }
                 Err(e) => {

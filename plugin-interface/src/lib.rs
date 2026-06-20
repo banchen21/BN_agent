@@ -18,9 +18,9 @@
 //! - `plugin_destroy(plugin: Box<dyn Plugin>)`
 
 pub use actix::prelude::*;
+pub use log;
 use serde::{Deserialize, Serialize};
 pub use serde_json;
-pub use log;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -46,7 +46,12 @@ impl Event {
         data: serde_json::Value,
         source: impl Into<String>,
     ) -> Self {
-        Self { topic: topic.into(), data, source: source.into(), timestamp: 0 }
+        Self {
+            topic: topic.into(),
+            data,
+            source: source.into(),
+            timestamp: 0,
+        }
     }
 }
 
@@ -54,11 +59,17 @@ impl Event {
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct Subscribe { pub topic: String, pub recipient: Recipient<Event> }
+pub struct Subscribe {
+    pub topic: String,
+    pub recipient: Recipient<Event>,
+}
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct Unsubscribe { pub topic: String, pub recipient: Recipient<Event> }
+pub struct Unsubscribe {
+    pub topic: String,
+    pub recipient: Recipient<Event>,
+}
 
 // ── EventBus actor ───────────────────────────────────────────────────────────
 
@@ -67,7 +78,11 @@ pub struct EventBus {
 }
 
 impl EventBus {
-    pub fn new() -> Self { Self { subscribers: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            subscribers: HashMap::new(),
+        }
+    }
 }
 
 impl Actor for EventBus {
@@ -83,7 +98,11 @@ impl Handler<Event> for EventBus {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        log::debug!("[EventBus] dispatching topic='{}' from='{}'", event.topic, event.source);
+        log::debug!(
+            "[EventBus] dispatching topic='{}' from='{}'",
+            event.topic,
+            event.source
+        );
 
         let dispatch = |topic: &str| {
             if let Some(recipients) = self.subscribers.get(topic) {
@@ -104,7 +123,10 @@ impl Handler<Subscribe> for EventBus {
     type Result = ();
     fn handle(&mut self, msg: Subscribe, _: &mut Self::Context) {
         log::info!("[EventBus] +subscribe topic='{}'", msg.topic);
-        self.subscribers.entry(msg.topic).or_default().push(msg.recipient);
+        self.subscribers
+            .entry(msg.topic)
+            .or_default()
+            .push(msg.recipient);
     }
 }
 
@@ -143,13 +165,28 @@ pub struct ToolResult {
 
 impl ToolResult {
     pub fn ok(content: &str) -> Self {
-        Self { success: true, content: content.to_string(), error: None, metadata: None }
+        Self {
+            success: true,
+            content: content.to_string(),
+            error: None,
+            metadata: None,
+        }
     }
     pub fn ok_with_metadata(content: &str, metadata: serde_json::Value) -> Self {
-        Self { success: true, content: content.to_string(), error: None, metadata: Some(metadata) }
+        Self {
+            success: true,
+            content: content.to_string(),
+            error: None,
+            metadata: Some(metadata),
+        }
     }
     pub fn err(msg: &str) -> Self {
-        Self { success: false, content: String::new(), error: Some(msg.to_string()), metadata: None }
+        Self {
+            success: false,
+            content: String::new(),
+            error: Some(msg.to_string()),
+            metadata: None,
+        }
     }
 }
 
@@ -165,7 +202,11 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self { Self { executors: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            executors: HashMap::new(),
+        }
+    }
 
     pub fn register(&mut self, executor: Arc<dyn ToolExecutor>) {
         let name = executor.def().name.clone();
@@ -185,9 +226,15 @@ impl ToolRegistry {
         self.executors.get(name).cloned()
     }
 
-    pub fn unregister(&mut self, name: &str) { self.executors.remove(name); }
-    pub fn clear(&mut self) { self.executors.clear(); }
-    pub fn is_empty(&self) -> bool { self.executors.is_empty() }
+    pub fn unregister(&mut self, name: &str) {
+        self.executors.remove(name);
+    }
+    pub fn clear(&mut self) {
+        self.executors.clear();
+    }
+    pub fn is_empty(&self) -> bool {
+        self.executors.is_empty()
+    }
 }
 
 // ── LLM types ────────────────────────────────────────────────────────────────
@@ -200,13 +247,22 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into() }
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into() }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -228,6 +284,9 @@ pub struct LlmRequest {
 pub struct AppendChatRecord {
     pub role: String,
     pub content: String,
+    /// Peer identity, format: "{source}:{platform_unique_id}".
+    /// None means legacy/global scope.
+    pub peer_id: Option<String>,
 }
 
 /// Fetch recent chat history records from the database.
@@ -237,6 +296,8 @@ pub struct AppendChatRecord {
 pub struct FetchChatHistory {
     /// Maximum number of records to fetch (most recent first, returned oldest-first).
     pub limit: usize,
+    /// Optional peer scope. None means legacy/global scope.
+    pub peer_id: Option<String>,
 }
 
 /// A single chat history record returned from the database.
@@ -244,6 +305,7 @@ pub struct FetchChatHistory {
 pub struct ChatHistoryRecord {
     pub role: String,
     pub content: String,
+    pub peer_id: Option<String>,
 }
 
 /// Unified chat store message — combines read and write operations
@@ -252,9 +314,16 @@ pub struct ChatHistoryRecord {
 #[rtype(result = "ChatStoreResponse")]
 pub enum ChatStoreMsg {
     /// Append a message to the chat history.
-    Append { role: String, content: String },
+    Append {
+        role: String,
+        content: String,
+        peer_id: Option<String>,
+    },
     /// Fetch recent N records (oldest-first).
-    FetchRecent { limit: usize },
+    FetchRecent {
+        limit: usize,
+        peer_id: Option<String>,
+    },
 }
 
 /// Response from ChatStoreMsg.
@@ -269,6 +338,8 @@ pub enum ChatStoreResponse {
 #[rtype(result = "Result<LlmResponse, String>")]
 pub struct ChatRequest {
     pub message: String,
+    /// Peer identity, format: "{source}:{platform_unique_id}".
+    pub peer_id: String,
     pub tools: Vec<serde_json::Value>,
     pub skip_store: bool,
     /// Plugin passive contexts (snapshots) injected into messages.
@@ -323,7 +394,6 @@ pub struct LlmResponse {
     /// Tool calls extracted from the LLM response.
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
-
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -361,7 +431,9 @@ impl std::fmt::Display for PluginError {
 impl std::error::Error for PluginError {}
 
 impl From<std::io::Error> for PluginError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 // ── Plugin trait ─────────────────────────────────────────────────────────────
@@ -379,12 +451,7 @@ pub struct PluginInfo {
 /// Plugin HTTP API handler trait.
 pub trait PluginApi: Send + Sync {
     /// Handle an HTTP request. Returns `(status_code, body)` or `None`.
-    fn handle_api(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-    ) -> Option<(u16, String)> {
+    fn handle_api(&self, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
         let _ = (method, path, body);
         None
     }
@@ -417,7 +484,10 @@ pub struct PluginLogger {
 
 impl PluginLogger {
     pub fn new(event_bus: Addr<EventBus>, plugin_name: String) -> Self {
-        Self { event_bus, plugin_name }
+        Self {
+            event_bus,
+            plugin_name,
+        }
     }
 
     pub fn info(&self, msg: impl std::fmt::Display) {
@@ -481,21 +551,36 @@ pub trait Plugin: Send {
     /// If this plugin provides an LLM backend (e.g. Claude CLI),
     /// return the backend recipients.
     /// Only one plugin should provide this at a time.
-    fn llm_backend(&self) -> Option<LlmBackend> { None }
+    fn llm_backend(&self) -> Option<LlmBackend> {
+        None
+    }
 
     /// Called before the plugin is unloaded.
     fn stop(&mut self);
 
     /// Receive a broadcast event. Return `true` to continue propagation,
     /// `false` to intercept (no further plugins receive this event).
-    fn on_event(&self, _event: &Event) -> bool { true }
+    fn on_event(&self, _event: &Event) -> bool {
+        true
+    }
 
     /// Passive context injected into LLM messages before each request.
     /// Format: `【plugin_name】details`. Not persisted to chat history.
-    fn snapshot(&self) -> Option<String> { None }
+    fn snapshot(&self) -> Option<String> {
+        None
+    }
+
+    /// Peer-scoped passive context. Plugins that do not need peer scoping can
+    /// rely on the default fallback to `snapshot()`.
+    fn snapshot_for_peer(&self, peer_id: &str) -> Option<String> {
+        let _ = peer_id;
+        self.snapshot()
+    }
 
     /// Return an HTTP API handler, if this plugin exposes endpoints.
-    fn api_handler(&self) -> Option<&dyn PluginApi> { None }
+    fn api_handler(&self) -> Option<&dyn PluginApi> {
+        None
+    }
 }
 
 // ── FFI helpers ──────────────────────────────────────────────────────────────
@@ -510,15 +595,21 @@ pub type PluginDestroyFn = unsafe extern "C" fn(plugin: Box<dyn Plugin>);
 
 #[derive(Message)]
 #[rtype(result = "Result<PluginInfo, String>")]
-pub struct LoadPlugin { pub path: String }
+pub struct LoadPlugin {
+    pub path: String,
+}
 
 #[derive(Message)]
 #[rtype(result = "Result<(), String>")]
-pub struct UnloadPlugin { pub name: String }
+pub struct UnloadPlugin {
+    pub name: String,
+}
 
 #[derive(Message)]
 #[rtype(result = "Result<PluginInfo, String>")]
-pub struct ReloadPlugin { pub name: String }
+pub struct ReloadPlugin {
+    pub name: String,
+}
 
 #[derive(Message)]
 #[rtype(result = "Vec<PluginInfo>")]
@@ -541,6 +632,13 @@ pub struct BroadcastEvent(pub Event);
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RefreshSnapshots;
+
+/// Refresh passive context snapshots for a specific peer.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct RefreshSnapshotsForPeer {
+    pub peer_id: String,
+}
 
 /// Proxy an HTTP request to a plugin's API handler.
 #[derive(Message)]

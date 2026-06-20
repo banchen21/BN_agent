@@ -28,14 +28,14 @@ mod chat_store;
 mod claude_backend;
 mod llm_actor;
 
+mod message_router;
 mod metrics_actor;
 mod pipeline;
 mod plugin_manager;
+mod plugin_tools;
 mod rate_limit_actor;
 mod retry_actor;
 mod token_usage_actor;
-mod plugin_tools;
-mod message_router;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
@@ -43,6 +43,7 @@ use cancellation_actor::CancellationActor;
 use chat_store::{ChatStoreActor, ClearAll};
 use llm_actor::{LlmActor, LlmConfig};
 
+use message_router::MessageRouter;
 use metrics_actor::MetricsActor;
 use plugin_interface::*;
 use plugin_manager::PluginManager;
@@ -51,7 +52,6 @@ use retry_actor::RetryActor;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use token_usage_actor::TokenUsageActor;
-use message_router::MessageRouter;
 
 // ── App state ────────────────────────────────────────────────────────────────
 
@@ -86,36 +86,59 @@ async fn list_plugins(state: web::Data<AppState>) -> impl Responder {
 }
 
 #[derive(Deserialize)]
-struct LoadRequest { path: String }
+struct LoadRequest {
+    path: String,
+}
 
 async fn load_plugin(state: web::Data<AppState>, body: web::Json<LoadRequest>) -> impl Responder {
-    match state.plugin_manager.send(LoadPlugin { path: body.path.clone() }).await {
+    match state
+        .plugin_manager
+        .send(LoadPlugin {
+            path: body.path.clone(),
+        })
+        .await
+    {
         Ok(Ok(info)) => HttpResponse::Ok().json(info),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 async fn unload_plugin(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
     let name = path.into_inner();
-    match state.plugin_manager.send(UnloadPlugin { name: name.clone() }).await {
-        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "status": "unloaded", "name": name })),
+    match state
+        .plugin_manager
+        .send(UnloadPlugin { name: name.clone() })
+        .await
+    {
+        Ok(Ok(())) => {
+            HttpResponse::Ok().json(serde_json::json!({ "status": "unloaded", "name": name }))
+        }
         Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 async fn reload_plugin(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
     let name = path.into_inner();
-    match state.plugin_manager.send(ReloadPlugin { name: name.clone() }).await {
+    match state
+        .plugin_manager
+        .send(ReloadPlugin { name: name.clone() })
+        .await
+    {
         Ok(Ok(info)) => HttpResponse::Ok().json(info),
         Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 #[derive(Deserialize)]
-struct ScanRequest { plugin_dir: String }
+struct ScanRequest {
+    plugin_dir: String,
+}
 
 async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) -> impl Responder {
     let ctx = PluginContext {
@@ -126,56 +149,101 @@ async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) 
         logger: PluginLogger::new(state.event_bus.clone(), "host".into()),
         chat_store: state.chat_store.clone(),
     };
-    match state.plugin_manager.send(ScanAndLoad { plugin_dir: body.plugin_dir.clone(), host_context: ctx }).await {
+    match state
+        .plugin_manager
+        .send(ScanAndLoad {
+            plugin_dir: body.plugin_dir.clone(),
+            host_context: ctx,
+        })
+        .await
+    {
         Ok(Ok(n)) => HttpResponse::Ok().json(serde_json::json!({ "loaded": n })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 // ── Event handler ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct PublishRequest { topic: String, data: serde_json::Value }
+struct PublishRequest {
+    topic: String,
+    data: serde_json::Value,
+}
 
-async fn publish_event(state: web::Data<AppState>, body: web::Json<PublishRequest>) -> impl Responder {
+async fn publish_event(
+    state: web::Data<AppState>,
+    body: web::Json<PublishRequest>,
+) -> impl Responder {
     let event = Event::new(&body.topic, body.data.clone(), "http-api");
     match state.event_bus.send(event).await {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "published", "topic": body.topic })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(()) => HttpResponse::Ok()
+            .json(serde_json::json!({ "status": "published", "topic": body.topic })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 // ── Simple LLM ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct LlmChatRequest { messages: Vec<ChatMessage>, model: Option<String>, temperature: Option<f32>, max_tokens: Option<u32> }
+struct LlmChatRequest {
+    messages: Vec<ChatMessage>,
+    model: Option<String>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+}
 
 async fn llm_chat(state: web::Data<AppState>, body: web::Json<LlmChatRequest>) -> impl Responder {
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
-        None => return HttpResponse::ServiceUnavailable().json(serde_json::json!({ "error": "LLM not configured" })),
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .json(serde_json::json!({ "error": "LLM not configured" }))
+        }
     };
-    match llm.send(LlmRequest { messages: body.messages.clone(), model: body.model.clone(), temperature: body.temperature, max_tokens: body.max_tokens }).await {
+    match llm
+        .send(LlmRequest {
+            messages: body.messages.clone(),
+            model: body.model.clone(),
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+        })
+        .await
+    {
         Ok(Ok(resp)) => HttpResponse::Ok().json(resp),
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
 // ── Full Chat (with tools + history) ─────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct ChatPayload { message: String }
+struct ChatPayload {
+    message: String,
+}
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
     let retry_addr = match &state.retry_addr {
         Some(a) => a.clone(),
-        None => return HttpResponse::ServiceUnavailable().json(serde_json::json!({ "error": "LLM not configured" })),
+        None => {
+            return HttpResponse::ServiceUnavailable()
+                .json(serde_json::json!({ "error": "LLM not configured" }))
+        }
     };
 
-    // Refresh snapshots.
-    let _ = state.plugin_manager.send(RefreshSnapshots).await;
+    let peer_id = "web:default".to_string();
+
+    // Refresh peer-scoped snapshots.
+    let _ = state
+        .plugin_manager
+        .send(RefreshSnapshotsForPeer {
+            peer_id: peer_id.clone(),
+        })
+        .await;
     let contexts: Vec<String> = state.snapshots.lock().unwrap().clone();
 
     let tools: Vec<serde_json::Value> = match state.tool_registry.lock() {
@@ -191,29 +259,33 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
 
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    match retry_addr.send(retry_actor::RetryChatRequest {
-        request: ChatRequest {
-            message: body.message.clone(),
-            tools,
-            skip_store: false,
-            contexts,
-            jailbreak_index: None,
-            image_base64: None,
-            video_base64: None,
-            video_mime: None,
-            file_base64: None,
-            file_name: None,
-            stream: true,
-            request_id: request_id.clone(),
-            source: String::new(),
-            user_name: String::new(),
-            max_tokens: None,
-            original_user_msg: None,
-            assistant_tool_calls: vec![],
-            tool_results: vec![],
-        },
-        max_retries: 3,
-    }).await {
+    match retry_addr
+        .send(retry_actor::RetryChatRequest {
+            request: ChatRequest {
+                message: body.message.clone(),
+                peer_id,
+                tools,
+                skip_store: false,
+                contexts,
+                jailbreak_index: None,
+                image_base64: None,
+                video_base64: None,
+                video_mime: None,
+                file_base64: None,
+                file_name: None,
+                stream: true,
+                request_id: request_id.clone(),
+                source: String::new(),
+                user_name: String::new(),
+                max_tokens: None,
+                original_user_msg: None,
+                assistant_tool_calls: vec![],
+                tool_results: vec![],
+            },
+            max_retries: 3,
+        })
+        .await
+    {
         Ok(Ok(resp)) => {
             // Record token usage if available.
             if let Some(ref tu) = state.token_usage_addr {
@@ -228,7 +300,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             HttpResponse::Ok().json(resp)
         }
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
@@ -237,12 +310,16 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
 async fn list_tools(state: web::Data<AppState>) -> impl Responder {
     match state.tool_registry.lock() {
         Ok(reg) => HttpResponse::Ok().json(reg.all_defs()),
-        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "registry locked" })),
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": "registry locked" })),
     }
 }
 
 #[derive(Deserialize)]
-struct ToolCallPayload { tool_name: String, arguments: serde_json::Value }
+struct ToolCallPayload {
+    tool_name: String,
+    arguments: serde_json::Value,
+}
 
 async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>) -> impl Responder {
     let result = match state.tool_registry.lock() {
@@ -253,7 +330,8 @@ async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>)
         Some(r) => HttpResponse::Ok().json(serde_json::json!({
             "success": r.success, "content": r.content, "error": r.error,
         })),
-        None => HttpResponse::NotFound().json(serde_json::json!({ "error": format!("tool '{}' not found", body.tool_name) })),
+        None => HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": format!("tool '{}' not found", body.tool_name) })),
     }
 }
 
@@ -261,7 +339,10 @@ async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>)
 
 async fn get_metrics(state: web::Data<AppState>) -> impl Responder {
     let metrics = match &state.metrics_addr {
-        Some(a) => a.send(metrics_actor::GetMetrics).await.unwrap_or_else(|_| "".into()),
+        Some(a) => a
+            .send(metrics_actor::GetMetrics)
+            .await
+            .unwrap_or_else(|_| "".into()),
         None => "Metrics not available".into(),
     };
     HttpResponse::Ok()
@@ -271,7 +352,10 @@ async fn get_metrics(state: web::Data<AppState>) -> impl Responder {
 
 async fn get_metrics_json(state: web::Data<AppState>) -> impl Responder {
     let json = match &state.metrics_addr {
-        Some(a) => a.send(metrics_actor::GetMetricsJson).await.unwrap_or_default(),
+        Some(a) => a
+            .send(metrics_actor::GetMetricsJson)
+            .await
+            .unwrap_or_default(),
         None => serde_json::json!({ "error": "Metrics not available" }),
     };
     HttpResponse::Ok().json(json)
@@ -281,14 +365,22 @@ async fn get_metrics_json(state: web::Data<AppState>) -> impl Responder {
 
 async fn get_global_token_usage(state: web::Data<AppState>) -> impl Responder {
     let summary = match &state.token_usage_addr {
-        Some(a) => a.send(token_usage_actor::GetGlobalTokenUsage).await.unwrap_or_else(|_| {
-            token_usage_actor::TokenUsageSummary {
-                total_prompt_tokens: 0, total_completion_tokens: 0,
-                total_prompt_cache_hit_tokens: 0, total_prompt_cache_miss_tokens: 0,
-                total_tokens: 0, total_calls: 0, by_model: std::collections::HashMap::new(),
-            }
-        }),
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Token usage tracking not available" })),
+        Some(a) => a
+            .send(token_usage_actor::GetGlobalTokenUsage)
+            .await
+            .unwrap_or_else(|_| token_usage_actor::TokenUsageSummary {
+                total_prompt_tokens: 0,
+                total_completion_tokens: 0,
+                total_prompt_cache_hit_tokens: 0,
+                total_prompt_cache_miss_tokens: 0,
+                total_tokens: 0,
+                total_calls: 0,
+                by_model: std::collections::HashMap::new(),
+            }),
+        None => {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({ "error": "Token usage tracking not available" }))
+        }
     };
     HttpResponse::Ok().json(summary)
 }
@@ -297,7 +389,10 @@ async fn get_global_token_usage(state: web::Data<AppState>) -> impl Responder {
 
 async fn cancel_handler(state: web::Data<AppState>) -> impl Responder {
     let cancelled = match &state.cancellation_addr {
-        Some(a) => a.send(cancellation_actor::CancelCurrent).await.unwrap_or(false),
+        Some(a) => a
+            .send(cancellation_actor::CancelCurrent)
+            .await
+            .unwrap_or(false),
         None => false,
     };
     if cancelled {
@@ -311,7 +406,10 @@ async fn cancel_handler(state: web::Data<AppState>) -> impl Responder {
 
 async fn retry_state(state: web::Data<AppState>) -> impl Responder {
     let state_str = match &state.retry_addr {
-        Some(a) => a.send(retry_actor::CircuitStateQuery).await.unwrap_or_else(|_| "query failed".into()),
+        Some(a) => a
+            .send(retry_actor::CircuitStateQuery)
+            .await
+            .unwrap_or_else(|_| "query failed".into()),
         None => "Retry not available".into(),
     };
     HttpResponse::Ok().json(serde_json::json!({ "circuit_breaker": state_str }))
@@ -326,26 +424,33 @@ async fn plugin_proxy(
     body: Option<web::Bytes>,
 ) -> impl Responder {
     let full_path = path.into_inner();
-    let (plugin_name, sub_path) = full_path.split_once('/')
+    let (plugin_name, sub_path) = full_path
+        .split_once('/')
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .unwrap_or_else(|| (full_path, String::new()));
 
     let method = req.method().as_str().to_uppercase();
     let body_str = body.and_then(|b| String::from_utf8(b.to_vec()).ok());
 
-    match state.plugin_manager.send(ApiRequest {
-        plugin: plugin_name,
-        method,
-        path: sub_path,
-        body: body_str,
-    }).await {
-        Ok(Some((status, body))) => {
-            HttpResponse::build(
-                actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK)
-            ).body(body)
-        }
-        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({ "error": "plugin not found or no API handler" })),
-        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "actor communication failed" })),
+    match state
+        .plugin_manager
+        .send(ApiRequest {
+            plugin: plugin_name,
+            method,
+            path: sub_path,
+            body: body_str,
+        })
+        .await
+    {
+        Ok(Some((status, body))) => HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(status)
+                .unwrap_or(actix_web::http::StatusCode::OK),
+        )
+        .body(body),
+        Ok(None) => HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": "plugin not found or no API handler" })),
+        Err(_) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": "actor communication failed" })),
     }
 }
 

@@ -49,7 +49,9 @@ impl ToolExecutor for SendMessageTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+        let chat_id = args
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
             .or_else(|| *self.current_chat_id.lock().unwrap());
         let chat_id = match chat_id {
             Some(id) => id,
@@ -96,7 +98,8 @@ struct SendVoiceTool {
 
 impl ToolExecutor for SendVoiceTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "tg_send_voice".into(),
             description: "Convert text to speech and send as voice message to Telegram. Use when the user asks for voice.".into(),
             internal: false,
@@ -108,12 +111,15 @@ impl ToolExecutor for SendVoiceTool {
                 },
                 "required": ["text"]
             }),
+        }
         });
         &DEF
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+        let chat_id = args
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
             .or_else(|| *self.current_chat_id.lock().unwrap());
         let chat_id = match chat_id {
             Some(id) => id,
@@ -128,11 +134,20 @@ impl ToolExecutor for SendVoiceTool {
         self.processing_chats.lock().unwrap().remove(&chat_id);
         let bot = self.bot_handle.clone();
         let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
-            rt.block_on(async { let _ = bot.send_record_voice_action(chat_id).await; });
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
+            rt.block_on(async {
+                let _ = bot.send_record_voice_action(chat_id).await;
+            });
         });
 
-        let voice_desc = args.get("voice_desc").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+        let voice_desc = args
+            .get("voice_desc")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
         let tts_exec = {
             let reg = match self.tool_registry.lock() {
@@ -150,7 +165,10 @@ impl ToolExecutor for SendVoiceTool {
         }
         let tts_result = tts_exec.execute(&tts_params);
         if !tts_result.success {
-            return ToolResult::err(&format!("TTS failed: {}", tts_result.error.unwrap_or_default()));
+            return ToolResult::err(&format!(
+                "TTS failed: {}",
+                tts_result.error.unwrap_or_default()
+            ));
         }
         let audio_data = match base64_decode(&tts_result.content) {
             Ok(d) => d,
@@ -202,13 +220,18 @@ impl ToolExecutor for SendPhotoTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+        let chat_id = args
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
             .or_else(|| *self.current_chat_id.lock().unwrap());
         let chat_id = match chat_id {
             Some(id) => id,
             None => return ToolResult::err("missing: chat_id"),
         };
-        let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
+        let caption = args
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         // 支持 photo_base64 或 file_path 两种输入
         let data = if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
@@ -270,7 +293,9 @@ impl ToolExecutor for SendVideoTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+        let chat_id = args
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
             .or_else(|| *self.current_chat_id.lock().unwrap());
         let chat_id = match chat_id {
             Some(id) => id,
@@ -280,7 +305,10 @@ impl ToolExecutor for SendVideoTool {
             Some(d) => d.to_string(),
             None => return ToolResult::err("missing: video_base64"),
         };
-        let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
+        let caption = args
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let data = match base64_decode(&b64) {
             Ok(d) => d,
             Err(e) => return ToolResult::err(&format!("base64: {}", e)),
@@ -331,7 +359,9 @@ impl ToolExecutor for SendDocumentTool {
     }
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let chat_id = args.get("chat_id").and_then(|v| v.as_i64())
+        let chat_id = args
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
             .or_else(|| *self.current_chat_id.lock().unwrap());
         let chat_id = match chat_id {
             Some(id) => id,
@@ -345,7 +375,10 @@ impl ToolExecutor for SendDocumentTool {
             Some(n) => n.to_string(),
             None => return ToolResult::err("missing: file_name"),
         };
-        let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
+        let caption = args
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let data = match base64_decode(&b64) {
             Ok(d) => d,
             Err(e) => return ToolResult::err(&format!("base64: {}", e)),
@@ -360,7 +393,9 @@ impl ToolExecutor for SendDocumentTool {
                 .build()
                 .expect("tokio");
             rt.block_on(async {
-                let _ = bot.send_document(chat_id, data, fname, caption.as_deref()).await;
+                let _ = bot
+                    .send_document(chat_id, data, fname, caption.as_deref())
+                    .await;
             });
         });
 
@@ -386,7 +421,8 @@ impl TgImPlugin {
             info: PluginInfo {
                 name: "tg-im-plugin".into(),
                 version: "0.1.0".into(),
-                description: "Telegram IM plugin — bridges TG messages into the event system".into(),
+                description: "Telegram IM plugin — bridges TG messages into the event system"
+                    .into(),
                 author: "BN Team".into(),
                 min_host_version: "0.1.0".into(),
             },
@@ -404,10 +440,12 @@ impl Plugin for TgImPlugin {
     }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
-        let token = std::env::var("TG_BOT_TOKEN")
-            .map_err(|_| "TG_BOT_TOKEN env var not set")?;
+        let token = std::env::var("TG_BOT_TOKEN").map_err(|_| "TG_BOT_TOKEN env var not set")?;
 
-        log::info!("[tg-im] starting with token ***{}", &token[token.len().saturating_sub(4)..]);
+        log::info!(
+            "[tg-im] starting with token ***{}",
+            &token[token.len().saturating_sub(4)..]
+        );
 
         // 1. 注册工具。
         let client = bot::build_reqwest_client()?;
@@ -450,21 +488,21 @@ impl Plugin for TgImPlugin {
         // 2. 启动 bot 线程（独立 tokio 运行时）。
         let event_bus = ctx.event_bus.clone();
         let cc2 = self.current_chat_id.clone();
-        let on_user_message: UserMessageCallback = Arc::new(
-            move |chat_id: i64, text: &str, user_name: &str| {
+        let on_user_message: UserMessageCallback =
+            Arc::new(move |chat_id: i64, text: &str, user_name: &str| {
                 *cc2.lock().unwrap() = Some(chat_id);
                 event_bus.do_send(Event::new(
                     "user.message",
                     serde_json::json!({
                         "text": text,
                         "source": "telegram",
+                        "peer_id": format!("telegram:{}", chat_id),
                         "user_name": user_name,
                         "chat_id": chat_id,
                     }),
                     "tg-im-plugin",
                 ));
-            },
-        );
+            });
 
         // 语音消息回调：下载后调用 ASR 工具，将识别结果发布为 user.message
         let tr = ctx.tool_registry.clone().unwrap();
@@ -495,7 +533,12 @@ impl Plugin for TgImPlugin {
                             return;
                         }
                     };
-                    eprintln!("[tg-im:voice] asr done: success={} content_len={} error={:?}", asr_result.success, asr_result.content.len(), asr_result.error);
+                    eprintln!(
+                        "[tg-im:voice] asr done: success={} content_len={} error={:?}",
+                        asr_result.success,
+                        asr_result.content.len(),
+                        asr_result.error
+                    );
                     let text = if asr_result.success && !asr_result.content.trim().is_empty() {
                         asr_result.content
                     } else {
@@ -507,6 +550,7 @@ impl Plugin for TgImPlugin {
                         serde_json::json!({
                             "text": text,
                             "source": "telegram",
+                            "peer_id": format!("telegram:{}", chat_id),
                             "user_name": format!("{} (语音)", un),
                             "chat_id": chat_id,
                         }),
@@ -539,6 +583,7 @@ impl Plugin for TgImPlugin {
                             "text": text,
                             "image_base64": img_b64,
                             "source": "telegram",
+                            "peer_id": format!("telegram:{}", chat_id),
                             "user_name": format!("{} (图片)", un),
                             "chat_id": chat_id,
                         }),
@@ -558,12 +603,18 @@ impl Plugin for TgImPlugin {
                 let un = user_name.to_string();
                 let fn2 = file_name.clone();
                 std::thread::spawn(move || {
-                    eprintln!("[tg-im:file] received '{}' from @{} ({}b)", fn2, un, file_b64.len());
+                    eprintln!(
+                        "[tg-im:file] received '{}' from @{} ({}b)",
+                        fn2,
+                        un,
+                        file_b64.len()
+                    );
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
                             "text": format!("@{} 发送了文件：{}", un, fn2),
                             "source": "telegram",
+                            "peer_id": format!("telegram:{}", chat_id),
                             "user_name": format!("{} (文件)", un),
                             "file_base64": file_b64,
                             "file_name": fn2,
@@ -585,7 +636,12 @@ impl Plugin for TgImPlugin {
                 let un = user_name.to_string();
                 let m = mime;
                 std::thread::spawn(move || {
-                    eprintln!("[tg-im:video] received from @{} ({}b, {})", un, video_b64.len(), m);
+                    eprintln!(
+                        "[tg-im:video] received from @{} ({}b, {})",
+                        un,
+                        video_b64.len(),
+                        m
+                    );
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({
@@ -593,6 +649,7 @@ impl Plugin for TgImPlugin {
                             "video_base64": video_b64,
                             "video_mime": m,
                             "source": "telegram",
+                            "peer_id": format!("telegram:{}", chat_id),
                             "user_name": format!("{} (视频)", un),
                             "chat_id": chat_id,
                         }),
@@ -609,7 +666,8 @@ impl Plugin for TgImPlugin {
             Some(on_photo_message),
             Some(on_file_message),
             Some(on_video_message),
-        ).map_err(|e| format!("bot: {}", e))?;
+        )
+        .map_err(|e| format!("bot: {}", e))?;
 
         self.bot_handle = Some(handle);
         self.bot_thread = Some(join_handle);
@@ -627,7 +685,11 @@ impl Plugin for TgImPlugin {
     fn on_event(&self, event: &Event) -> bool {
         // NOTE: log::info! 在 cdylib 中不生效（log crate 被静态链接，独立于主进程的 env_logger）。
         // 使用 eprintln! 替代。
-        let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let source = event
+            .data
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let chat_id = self.current_chat_id.lock().unwrap().unwrap_or(0);
 
         // ── user.message from Telegram → 持续发 Typing 直到回复 ──
@@ -669,7 +731,12 @@ impl Plugin for TgImPlugin {
         // ── assistant.message from Telegram → 停止 typing + 逐条发送回复 ──
         if event.topic == "assistant.message" && source == "telegram" && chat_id != 0 {
             // 静默事件：仅供插件（proactive 等）感知回复，不实际发送
-            if event.data.get("silent").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if event
+                .data
+                .get("silent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 self.processing_chats.lock().unwrap().remove(&chat_id);
                 return true;
             }
@@ -706,7 +773,11 @@ impl Plugin for TgImPlugin {
                     rt.block_on(async {
                         // Step 1: split by newline
                         let lines: Vec<String> = if full_text.contains('\n') {
-                            full_text.split('\n').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                            full_text
+                                .split('\n')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
                         } else {
                             vec![full_text.clone()]
                         };
@@ -718,7 +789,13 @@ impl Plugin for TgImPlugin {
                             for ch in line.chars() {
                                 current.push(ch);
                                 let is_comma = ch == '，';
-                                let is_split = is_comma || ch == '。' || ch == '？' || ch == '！' || ch == '…' || ch == '?' || ch == '!';
+                                let is_split = is_comma
+                                    || ch == '。'
+                                    || ch == '？'
+                                    || ch == '！'
+                                    || ch == '…'
+                                    || ch == '?'
+                                    || ch == '!';
                                 if is_split {
                                     if is_comma {
                                         current.pop(); // remove the comma from output
@@ -750,7 +827,12 @@ impl Plugin for TgImPlugin {
                             // 尝试 Markdown 发送，失败则回退纯文本
                             if let Err(_) = h.send_markdown(chat_id, seg).await {
                                 if let Err(e) = h.send_message(chat_id, seg).await {
-                                    eprintln!("[tg-im] send failed (segment {}/{}): {}", i + 1, segments.len(), e);
+                                    eprintln!(
+                                        "[tg-im] send failed (segment {}/{}): {}",
+                                        i + 1,
+                                        segments.len(),
+                                        e
+                                    );
                                 }
                             }
                             // 段间短暂延时，避免 TG 限频
@@ -803,10 +885,20 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     }
     if i < chars.len() {
         let a = cv(chars[i], TABLE)?;
-        let b = if i + 1 < chars.len() && chars[i + 1] != '=' { cv(chars[i + 1], TABLE)? } else { 0 };
-        let c = if i + 2 < chars.len() && chars[i + 2] != '=' { cv(chars[i + 2], TABLE)? } else { 0 };
+        let b = if i + 1 < chars.len() && chars[i + 1] != '=' {
+            cv(chars[i + 1], TABLE)?
+        } else {
+            0
+        };
+        let c = if i + 2 < chars.len() && chars[i + 2] != '=' {
+            cv(chars[i + 2], TABLE)?
+        } else {
+            0
+        };
         buf.push((a << 2) | (b >> 4));
-        if i + 1 < chars.len() && chars[i + 1] != '=' { buf.push((b << 4) | (c >> 2)); }
+        if i + 1 < chars.len() && chars[i + 1] != '=' {
+            buf.push((b << 4) | (c >> 2));
+        }
     }
     Ok(buf)
 }
@@ -815,6 +907,9 @@ fn cv(c: char, table: &[u8; 64]) -> Result<u8, String> {
     if c == '=' {
         return Ok(0);
     }
-    table.iter().position(|&x| x == c as u8).map(|p| p as u8)
+    table
+        .iter()
+        .position(|&x| x == c as u8)
+        .map(|p| p as u8)
         .ok_or_else(|| format!("invalid base64 char: '{}'", c))
 }

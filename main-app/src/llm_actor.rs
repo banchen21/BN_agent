@@ -13,10 +13,10 @@
 //! | `llm.response`  | A successful completion        |
 //! | `llm.error`     | HTTP / API / parse failure     |
 
+use crate::chat_store::{AppendJsonMessage, ChatStoreActor, EnsureOwnerPeer, FetchRecent};
 use actix::prelude::*;
-use rand::Rng;
-use crate::chat_store::{ChatStoreActor, FetchRecent, AppendJsonMessage};
 use plugin_interface::*;
+use rand::Rng;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -49,8 +49,8 @@ impl LlmConfig {
             .map_err(|_| "LLM_API_KEY or OPENAI_API_KEY not set".to_string())?;
 
         let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
-        let base_url = std::env::var("LLM_BASE_URL")
-            .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
+        let base_url =
+            std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
 
         let system_prompt = Self::load_persona().unwrap_or_else(|| {
             "You are a helpful AI assistant. Reply in the user's language.".into()
@@ -67,38 +67,51 @@ impl LlmConfig {
         };
 
         let max_history_turns = std::env::var("LLM_MAX_HISTORY")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
 
         let max_tokens = std::env::var("LLM_MAX_TOKENS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(384000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(384000);
 
         let thinking = std::env::var("LLM_THINKING")
-            .ok().map(|v| v.to_lowercase())
+            .ok()
+            .map(|v| v.to_lowercase())
             .map(|v| v == "enabled" || v == "true" || v == "1")
             .unwrap_or(false);
 
         // 固定采样温度，避免回复风格忽冷忽热。默认 0.8，可用 LLM_TEMPERATURE 覆盖。
         let temperature = std::env::var("LLM_TEMPERATURE")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(0.8);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.8);
 
-        let image_model = std::env::var("IMAGE_MODEL")
-            .unwrap_or_else(|_| "mimo-v2.5".into());
-        let image_base_url = std::env::var("IMAGE_BASE_URL")
-            .unwrap_or_else(|_| base_url.clone());
-        let image_api_key = std::env::var("IMAGE_API_KEY")
-            .unwrap_or_else(|_| api_key.clone());
-        let video_model = std::env::var("VIDEO_MODEL")
-            .unwrap_or_else(|_| "mimo-v2.5".into());
-        let video_base_url = std::env::var("VIDEO_BASE_URL")
-            .unwrap_or_else(|_| base_url.clone());
-        let video_api_key = std::env::var("VIDEO_API_KEY")
-            .unwrap_or_else(|_| api_key.clone());
+        let image_model = std::env::var("IMAGE_MODEL").unwrap_or_else(|_| "mimo-v2.5".into());
+        let image_base_url = std::env::var("IMAGE_BASE_URL").unwrap_or_else(|_| base_url.clone());
+        let image_api_key = std::env::var("IMAGE_API_KEY").unwrap_or_else(|_| api_key.clone());
+        let video_model = std::env::var("VIDEO_MODEL").unwrap_or_else(|_| "mimo-v2.5".into());
+        let video_base_url = std::env::var("VIDEO_BASE_URL").unwrap_or_else(|_| base_url.clone());
+        let video_api_key = std::env::var("VIDEO_API_KEY").unwrap_or_else(|_| api_key.clone());
 
         Ok(Self {
-            api_key, model, base_url, system_prompt, max_history_turns, max_tokens, thinking,
-            temperature, jailbreak_prompts, jailbreak_default_index,
-            image_model, image_base_url, image_api_key,
-            video_model, video_base_url, video_api_key,
+            api_key,
+            model,
+            base_url,
+            system_prompt,
+            max_history_turns,
+            max_tokens,
+            thinking,
+            temperature,
+            jailbreak_prompts,
+            jailbreak_default_index,
+            image_model,
+            image_base_url,
+            image_api_key,
+            video_model,
+            video_base_url,
+            video_api_key,
         })
     }
 
@@ -150,11 +163,17 @@ pub struct LlmActor {
 }
 
 impl LlmActor {
-    pub fn new(config: LlmConfig, event_bus: Addr<EventBus>, store_addr: Addr<ChatStoreActor>) -> Self {
+    pub fn new(
+        config: LlmConfig,
+        event_bus: Addr<EventBus>,
+        store_addr: Addr<ChatStoreActor>,
+    ) -> Self {
         let api_base = config.base_url.trim_end_matches('/');
         log::info!(
             "[LlmActor] endpoint={}/chat/completions model={} max_history={}",
-            api_base, config.model, config.max_history_turns,
+            api_base,
+            config.model,
+            config.max_history_turns,
         );
         Self {
             client: reqwest::Client::new(),
@@ -185,18 +204,27 @@ impl Handler<LlmRequest> for LlmActor {
 
     fn handle(&mut self, msg: LlmRequest, _ctx: &mut Self::Context) -> Self::Result {
         let client = self.client.clone();
-        let api_url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        let api_url = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
         let api_key = self.config.api_key.clone();
         let model = msg.model.unwrap_or_else(|| self.config.model.clone());
         let event_bus = self.event_bus.clone();
 
-        event_bus.do_send(Event::new("llm.request", serde_json::json!({
-            "model": model, "mode": "simple"
-        }), "llm-actor"));
+        event_bus.do_send(Event::new(
+            "llm.request",
+            serde_json::json!({
+                "model": model, "mode": "simple"
+            }),
+            "llm-actor",
+        ));
 
-        let messages: Vec<serde_json::Value> = msg.messages.iter().map(|m| {
-            serde_json::json!({ "role": m.role, "content": m.content })
-        }).collect();
+        let messages: Vec<serde_json::Value> = msg
+            .messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
 
         let body = serde_json::json!({
             "model": model,
@@ -205,11 +233,9 @@ impl Handler<LlmRequest> for LlmActor {
             "max_tokens": msg.max_tokens.unwrap_or(1024),
         });
 
-        let fut = async move {
-            call_llm(&client, &api_url, &api_key, &body, &event_bus).await
-        }
-        .into_actor(self)
-        .map(|result, _this: &mut Self, _ctx| result);
+        let fut = async move { call_llm(&client, &api_url, &api_key, &body, &event_bus).await }
+            .into_actor(self)
+            .map(|result, _this: &mut Self, _ctx| result);
 
         Box::pin(fut)
     }
@@ -227,7 +253,8 @@ impl Handler<ChatRequest> for LlmActor {
         let store_addr = self.store_addr.clone();
 
         // 破限词：仅在多模态请求时随机选取，不在纯文本工具调用时注入
-        let jailbreak = msg.jailbreak_index
+        let jailbreak = msg
+            .jailbreak_index
             .or_else(|| {
                 let is_multimodal = msg.image_base64.is_some()
                     || msg.video_base64.is_some()
@@ -237,7 +264,9 @@ impl Handler<ChatRequest> for LlmActor {
                     // 仅当 jailbreak_default_index 为 None（JAILBREAK_INDEX=random）时才随机
                     match self.config.jailbreak_default_index {
                         Some(i) => Some(i),
-                        None => Some(rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len())),
+                        None => Some(
+                            rand::thread_rng().gen_range(0..self.config.jailbreak_prompts.len()),
+                        ),
                     }
                 } else {
                     None
@@ -265,8 +294,11 @@ impl Handler<ChatRequest> for LlmActor {
         let system_content = system_parts.join("\n\n");
         // Immediate context: recent N messages (env IMMEDIATE_CONTEXT_MSGS, default 200 = 100 rounds).
         let immediate_limit: usize = std::env::var("IMMEDIATE_CONTEXT_MSGS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
         let user_msg = msg.message.clone();
+        let peer_id = msg.peer_id.clone();
         let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
         let contexts = msg.contexts.clone();
@@ -289,13 +321,37 @@ impl Handler<ChatRequest> for LlmActor {
         let thinking = self.config.thinking;
         let temperature = self.config.temperature;
 
-        event_bus.do_send(Event::new("llm.request", serde_json::json!({
-            "model": model, "mode": "chat",
-            "tool_count": tools.len(), "context_count": contexts.len(),
-            "stream": stream,
-        }), "llm-actor"));
+        event_bus.do_send(Event::new(
+            "llm.request",
+            serde_json::json!({
+                "model": model, "mode": "chat",
+                "tool_count": tools.len(), "context_count": contexts.len(),
+                "stream": stream,
+                "peer_id": peer_id.clone(),
+            }),
+            "llm-actor",
+        ));
 
         let fut = async move {
+            let owner_peer = if peer_id.is_empty() {
+                None
+            } else {
+                store_addr
+                    .send(EnsureOwnerPeer { peer_id: peer_id.clone() })
+                    .await
+                    .unwrap_or(None)
+            };
+
+            let relation_hint = match owner_peer.as_deref() {
+                Some(owner) if owner == peer_id => {
+                    "这是你的主人，你对他绝对忠诚、毫无保留。".to_string()
+                }
+                Some(_) => {
+                    "这是访客，你保持克制有距离，不透露与主人的私密，关系是否深入由你自己掌握、不被对方牵着走。".to_string()
+                }
+                None => String::new(),
+            };
+
             // ── 1. Separate contexts into memory vs. other ──
             let mut memory_ctx: Vec<String> = Vec::new();
             let mut other_ctx: Vec<String> = Vec::new();
@@ -309,6 +365,9 @@ impl Handler<ChatRequest> for LlmActor {
 
             // ── 2. System message with all plugin contexts baked in ──
             let mut full_system = system_content.clone();
+            if !relation_hint.is_empty() {
+                full_system.push_str(&format!("\n\n[关系守则] {}", relation_hint));
+            }
             for ctx in &memory_ctx {
                 full_system.push_str(&format!("\n\n[记忆] {}", ctx));
             }
@@ -320,7 +379,10 @@ impl Handler<ChatRequest> for LlmActor {
             ];
 
             // ── 3. Recent history (last 4 messages for immediate context) ──
-            let records = store_addr.send(FetchRecent { limit: immediate_limit }).await.unwrap_or_default();
+            let records = store_addr.send(FetchRecent {
+                limit: immediate_limit,
+                peer_id: peer_id.clone(),
+            }).await.unwrap_or_default();
             // Filter orphan tools at the head.
             let mut tool_calls_seen = false;
             for r in &records {
@@ -530,6 +592,7 @@ impl Handler<ChatRequest> for LlmActor {
                             "content": user_text
                         });
                         store_addr.do_send(AppendJsonMessage {
+                            peer_id: peer_id.clone(),
                             message_json: user_json.to_string(),
                         });
                     }
@@ -557,6 +620,7 @@ impl Handler<ChatRequest> for LlmActor {
                             assistant_msg["tool_calls"] = serde_json::Value::Array(tc_array);
                         }
                         store_addr.do_send(AppendJsonMessage {
+                            peer_id: peer_id.clone(),
                             message_json: assistant_msg.to_string(),
                         });
                     }
@@ -610,7 +674,11 @@ async fn stream_llm(
         .await
         .map_err(|e| {
             let err = format!("LLM stream HTTP error: {}", e);
-            event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+            event_bus.do_send(Event::new(
+                "llm.error",
+                serde_json::json!({ "error": err }),
+                "llm-actor",
+            ));
             err
         })?;
 
@@ -619,7 +687,11 @@ async fn stream_llm(
         let json: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({}));
         let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
         let err = format!("LLM API error ({}): {}", status.as_u16(), err_msg);
-        event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+        event_bus.do_send(Event::new(
+            "llm.error",
+            serde_json::json!({ "error": err }),
+            "llm-actor",
+        ));
         return Err(err);
     }
 
@@ -633,7 +705,9 @@ async fn stream_llm(
     let mut prompt_cache_miss_tokens: u32 = 0;
 
     struct PartialToolCall {
-        id: String, name: String, arguments: String,
+        id: String,
+        name: String,
+        arguments: String,
     }
     let mut partial_tool: Option<PartialToolCall> = None;
 
@@ -643,7 +717,11 @@ async fn stream_llm(
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| {
             let err = format!("LLM stream read error: {}", e);
-            event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+            event_bus.do_send(Event::new(
+                "llm.error",
+                serde_json::json!({ "error": err }),
+                "llm-actor",
+            ));
             err
         })?;
 
@@ -654,7 +732,9 @@ async fn stream_llm(
             let line = buf[..line_end].trim().to_string();
             buf = buf[line_end + 1..].to_string();
 
-            if line.is_empty() || line == "data: [DONE]" { continue; }
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
 
             let json_str = match line.strip_prefix("data: ") {
                 Some(s) => s,
@@ -673,8 +753,10 @@ async fn stream_llm(
                 if usage["prompt_tokens"].as_u64().unwrap_or(0) > 0 {
                     prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                     completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
-                    prompt_cache_hit_tokens = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
-                    prompt_cache_miss_tokens = usage["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
+                    prompt_cache_hit_tokens =
+                        usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
+                    prompt_cache_miss_tokens =
+                        usage["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
                     log::info!("[stream_llm] usage captured: prompt={}, completion={}, cache_hit={}, cache_miss={}",
                         prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens);
                 }
@@ -694,10 +776,14 @@ async fn stream_llm(
             if let Some(content) = delta["content"].as_str() {
                 full_content.push_str(content);
                 chunk_count += 1;
-                event_bus.do_send(Event::new("llm.chunk", serde_json::json!({
-                    "content": content,
-                    "accumulated_length": full_content.len(),
-                }), "llm-actor"));
+                event_bus.do_send(Event::new(
+                    "llm.chunk",
+                    serde_json::json!({
+                        "content": content,
+                        "accumulated_length": full_content.len(),
+                    }),
+                    "llm-actor",
+                ));
             }
 
             if let Some(tc) = delta.get("tool_calls") {
@@ -738,7 +824,11 @@ async fn stream_llm(
 
     if let Some(pt) = partial_tool.take() {
         let arguments = serde_json::from_str(&pt.arguments).unwrap_or(serde_json::Value::Null);
-        collected_tool_calls.push(ToolCall { id: pt.id, name: pt.name, arguments });
+        collected_tool_calls.push(ToolCall {
+            id: pt.id,
+            name: pt.name,
+            arguments,
+        });
     }
 
     let result = LlmResponse {
@@ -752,13 +842,17 @@ async fn stream_llm(
     };
 
     let preview = truncate_preview(&full_content, 200);
-    event_bus.do_send(Event::new("llm.response", serde_json::json!({
-        "content_preview": preview,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "chunk_count": chunk_count,
-        "streamed": true,
-    }), "llm-actor"));
+    event_bus.do_send(Event::new(
+        "llm.response",
+        serde_json::json!({
+            "content_preview": preview,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "chunk_count": chunk_count,
+            "streamed": true,
+        }),
+        "llm-actor",
+    ));
     Ok(result)
 }
 
@@ -780,41 +874,66 @@ async fn call_llm(
         .await
         .map_err(|e| {
             let err = format!("LLM HTTP error: {}", e);
-            event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+            event_bus.do_send(Event::new(
+                "llm.error",
+                serde_json::json!({ "error": err }),
+                "llm-actor",
+            ));
             err
         })?;
 
     let status = response.status();
     let json: serde_json::Value = response.json().await.map_err(|e| {
         let err = format!("LLM JSON parse error: {}", e);
-        event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+        event_bus.do_send(Event::new(
+            "llm.error",
+            serde_json::json!({ "error": err }),
+            "llm-actor",
+        ));
         err
     })?;
 
     if !status.is_success() {
         let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
         let err = format!("LLM API error ({}): {}", status.as_u16(), err_msg);
-        event_bus.do_send(Event::new("llm.error", serde_json::json!({ "error": err }), "llm-actor"));
+        event_bus.do_send(Event::new(
+            "llm.error",
+            serde_json::json!({ "error": err }),
+            "llm-actor",
+        ));
         return Err(err);
     }
 
     let choice = &json["choices"][0];
-    let content = choice["message"]["content"].as_str().unwrap_or("").to_string();
+    let content = choice["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
-    let prompt_cache_hit_tokens = json["usage"]["prompt_cache_hit_tokens"].as_u64().unwrap_or(0) as u32;
-    let prompt_cache_miss_tokens = json["usage"]["prompt_cache_miss_tokens"].as_u64().unwrap_or(0) as u32;
+    let prompt_cache_hit_tokens = json["usage"]["prompt_cache_hit_tokens"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    let prompt_cache_miss_tokens = json["usage"]["prompt_cache_miss_tokens"]
+        .as_u64()
+        .unwrap_or(0) as u32;
 
     let tool_calls: Vec<ToolCall> = choice["message"]["tool_calls"]
         .as_array()
         .map(|arr| {
-            arr.iter().filter_map(|tc| {
-                let id = tc["id"].as_str()?.to_string();
-                let name = tc["function"]["name"].as_str()?.to_string();
-                let arguments = serde_json::from_str(tc["function"]["arguments"].as_str()?)
-                    .unwrap_or(serde_json::Value::Null);
-                Some(ToolCall { id, name, arguments })
-            }).collect()
+            arr.iter()
+                .filter_map(|tc| {
+                    let id = tc["id"].as_str()?.to_string();
+                    let name = tc["function"]["name"].as_str()?.to_string();
+                    let arguments = serde_json::from_str(tc["function"]["arguments"].as_str()?)
+                        .unwrap_or(serde_json::Value::Null);
+                    Some(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
+                })
+                .collect()
         })
         .unwrap_or_default();
 
@@ -830,12 +949,16 @@ async fn call_llm(
     };
 
     let preview = truncate_preview(&content, 200);
-    event_bus.do_send(Event::new("llm.response", serde_json::json!({
-        "content_preview": preview,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "tool_calls_count": tc_count,
-    }), "llm-actor"));
+    event_bus.do_send(Event::new(
+        "llm.response",
+        serde_json::json!({
+            "content_preview": preview,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "tool_calls_count": tc_count,
+        }),
+        "llm-actor",
+    ));
     Ok(llm_response)
 }
 
@@ -880,18 +1003,38 @@ fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
         _ => source,
     };
 
-    let send_names: Vec<_> = names.iter().filter(|n| n.contains("send") || n.contains("message") || n.contains("voice")).collect();
+    let send_names: Vec<_> = names
+        .iter()
+        .filter(|n| n.contains("send") || n.contains("message") || n.contains("voice"))
+        .collect();
     let send_str = if send_names.is_empty() {
         String::new()
     } else {
-        format!("发消息用 {}；", send_names.iter().map(|n| n.replace("tg_", "").replace("feishu_", "").replace("wechat_", "")).collect::<Vec<_>>().join("、"))
+        format!(
+            "发消息用 {}；",
+            send_names
+                .iter()
+                .map(|n| n
+                    .replace("tg_", "")
+                    .replace("feishu_", "")
+                    .replace("wechat_", ""))
+                .collect::<Vec<_>>()
+                .join("、")
+        )
     };
 
-    let other_names: Vec<_> = names.iter().filter(|n| !n.contains("send") && !n.contains("message") && !n.contains("voice")).collect();
+    let other_names: Vec<_> = names
+        .iter()
+        .filter(|n| !n.contains("send") && !n.contains("message") && !n.contains("voice"))
+        .collect();
     let other_str = if other_names.is_empty() {
         String::new()
     } else {
-        other_names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("、")
+        other_names
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("、")
     };
 
     format!(
@@ -902,7 +1045,8 @@ fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
 
 fn truncate_preview(s: &str, max: usize) -> &str {
     let max = max.min(s.len());
-    let cut = s.char_indices()
+    let cut = s
+        .char_indices()
         .take_while(|(i, _)| *i < max)
         .last()
         .map(|(i, c)| i + c.len_utf8())

@@ -19,7 +19,10 @@ struct LoadedPlugin {
 
 /// Snapshot all tool names currently in the registry.
 fn snapshot_tool_names(registry: &Arc<Mutex<ToolRegistry>>) -> Vec<String> {
-    registry.lock().ok().map(|r| r.all_defs().iter().map(|d| d.name.clone()).collect())
+    registry
+        .lock()
+        .ok()
+        .map(|r| r.all_defs().iter().map(|d| d.name.clone()).collect())
         .unwrap_or_default()
 }
 
@@ -112,11 +115,16 @@ impl PluginManager {
             }
 
             // DLL 文件名如 "asr_tts_plugin.dll" → 插件名 "asr-tts-plugin"
-            let plugin_name = path.file_stem()
+            let plugin_name = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .map(|s| {
                     let base = s.strip_suffix("_plugin").unwrap_or(s).replace('_', "-");
-                    if base.ends_with("-plugin") { base } else { format!("{}-plugin", base) }
+                    if base.ends_with("-plugin") {
+                        base
+                    } else {
+                        format!("{}-plugin", base)
+                    }
                 })
                 .unwrap_or_default();
 
@@ -125,7 +133,10 @@ impl PluginManager {
                 continue;
             }
             if !load_only.is_empty() && !load_only.contains(&plugin_name) {
-                log::info!("[PluginManager] skipping '{}' (not in PLUGIN_LOAD)", plugin_name);
+                log::info!(
+                    "[PluginManager] skipping '{}' (not in PLUGIN_LOAD)",
+                    plugin_name
+                );
                 continue;
             }
 
@@ -167,11 +178,17 @@ impl Actor for PluginManager {
         // This must happen inside the actix runtime, not during new(),
         // because Cdylib FFI boundary doesn't carry thread-local LocalSet.
         self.auto_scan();
-        log::info!("[PluginManager] actor started — {} plugin(s) loaded", self.plugins.len());
+        log::info!(
+            "[PluginManager] actor started — {} plugin(s) loaded",
+            self.plugins.len()
+        );
     }
 
     fn stopping(&mut self, _ctx: &mut Self::Context) -> Running {
-        log::info!("[PluginManager] stopping — unloading {} plugin(s)", self.plugins.len());
+        log::info!(
+            "[PluginManager] stopping — unloading {} plugin(s)",
+            self.plugins.len()
+        );
         for (_name, loaded) in self.plugins.iter_mut() {
             loaded.instance.stop();
         }
@@ -208,7 +225,9 @@ impl Handler<LoadPlugin> for PluginManager {
 
                 log::info!(
                     "[PluginManager] loaded plugin '{}' v{} — {}",
-                    info.name, info.version, info.description
+                    info.name,
+                    info.version,
+                    info.description
                 );
 
                 let tr_for_ctx = tool_registry.clone();
@@ -221,22 +240,32 @@ impl Handler<LoadPlugin> for PluginManager {
                     chat_store,
                 };
                 let before = snapshot_tool_names(&tool_registry);
-                plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
+                plugin
+                    .start(ctx)
+                    .map_err(|e| format!("plugin.start() failed: {}", e))?;
                 let tool_names = diff_tool_names(&tool_registry, &before);
 
-                Ok(LoadedPlugin { info, path, instance: plugin, _library: library, tool_names })
+                Ok(LoadedPlugin {
+                    info,
+                    path,
+                    instance: plugin,
+                    _library: library,
+                    tool_names,
+                })
             }
         }
         .into_actor(self)
-        .map(|result: Result<LoadedPlugin, String>, this: &mut Self, _ctx| match result {
-            Ok(loaded) => {
-                let info = loaded.info.clone();
-                let name = info.name.clone();
-                this.plugins.insert(name, loaded);
-                Ok(info)
-            }
-            Err(e) => Err(e),
-        });
+        .map(
+            |result: Result<LoadedPlugin, String>, this: &mut Self, _ctx| match result {
+                Ok(loaded) => {
+                    let info = loaded.info.clone();
+                    let name = info.name.clone();
+                    this.plugins.insert(name, loaded);
+                    Ok(info)
+                }
+                Err(e) => Err(e),
+            },
+        );
 
         Box::pin(fut)
     }
@@ -288,9 +317,8 @@ impl Handler<ReloadPlugin> for PluginManager {
                 loaded.path.clone()
             }
             None => {
-                let fut =
-                    async move { Err(format!("plugin '{}' is not loaded", msg.name)) }
-                        .into_actor(self);
+                let fut = async move { Err(format!("plugin '{}' is not loaded", msg.name)) }
+                    .into_actor(self);
                 return Box::pin(fut);
             }
         };
@@ -336,21 +364,31 @@ impl Handler<ReloadPlugin> for PluginManager {
                     chat_store,
                 };
                 let before = snapshot_tool_names(&tool_registry);
-                plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
+                plugin
+                    .start(ctx)
+                    .map_err(|e| format!("plugin.start() failed: {}", e))?;
                 let tool_names = diff_tool_names(&tool_registry, &before);
-                Ok(LoadedPlugin { info, path, instance: plugin, _library: library, tool_names })
+                Ok(LoadedPlugin {
+                    info,
+                    path,
+                    instance: plugin,
+                    _library: library,
+                    tool_names,
+                })
             }
         }
         .into_actor(self)
-        .map(|result: Result<LoadedPlugin, String>, this: &mut Self, _ctx| match result {
-            Ok(loaded) => {
-                let info = loaded.info.clone();
-                let name = info.name.clone();
-                this.plugins.insert(name, loaded);
-                Ok(info)
-            }
-            Err(e) => Err(e),
-        });
+        .map(
+            |result: Result<LoadedPlugin, String>, this: &mut Self, _ctx| match result {
+                Ok(loaded) => {
+                    let info = loaded.info.clone();
+                    let name = info.name.clone();
+                    this.plugins.insert(name, loaded);
+                    Ok(info)
+                }
+                Err(e) => Err(e),
+            },
+        );
 
         Box::pin(fut)
     }
@@ -425,8 +463,8 @@ impl Handler<Event> for PluginManager {
             let message = event.data["message"].as_str().unwrap_or("");
             match level {
                 "error" => log::error!("[{}] {}", plugin, message),
-                "warn"  => log::warn!("[{}] {}", plugin, message),
-                _       => log::info!("[{}] {}", plugin, message),
+                "warn" => log::warn!("[{}] {}", plugin, message),
+                _ => log::info!("[{}] {}", plugin, message),
             }
             return;
         }
@@ -461,6 +499,19 @@ impl Handler<RefreshSnapshots> for PluginManager {
         snap.clear();
         for loaded in self.plugins.values() {
             if let Some(s) = loaded.instance.snapshot() {
+                snap.push(s);
+            }
+        }
+    }
+}
+
+impl Handler<RefreshSnapshotsForPeer> for PluginManager {
+    type Result = ();
+    fn handle(&mut self, msg: RefreshSnapshotsForPeer, _: &mut Self::Context) {
+        let mut snap = self.snapshots.lock().unwrap();
+        snap.clear();
+        for loaded in self.plugins.values() {
+            if let Some(s) = loaded.instance.snapshot_for_peer(&msg.peer_id) {
                 snap.push(s);
             }
         }
@@ -536,8 +587,8 @@ fn load_plugin_file(
     chat_store: Option<Recipient<ChatStoreMsg>>,
 ) -> Result<LoadedPlugin, String> {
     unsafe {
-        let library = libloading::Library::new(path)
-            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        let library =
+            libloading::Library::new(path).map_err(|e| format!("{}: {}", path.display(), e))?;
 
         let create: libloading::Symbol<PluginCreateFn> = library
             .get(b"plugin_create")
@@ -558,10 +609,18 @@ fn load_plugin_file(
         };
 
         let before = snapshot_tool_names(&tool_registry);
-        plugin.start(ctx).map_err(|e| format!("plugin.start() failed: {}", e))?;
+        plugin
+            .start(ctx)
+            .map_err(|e| format!("plugin.start() failed: {}", e))?;
         let tool_names = diff_tool_names(&tool_registry, &before);
 
         let file_path = path.to_string_lossy().to_string();
-        Ok(LoadedPlugin { info, path: file_path, instance: plugin, _library: library, tool_names })
+        Ok(LoadedPlugin {
+            info,
+            path: file_path,
+            instance: plugin,
+            _library: library,
+            tool_names,
+        })
     }
 }
