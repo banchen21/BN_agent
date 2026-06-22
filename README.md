@@ -108,6 +108,7 @@ cargo run -p main-app
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API 端点 |
 | `LLM_MAX_HISTORY` | `15` | 历史对话轮数 |
 | `CHAT_HISTORY_CLEAR_ON_START` | `false` | 启动时是否清空短期聊天历史，默认保留 |
+| `CHAT_HISTORY_MAX_PER_PEER` | `1000` | 每 peer 保留的历史记录上限，超出清理最旧，0=不限 |
 | `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
 | `TOOL_TIMEOUT_SECS` | `180` | 单个工具执行超时(秒)，0=禁用；超时返回错误且不阻塞主流程 |

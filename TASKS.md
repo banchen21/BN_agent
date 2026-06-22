@@ -88,7 +88,7 @@ Token 用量    ██████████ 完成
 - [ ] **Agent Loop 与主动系统联动** — 允许 proactive 触发受控 loop，而不是只能生成一条即时消息
 - [x] **LLM 重试持久化** — 熔断状态重启后保持（`CIRCUIT_BREAKER_DB_PATH`）
 - [x] **Token 预算控制** — 滚动窗口（日 24h/周 7d/月 30d）token 上限（`TOKEN_BUDGET_DAILY/WEEKLY/MONTHLY`）；pipeline 前置拦截超限请求 + 提示；`GET /api/token-usage/budget` 查询
-- [ ] **会话管理** — 对话标题、自动摘要、长时间未活动会话回收
+- [ ] **会话管理** — 对话标题、自动摘要（历史回收已落地：`CHAT_HISTORY_MAX_PER_PEER` 按 peer 保留上限，append 时清理最旧）
 - [x] **工具调用超时** — per-tool 超时控制（`TOOL_TIMEOUT_SECS`，默认 180s）；工具改在 blocking 池执行，避免同步工具阻塞 actix arbiter
 - [ ] **速率限制提升** — 支持 IP 级别限流 + 分布式（Redis）
 - [ ] **插件沙箱** — Wasm / Lua 沙箱运行插件

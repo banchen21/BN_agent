@@ -300,6 +300,28 @@ impl Handler<ClearAll> for ChatStoreActor {
     }
 }
 
+/// 每 peer 保留的历史上限（env `CHAT_HISTORY_MAX_PER_PEER`，默认 1000，0=不限）。
+fn chat_history_max_per_peer() -> usize {
+    std::env::var("CHAT_HISTORY_MAX_PER_PEER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+}
+
+/// 删除某 peer 超出保留上限的旧记录（仅保留最近 `keep` 条）。返回删除行数。keep=0 不删。
+fn prune_peer_history(conn: &Connection, peer_id: &str, keep: usize) -> usize {
+    if keep == 0 {
+        return 0;
+    }
+    conn.execute(
+        "DELETE FROM chat_history WHERE peer_id = ?1 AND id NOT IN (
+            SELECT id FROM chat_history WHERE peer_id = ?1 ORDER BY id DESC LIMIT ?2
+        )",
+        params![peer_id, keep as i64],
+    )
+    .unwrap_or(0)
+}
+
 impl Handler<AppendJsonMessage> for ChatStoreActor {
     type Result = ();
 
@@ -332,6 +354,16 @@ impl Handler<AppendJsonMessage> for ChatStoreActor {
             params![role, content, msg.peer_id, msg.message_json],
         ) {
             log::error!("[ChatStoreActor] AppendJsonMessage failed: {}", e);
+            return;
+        }
+        // 回收：保留该 peer 最近 N 条，删更旧的，防 chat_history 无限增长
+        let removed = prune_peer_history(&self.conn, &msg.peer_id, chat_history_max_per_peer());
+        if removed > 0 {
+            log::debug!(
+                "[ChatStoreActor] pruned {} old record(s) for peer '{}'",
+                removed,
+                msg.peer_id
+            );
         }
     }
 }
@@ -471,5 +503,95 @@ impl Handler<ChatStoreMsg> for ChatStoreActor {
                 ChatStoreResponse::FetchRecent(records)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL DEFAULT 'user',
+                content TEXT NOT NULL DEFAULT '',
+                peer_id TEXT DEFAULT '',
+                message_json TEXT DEFAULT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_n(conn: &Connection, peer: &str, n: usize) {
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO chat_history (role, content, peer_id) VALUES ('user', ?1, ?2)",
+                params![format!("msg-{}", i), peer],
+            )
+            .unwrap();
+        }
+    }
+
+    fn count(conn: &Connection, peer: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM chat_history WHERE peer_id = ?1",
+            params![peer],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn prune_keeps_when_under_limit() {
+        let conn = mem_db();
+        insert_n(&conn, "p1", 5);
+        assert_eq!(prune_peer_history(&conn, "p1", 10), 0);
+        assert_eq!(count(&conn, "p1"), 5);
+    }
+
+    #[test]
+    fn prune_removes_excess_oldest() {
+        let conn = mem_db();
+        insert_n(&conn, "p1", 10);
+        assert_eq!(prune_peer_history(&conn, "p1", 3), 7);
+        assert_eq!(count(&conn, "p1"), 3);
+    }
+
+    #[test]
+    fn prune_zero_keep_disables() {
+        let conn = mem_db();
+        insert_n(&conn, "p1", 5);
+        assert_eq!(prune_peer_history(&conn, "p1", 0), 0);
+        assert_eq!(count(&conn, "p1"), 5);
+    }
+
+    #[test]
+    fn prune_only_affects_target_peer() {
+        let conn = mem_db();
+        insert_n(&conn, "p1", 10);
+        insert_n(&conn, "p2", 4);
+        prune_peer_history(&conn, "p1", 2);
+        assert_eq!(count(&conn, "p1"), 2);
+        assert_eq!(count(&conn, "p2"), 4);
+    }
+
+    #[test]
+    fn prune_keeps_most_recent() {
+        let conn = mem_db();
+        insert_n(&conn, "p1", 5);
+        prune_peer_history(&conn, "p1", 2);
+        let mut stmt = conn
+            .prepare("SELECT content FROM chat_history WHERE peer_id = 'p1' ORDER BY id ASC")
+            .unwrap();
+        let contents: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(contents, vec!["msg-3", "msg-4"]);
     }
 }
