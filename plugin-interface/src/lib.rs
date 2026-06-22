@@ -22,7 +22,10 @@ pub use log;
 use serde::{Deserialize, Serialize};
 pub use serde_json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+// 跨 cdylib 共享的锁统一使用 parking_lot::Mutex（panic 时不会中毒，避免级联崩溃）。
+// re-export 给插件，保证 FFI 边界两侧的锁类型完全一致。
+pub use parking_lot::{self, Mutex, RwLock};
 
 // ── Event ────────────────────────────────────────────────────────────────────
 
@@ -528,6 +531,24 @@ pub struct PluginContext {
     pub chat_store: Option<Recipient<ChatStoreMsg>>,
 }
 
+impl PluginContext {
+    /// 构造一个用于单元测试的最小 `PluginContext`：内部启动一个 `EventBus`，
+    /// 提供空的 `ToolRegistry`，`llm` 与 `chat_store` 为 `None`。
+    ///
+    /// 必须在 actix System 上下文中调用（如 `#[actix_rt::test]`），因为会启动 `EventBus` actor。
+    pub fn for_test(plugin_name: &str) -> Self {
+        let event_bus = EventBus::new().start();
+        Self {
+            event_bus: event_bus.clone(),
+            plugin_name: plugin_name.to_string(),
+            llm: None,
+            tool_registry: Some(Arc::new(Mutex::new(ToolRegistry::new()))),
+            logger: PluginLogger::new(event_bus, plugin_name.to_string()),
+            chat_store: None,
+        }
+    }
+}
+
 /// The **object-safe** trait every plugin must implement.
 ///
 /// # Lifecycle
@@ -654,3 +675,157 @@ pub struct ApiRequest {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct StopAll;
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyTool {
+        def: ToolDef,
+        reply: String,
+    }
+
+    impl ToolExecutor for DummyTool {
+        fn def(&self) -> &ToolDef {
+            &self.def
+        }
+        fn execute(&self, _args: &serde_json::Value) -> ToolResult {
+            ToolResult::ok(&self.reply)
+        }
+    }
+
+    fn make_tool(name: &str, internal: bool) -> Arc<dyn ToolExecutor> {
+        Arc::new(DummyTool {
+            def: ToolDef {
+                name: name.into(),
+                description: "test tool".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+                internal,
+            },
+            reply: format!("reply-{name}"),
+        })
+    }
+
+    #[test]
+    fn new_registry_is_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.is_empty());
+        assert!(reg.all_defs().is_empty());
+    }
+
+    #[test]
+    fn register_then_execute() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("echo", false));
+        assert!(!reg.is_empty());
+
+        let res = reg
+            .execute("echo", &serde_json::json!({}))
+            .expect("tool exists");
+        assert!(res.success);
+        assert_eq!(res.content, "reply-echo");
+    }
+
+    #[test]
+    fn execute_unknown_tool_returns_none() {
+        let reg = ToolRegistry::new();
+        assert!(reg.execute("nope", &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn register_same_name_overwrites() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("dup", false));
+        reg.register(make_tool("dup", false));
+        assert_eq!(reg.all_defs().len(), 1);
+    }
+
+    #[test]
+    fn all_defs_includes_internal_and_preserves_flag() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("public", false));
+        reg.register(make_tool("hidden", true));
+        let defs = reg.all_defs();
+        assert_eq!(defs.len(), 2);
+        let hidden = defs.iter().find(|d| d.name == "hidden").unwrap();
+        assert!(hidden.internal);
+    }
+
+    #[test]
+    fn get_executor_clones_arc() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("echo", false));
+        let exec = reg.get_executor("echo").expect("exists");
+        let res = exec.execute(&serde_json::json!({}));
+        assert_eq!(res.content, "reply-echo");
+        assert!(reg.get_executor("missing").is_none());
+    }
+
+    #[test]
+    fn unregister_removes_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("a", false));
+        reg.register(make_tool("b", false));
+        reg.unregister("a");
+        assert!(reg.execute("a", &serde_json::json!({})).is_none());
+        assert_eq!(reg.all_defs().len(), 1);
+    }
+
+    #[test]
+    fn clear_empties_registry() {
+        let mut reg = ToolRegistry::new();
+        reg.register(make_tool("a", false));
+        reg.register(make_tool("b", false));
+        reg.clear();
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn tool_result_constructors() {
+        let ok = ToolResult::ok("hi");
+        assert!(ok.success);
+        assert_eq!(ok.content, "hi");
+        assert!(ok.error.is_none());
+
+        let err = ToolResult::err("bad");
+        assert!(!err.success);
+        assert_eq!(err.error.as_deref(), Some("bad"));
+
+        let meta = ToolResult::ok_with_metadata("c", serde_json::json!({ "k": "v" }));
+        assert!(meta.success);
+        assert_eq!(meta.metadata.unwrap()["k"], "v");
+    }
+
+    struct ToolRegPlugin;
+    impl Plugin for ToolRegPlugin {
+        fn info(&self) -> PluginInfo {
+            PluginInfo {
+                name: "tool-reg-plugin".into(),
+                version: "0.1.0".into(),
+                description: "registers a dummy tool".into(),
+                author: "test".into(),
+                min_host_version: "0.1.0".into(),
+            }
+        }
+        fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
+            if let Some(ref reg) = ctx.tool_registry {
+                reg.lock().register(make_tool("dummy", false));
+            }
+            Ok(())
+        }
+        fn stop(&mut self) {}
+    }
+
+    #[actix_rt::test]
+    async fn plugin_context_for_test_supports_tool_registration() {
+        let ctx = PluginContext::for_test("tool-reg-plugin");
+        let reg = ctx.tool_registry.clone().unwrap();
+        let mut plugin = ToolRegPlugin;
+        plugin.start(ctx).expect("start");
+        let res = reg.lock().execute("dummy", &serde_json::json!({}));
+        assert!(res.is_some());
+        assert_eq!(res.unwrap().content, "reply-dummy");
+    }
+}

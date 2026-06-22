@@ -5,7 +5,8 @@
 use actix::prelude::*;
 use plugin_interface::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 // ── LoadedPlugin ─────────────────────────────────────────────────────────────
 
@@ -19,11 +20,8 @@ struct LoadedPlugin {
 
 /// Snapshot all tool names currently in the registry.
 fn snapshot_tool_names(registry: &Arc<Mutex<ToolRegistry>>) -> Vec<String> {
-    registry
-        .lock()
-        .ok()
-        .map(|r| r.all_defs().iter().map(|d| d.name.clone()).collect())
-        .unwrap_or_default()
+    let r = registry.lock();
+    r.all_defs().iter().map(|d| d.name.clone()).collect()
 }
 
 /// Return tool names that appeared since `before` was taken.
@@ -192,7 +190,8 @@ impl Actor for PluginManager {
         for (_name, loaded) in self.plugins.iter_mut() {
             loaded.instance.stop();
         }
-        if let Ok(mut reg) = self.tool_registry.lock() {
+        {
+            let mut reg = self.tool_registry.lock();
             reg.clear();
         }
         self.plugins.clear();
@@ -281,7 +280,7 @@ impl Handler<UnloadPlugin> for PluginManager {
             Some(mut loaded) => {
                 // Unregister tools before unloading.
                 {
-                    let mut reg = self.tool_registry.lock().unwrap();
+                    let mut reg = self.tool_registry.lock();
                     for name in &loaded.tool_names {
                         reg.unregister(name);
                         log::info!("[PluginManager] unregistered tool '{}'", name);
@@ -326,7 +325,7 @@ impl Handler<ReloadPlugin> for PluginManager {
         if let Some(mut loaded) = self.plugins.remove(&msg.name) {
             // Unregister old tools before unloading.
             {
-                let mut reg = self.tool_registry.lock().unwrap();
+                let mut reg = self.tool_registry.lock();
                 for name in &loaded.tool_names {
                     reg.unregister(name);
                 }
@@ -495,7 +494,7 @@ impl Handler<BroadcastEvent> for PluginManager {
 impl Handler<RefreshSnapshots> for PluginManager {
     type Result = ();
     fn handle(&mut self, _: RefreshSnapshots, _: &mut Self::Context) {
-        let mut snap = self.snapshots.lock().unwrap();
+        let mut snap = self.snapshots.lock();
         snap.clear();
         for loaded in self.plugins.values() {
             if let Some(s) = loaded.instance.snapshot() {
@@ -508,7 +507,7 @@ impl Handler<RefreshSnapshots> for PluginManager {
 impl Handler<RefreshSnapshotsForPeer> for PluginManager {
     type Result = ();
     fn handle(&mut self, msg: RefreshSnapshotsForPeer, _: &mut Self::Context) {
-        let mut snap = self.snapshots.lock().unwrap();
+        let mut snap = self.snapshots.lock();
         snap.clear();
         for loaded in self.plugins.values() {
             if let Some(s) = loaded.instance.snapshot_for_peer(&msg.peer_id) {
@@ -564,7 +563,8 @@ impl Handler<StopAll> for PluginManager {
                 loaded.instance.stop();
             }));
         }
-        if let Ok(mut reg) = self.tool_registry.lock() {
+        {
+            let mut reg = self.tool_registry.lock();
             reg.clear();
             log::info!("[PluginManager] tool registry cleared");
         }

@@ -153,7 +153,7 @@ impl Plugin for McpPlugin {
             }
 
             if let Some(ref reg) = ctx.tool_registry {
-                let mut r = reg.lock().map_err(|e| format!("lock: {}", e))?;
+                let mut r = reg.lock();
                 for td in &tool_list {
                     let tool_name = td.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
                     let desc = td.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();

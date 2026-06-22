@@ -201,7 +201,7 @@ impl Plugin for SkillPlugin {
             }
         };
 
-        let mut reg = registry.lock().map_err(|e| format!("lock: {}", e))?;
+        let mut reg = registry.lock();
         let skill_count = skills.len();
         for skill in skills {
             let executor = Arc::new(SkillToolExecutor::new(skill));

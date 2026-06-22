@@ -43,7 +43,7 @@ impl Plugin for WebrtcPlugin {
 
         // Register 5 tools.
         if let Some(ref reg) = ctx.tool_registry {
-            let mut r = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut r = reg.lock();
 
             let peers = self.peers.clone();
             let eb = ctx.event_bus.clone();

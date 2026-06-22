@@ -180,7 +180,7 @@ impl Plugin for ToyControlPlugin {
         // Register tools.
         if let Some(ref reg) = ctx.tool_registry {
             let st = self.state.clone();
-            let mut reg = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut reg = reg.lock();
             reg.register(Arc::new(VibrateTool { state: st.clone() }));
             reg.register(Arc::new(StopTool { state: st.clone() }));
             reg.register(Arc::new(SetPatternTool { state: st.clone() }));

@@ -52,7 +52,7 @@ impl Plugin for VideoPlugin {
         self.event_bus = Some(ctx.event_bus.clone());
 
         if let Some(ref reg) = ctx.tool_registry {
-            let mut r = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut r = reg.lock();
             r.register(Arc::new(VideoAnalyzeTool {
                 client: self.client.clone(),
                 base_url: self.base_url.clone(),

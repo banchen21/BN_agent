@@ -382,7 +382,7 @@ impl Plugin for WechatClawPlugin {
 
         // 1. 注册工具
         if let Some(ref reg) = ctx.tool_registry {
-            let mut reg = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut reg = reg.lock();
             reg.register(Arc::new(SendWechatMessage {
                 client: self.client.clone(),
                 last_chat_id: self.last_chat_id.clone(),

@@ -594,7 +594,8 @@ impl Plugin for ProactivePlugin {
 
         // 注册工具给 LLM。
         if let Some(ref registry) = ctx.tool_registry {
-            if let Ok(mut reg) = registry.lock() {
+            {
+                let mut reg = registry.lock();
                 reg.register(Arc::new(ScheduleOnceTool {
                     state: Arc::clone(&self.state),
                 }));

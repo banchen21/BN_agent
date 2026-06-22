@@ -62,7 +62,7 @@ impl Plugin for ClaudeBridgePlugin {
 
         // ── Register tools ──
         if let Some(ref reg) = _ctx.tool_registry {
-            let mut r = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut r = reg.lock();
             r.register(Arc::new(ClaudeChatTool {
                 claude_path: self.claude_path.clone(),
                 sessions: self.sessions.clone(),

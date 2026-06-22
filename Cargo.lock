@@ -2733,6 +2733,7 @@ dependencies = [
  "futures-util",
  "libloading",
  "log",
+ "parking_lot",
  "plugin-interface",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -3257,7 +3258,9 @@ name = "plugin-interface"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "log",
+ "parking_lot",
  "serde",
  "serde_json",
 ]

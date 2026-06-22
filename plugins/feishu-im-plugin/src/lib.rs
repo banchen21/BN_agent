@@ -40,7 +40,7 @@ impl Plugin for FeishuImPlugin {
         if let Some(ref reg) = ctx.tool_registry {
             let bh = self.bot_handle.clone();
             let cc = self.current_chat_id.clone();
-            reg.lock().map_err(|e| format!("lock: {}", e))?
+            reg.lock()
                 .register(Arc::new(SendMessageTool { bot_handle: bh, current_chat_id: cc }));
             log::info!("[feishu-im] registered tool: feishu_send_message");
         }

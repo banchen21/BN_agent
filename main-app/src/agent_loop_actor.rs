@@ -5,26 +5,30 @@
 
 use actix::prelude::*;
 use plugin_interface::*;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::metrics_actor::MetricsActor;
-use crate::plugin_manager::PluginManager;
-use crate::retry_actor::{RetryActor, RetryChatRequest};
-use crate::token_usage_actor::TokenUsageActor;
+use crate::retry_actor::RetryChatRequest;
+use crate::token_usage_actor::RecordTokenUsage;
 
 const DEFAULT_MAX_STEPS: usize = 8;
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
 const MAX_STEPS_CAP: usize = 50;
 const MAX_TOOL_ROUNDS_CAP: usize = 20;
+/// 终态 loop 的默认保留上限（超出按 updated_at 清理最旧的）。
+const DEFAULT_MAX_KEEP: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopStatus {
     Running,
+    Paused,
     Completed,
     WaitingForUser,
     Stopping,
@@ -62,30 +66,83 @@ pub struct AgentLoopSnapshot {
 struct AgentLoopState {
     snapshot: AgentLoopSnapshot,
     stop_flag: Arc<AtomicBool>,
+    pause_flag: Arc<AtomicBool>,
 }
 
 pub struct AgentLoopActor {
-    retry_addr: Addr<RetryActor>,
-    plugin_manager: Addr<PluginManager>,
+    // 外部依赖以 Recipient<Msg> 注入（而非具体 Addr<Actor>），便于测试注入 mock。
+    retry_addr: Recipient<RetryChatRequest>,
+    plugin_manager: Recipient<RefreshSnapshotsForPeer>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     snapshots: Arc<Mutex<Vec<String>>>,
     event_bus: Addr<EventBus>,
-    token_usage_addr: Addr<TokenUsageActor>,
+    token_usage_addr: Recipient<RecordTokenUsage>,
     metrics_addr: Addr<MetricsActor>,
     loops: HashMap<String, AgentLoopState>,
+    persist: Option<AgentLoopPersist>,
 }
 
 impl AgentLoopActor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        retry_addr: Addr<RetryActor>,
-        plugin_manager: Addr<PluginManager>,
+        retry_addr: Recipient<RetryChatRequest>,
+        plugin_manager: Recipient<RefreshSnapshotsForPeer>,
         tool_registry: Arc<Mutex<ToolRegistry>>,
         snapshots: Arc<Mutex<Vec<String>>>,
         event_bus: Addr<EventBus>,
-        token_usage_addr: Addr<TokenUsageActor>,
+        token_usage_addr: Recipient<RecordTokenUsage>,
         metrics_addr: Addr<MetricsActor>,
     ) -> Self {
+        Self::from_parts(
+            retry_addr,
+            plugin_manager,
+            tool_registry,
+            snapshots,
+            event_bus,
+            token_usage_addr,
+            metrics_addr,
+            AgentLoopPersist::open(),
+        )
+    }
+
+    /// 构造并从给定的持久化（可为 None）恢复历史 loop。便于测试注入。
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        retry_addr: Recipient<RetryChatRequest>,
+        plugin_manager: Recipient<RefreshSnapshotsForPeer>,
+        tool_registry: Arc<Mutex<ToolRegistry>>,
+        snapshots: Arc<Mutex<Vec<String>>>,
+        event_bus: Addr<EventBus>,
+        token_usage_addr: Recipient<RecordTokenUsage>,
+        metrics_addr: Addr<MetricsActor>,
+        persist: Option<AgentLoopPersist>,
+    ) -> Self {
+        let mut loops = HashMap::new();
+        if let Some(ref p) = persist {
+            for mut snap in p.load_all() {
+                // runner 线程随进程消失，重启时仍 Running/Stopping 的 loop 视为中断
+                if reconcile_restored_status(&mut snap) {
+                    snap.updated_at_ms = now_ms();
+                    p.save(&snap);
+                }
+                let stop_flag = Arc::new(AtomicBool::new(false));
+                let pause_flag = Arc::new(AtomicBool::new(false));
+                loops.insert(
+                    snap.id.clone(),
+                    AgentLoopState {
+                        snapshot: snap,
+                        stop_flag,
+                        pause_flag,
+                    },
+                );
+            }
+            if !loops.is_empty() {
+                log::info!(
+                    "[AgentLoopActor] restored {} loop(s) from persistence",
+                    loops.len()
+                );
+            }
+        }
         Self {
             retry_addr,
             plugin_manager,
@@ -94,8 +151,41 @@ impl AgentLoopActor {
             event_bus,
             token_usage_addr,
             metrics_addr,
-            loops: HashMap::new(),
+            loops,
+            persist,
         }
+    }
+
+    /// 把指定 loop 的当前快照写入持久化存储。
+    fn persist_loop(&self, id: &str) {
+        if let (Some(ref p), Some(state)) = (&self.persist, self.loops.get(id)) {
+            p.save(&state.snapshot);
+        }
+    }
+
+    /// 清理终态 loop：内存与持久化中只保留最近 `AGENT_LOOP_MAX_KEEP` 个终态记录。
+    fn prune_terminal(&mut self) {
+        let keep = agent_loop_max_keep();
+        let items: Vec<(String, AgentLoopStatus, u64)> = self
+            .loops
+            .iter()
+            .map(|(id, st)| (id.clone(), st.snapshot.status.clone(), st.snapshot.updated_at_ms))
+            .collect();
+        let to_remove = terminal_ids_to_prune(&items, keep);
+        if to_remove.is_empty() {
+            return;
+        }
+        for id in &to_remove {
+            self.loops.remove(id);
+        }
+        if let Some(ref p) = self.persist {
+            p.prune(&to_remove);
+        }
+        log::info!(
+            "[AgentLoopActor] pruned {} terminal loop(s) (keep={})",
+            to_remove.len(),
+            keep
+        );
     }
 }
 
@@ -162,6 +252,7 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
             .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS)
             .clamp(0, MAX_TOOL_ROUNDS_CAP);
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = Arc::new(AtomicBool::new(false));
 
         let snapshot = AgentLoopSnapshot {
             id: id.clone(),
@@ -182,8 +273,10 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
             AgentLoopState {
                 snapshot: snapshot.clone(),
                 stop_flag: Arc::clone(&stop_flag),
+                pause_flag: Arc::clone(&pause_flag),
             },
         );
+        self.persist_loop(&id);
 
         let runner = AgentLoopRunner {
             id: id.clone(),
@@ -192,6 +285,7 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
             max_steps,
             max_tool_rounds,
             stop_flag,
+            pause_flag,
             retry_addr: self.retry_addr.clone(),
             plugin_manager: self.plugin_manager.clone(),
             tool_registry: self.tool_registry.clone(),
@@ -202,6 +296,9 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
             addr: ctx.address(),
         };
         actix::spawn(async move { runner.run().await });
+
+        // 新 loop 创建后清理过旧的终态 loop，防止内存/DB 无限增长
+        self.prune_terminal();
 
         Ok(snapshot)
     }
@@ -241,6 +338,60 @@ impl Handler<StopAgentLoop> for AgentLoopActor {
             state.snapshot.status = AgentLoopStatus::Stopping;
             state.snapshot.updated_at_ms = now_ms();
         }
+        // 结束对 state 的可变借用后再持久化
+        self.persist_loop(&msg.id);
+        true
+    }
+}
+
+/// 暂停一个运行中的 agent loop。
+#[derive(Message)]
+#[rtype(result = "bool")]
+pub struct PauseAgentLoop {
+    pub id: String,
+}
+
+/// 恢复一个已暂停的 agent loop。
+#[derive(Message)]
+#[rtype(result = "bool")]
+pub struct ResumeAgentLoop {
+    pub id: String,
+}
+
+impl Handler<PauseAgentLoop> for AgentLoopActor {
+    type Result = bool;
+
+    fn handle(&mut self, msg: PauseAgentLoop, _ctx: &mut Self::Context) -> Self::Result {
+        let Some(state) = self.loops.get_mut(&msg.id) else {
+            return false;
+        };
+        // 仅 Running 可暂停
+        if state.snapshot.status != AgentLoopStatus::Running {
+            return false;
+        }
+        state.pause_flag.store(true, Ordering::SeqCst);
+        state.snapshot.status = AgentLoopStatus::Paused;
+        state.snapshot.updated_at_ms = now_ms();
+        self.persist_loop(&msg.id);
+        true
+    }
+}
+
+impl Handler<ResumeAgentLoop> for AgentLoopActor {
+    type Result = bool;
+
+    fn handle(&mut self, msg: ResumeAgentLoop, _ctx: &mut Self::Context) -> Self::Result {
+        let Some(state) = self.loops.get_mut(&msg.id) else {
+            return false;
+        };
+        // 仅 Paused 可恢复
+        if state.snapshot.status != AgentLoopStatus::Paused {
+            return false;
+        }
+        state.pause_flag.store(false, Ordering::SeqCst);
+        state.snapshot.status = AgentLoopStatus::Running;
+        state.snapshot.updated_at_ms = now_ms();
+        self.persist_loop(&msg.id);
         true
     }
 }
@@ -257,12 +408,20 @@ impl Handler<AgentLoopProgress> for AgentLoopActor {
             state.snapshot.observations.push(step);
         }
         if let Some(status) = msg.status {
-            state.snapshot.status = status;
+            // 外部控制的 Paused/Stopping 不被 runner 的 Running 心跳覆盖
+            let externally_held = matches!(
+                state.snapshot.status,
+                AgentLoopStatus::Paused | AgentLoopStatus::Stopping
+            );
+            if !(externally_held && status == AgentLoopStatus::Running) {
+                state.snapshot.status = status;
+            }
         }
         if let Some(error) = msg.error {
             state.snapshot.error = Some(error);
         }
         state.snapshot.updated_at_ms = now_ms();
+        self.persist_loop(&msg.id);
     }
 }
 
@@ -273,12 +432,13 @@ struct AgentLoopRunner {
     max_steps: usize,
     max_tool_rounds: usize,
     stop_flag: Arc<AtomicBool>,
-    retry_addr: Addr<RetryActor>,
-    plugin_manager: Addr<PluginManager>,
+    pause_flag: Arc<AtomicBool>,
+    retry_addr: Recipient<RetryChatRequest>,
+    plugin_manager: Recipient<RefreshSnapshotsForPeer>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     snapshots: Arc<Mutex<Vec<String>>>,
     event_bus: Addr<EventBus>,
-    token_usage_addr: Addr<TokenUsageActor>,
+    token_usage_addr: Recipient<RecordTokenUsage>,
     metrics_addr: Addr<MetricsActor>,
     addr: Addr<AgentLoopActor>,
 }
@@ -290,6 +450,17 @@ impl AgentLoopRunner {
         let mut final_error: Option<String> = None;
 
         for step_index in 1..=self.max_steps {
+            if self.stop_flag.load(Ordering::SeqCst) {
+                final_status = AgentLoopStatus::Stopped;
+                break;
+            }
+
+            // 暂停：pause_flag 置位且未请求停止时，循环等待恢复
+            while self.pause_flag.load(Ordering::SeqCst)
+                && !self.stop_flag.load(Ordering::SeqCst)
+            {
+                actix::clock::sleep(Duration::from_millis(200)).await;
+            }
             if self.stop_flag.load(Ordering::SeqCst) {
                 final_status = AgentLoopStatus::Stopped;
                 break;
@@ -403,7 +574,7 @@ impl AgentLoopRunner {
                 peer_id: self.peer_id.clone(),
             })
             .await;
-        let contexts = self.snapshots.lock().unwrap().clone();
+        let contexts = self.snapshots.lock().clone();
         let tools = collect_tool_defs(&self.tool_registry);
         let prompt = build_loop_prompt(&self.goal, observations, step_index, self.max_steps);
         let request_id = format!("agent-loop-{}-s{}", self.id, step_index);
@@ -450,7 +621,8 @@ impl AgentLoopRunner {
 
             let round_tool_calls = response.tool_calls.clone();
             let round_results =
-                execute_tool_calls(&self.tool_registry, &self.metrics_addr, &round_tool_calls);
+                execute_tool_calls(&self.tool_registry, &self.metrics_addr, &round_tool_calls)
+                    .await;
             all_tool_calls.extend(round_tool_calls.clone());
             all_tool_results.extend(round_results.clone());
 
@@ -577,40 +749,47 @@ struct LoopDecision {
 }
 
 fn collect_tool_defs(tool_registry: &Arc<Mutex<ToolRegistry>>) -> Vec<serde_json::Value> {
-    match tool_registry.lock() {
-        Ok(reg) => reg
-            .all_defs()
-            .iter()
-            .filter(|d| !d.internal)
-            .map(|d| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": d.name,
-                        "description": d.description,
-                        "parameters": d.parameters,
-                    }
-                })
+    let reg = tool_registry.lock();
+    reg
+        .all_defs()
+        .iter()
+        .filter(|d| !d.internal)
+        .map(|d| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.parameters,
+                }
             })
-            .collect(),
-        Err(_) => vec![],
-    }
+        })
+        .collect()
 }
 
-fn execute_tool_calls(
+async fn execute_tool_calls(
     tool_registry: &Arc<Mutex<ToolRegistry>>,
     metrics_addr: &Addr<MetricsActor>,
     tool_calls: &[ToolCall],
 ) -> Vec<String> {
+    let timeout_secs = crate::tool_exec::tool_timeout_secs();
     let mut results = Vec::new();
     for call in tool_calls {
-        let executor = match tool_registry.lock() {
-            Ok(reg) => reg.get_executor(&call.name),
-            Err(_) => None,
+        let executor = {
+            let reg = tool_registry.lock();
+            reg.get_executor(&call.name)
         };
         let started = Instant::now();
         let result = match executor {
-            Some(exec) => exec.execute(&call.arguments),
+            Some(exec) => {
+                crate::tool_exec::execute_with_timeout(
+                    exec,
+                    call.arguments.clone(),
+                    &call.name,
+                    timeout_secs,
+                )
+                .await
+            }
             None => ToolResult::err(&format!("tool '{}' not found", call.name)),
         };
         metrics_addr.do_send(crate::metrics_actor::RecordToolCall {
@@ -706,24 +885,674 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// 终态 loop 保留上限（env `AGENT_LOOP_MAX_KEEP`，默认 200）。
+fn agent_loop_max_keep() -> usize {
+    std::env::var("AGENT_LOOP_MAX_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_KEEP)
+}
+
+/// 纯逻辑：从 (id, status, updated_at_ms) 列表中挑出超出保留上限、需清理的终态 loop id。
+/// 仅清理终态（Completed/Stopped/Failed）；活跃（Running/Paused/Stopping/WaitingForUser）始终保留。
+/// 终态中按 updated_at 降序保留最近 `keep` 个，其余返回待删除。
+fn terminal_ids_to_prune(items: &[(String, AgentLoopStatus, u64)], keep: usize) -> Vec<String> {
+    let mut terminal: Vec<&(String, AgentLoopStatus, u64)> = items
+        .iter()
+        .filter(|(_, s, _)| {
+            matches!(
+                s,
+                AgentLoopStatus::Completed | AgentLoopStatus::Stopped | AgentLoopStatus::Failed
+            )
+        })
+        .collect();
+    if terminal.len() <= keep {
+        return Vec::new();
+    }
+    terminal.sort_by(|a, b| b.2.cmp(&a.2));
+    terminal
+        .into_iter()
+        .skip(keep)
+        .map(|(id, _, _)| id.clone())
+        .collect()
+}
+
+/// Agent Loop 状态名转持久化字符串（与 serde snake_case 一致）。
+fn loop_status_str(s: &AgentLoopStatus) -> &'static str {
+    match s {
+        AgentLoopStatus::Running => "running",
+        AgentLoopStatus::Paused => "paused",
+        AgentLoopStatus::Completed => "completed",
+        AgentLoopStatus::WaitingForUser => "waiting_for_user",
+        AgentLoopStatus::Stopping => "stopping",
+        AgentLoopStatus::Stopped => "stopped",
+        AgentLoopStatus::Failed => "failed",
+    }
+}
+
+/// 进程重启后，仍处于 running/stopping 的 loop 因 runner 线程已消失需视为中断。
+/// 返回 true 表示状态被改写（需要回写持久化）。
+fn reconcile_restored_status(snap: &mut AgentLoopSnapshot) -> bool {
+    if matches!(
+        snap.status,
+        AgentLoopStatus::Running | AgentLoopStatus::Stopping | AgentLoopStatus::Paused
+    ) {
+        snap.status = AgentLoopStatus::Failed;
+        if snap.error.is_none() {
+            snap.error = Some("interrupted by process restart".into());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Agent Loop 状态的 SQLite 持久化（每个 loop 一行，存完整快照 JSON），
+/// 用于进程重启后恢复历史与按 peer 归档。
+struct AgentLoopPersist {
+    conn: Connection,
+}
+
+impl AgentLoopPersist {
+    fn open() -> Option<Self> {
+        let path = std::env::var("AGENT_LOOP_DB_PATH")
+            .unwrap_or_else(|_| "data/agent_loops.db".to_string());
+        Self::open_path(&path)
+    }
+
+    fn open_path(path: &str) -> Option<Self> {
+        let p = std::path::Path::new(path);
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        let conn = match Connection::open(p) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[AgentLoopActor] persistence disabled: {}", e);
+                return None;
+            }
+        };
+        if let Err(e) = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_loops (
+                id            TEXT PRIMARY KEY,
+                peer_id       TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_loops_peer ON agent_loops(peer_id);",
+        ) {
+            log::warn!("[AgentLoopActor] table init failed: {}", e);
+            return None;
+        }
+        Some(Self { conn })
+    }
+
+    fn save(&self, snap: &AgentLoopSnapshot) {
+        let json = match serde_json::to_string(snap) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn!("[AgentLoopActor] serialize loop {} failed: {}", snap.id, e);
+                return;
+            }
+        };
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO agent_loops (id, peer_id, status, snapshot_json, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                peer_id = ?2, status = ?3, snapshot_json = ?4, updated_at_ms = ?6",
+            rusqlite::params![
+                snap.id,
+                snap.peer_id,
+                loop_status_str(&snap.status),
+                json,
+                snap.created_at_ms as i64,
+                snap.updated_at_ms as i64,
+            ],
+        ) {
+            log::warn!("[AgentLoopActor] save loop {} failed: {}", snap.id, e);
+        }
+    }
+
+    /// 从持久化删除指定 id 的 loop（清理终态旧记录）。
+    fn prune(&self, ids: &[String]) {
+        for id in ids {
+            if let Err(e) = self.conn.execute("DELETE FROM agent_loops WHERE id = ?1", [id]) {
+                log::warn!("[AgentLoopActor] prune loop {} failed: {}", id, e);
+            }
+        }
+    }
+
+    fn load_all(&self) -> Vec<AgentLoopSnapshot> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT snapshot_json FROM agent_loops ORDER BY created_at_ms")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[AgentLoopActor] prepare load failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[AgentLoopActor] query load failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for row in rows.flatten() {
+            match serde_json::from_str::<AgentLoopSnapshot>(&row) {
+                Ok(snap) => out.push(snap),
+                Err(e) => log::warn!("[AgentLoopActor] deserialize loop failed: {}", e),
+            }
+        }
+        out
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_json_decision() {
-        let decision = parse_loop_decision(
-            r#"{"status":"done","message":"完成","reason":"ok","sleep_seconds":0}"#,
-        );
+    fn sample_step() -> AgentLoopStep {
+        AgentLoopStep {
+            step: 2,
+            status: AgentLoopStatus::Running,
+            llm_message: "hello".into(),
+            reason: None,
+            tool_calls: vec!["tool_a".into()],
+            tool_results: vec!["result_a".into()],
+            elapsed_ms: 10,
+            created_at_ms: 0,
+        }
+    }
 
-        assert_eq!(decision.status.as_deref(), Some("done"));
-        assert_eq!(decision.message.as_deref(), Some("完成"));
+    fn make_snapshot(id: &str, status: AgentLoopStatus) -> AgentLoopSnapshot {
+        AgentLoopSnapshot {
+            id: id.into(),
+            goal: "g".into(),
+            peer_id: "test:1".into(),
+            status,
+            max_steps: 8,
+            max_tool_rounds: 5,
+            steps_taken: 0,
+            observations: Vec::new(),
+            error: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn temp_db_path(tag: &str) -> String {
+        let mut p = std::env::temp_dir();
+        p.push(format!("bn_agent_loop_test_{}_{}.db", tag, std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p.to_string_lossy().to_string()
     }
 
     #[test]
-    fn strips_json_fence() {
-        let cleaned = strip_json_fence("```json\n{\"status\":\"continue\"}\n```");
+    fn strip_json_fence_plain() {
+        assert_eq!(strip_json_fence("{\"a\":1}"), "{\"a\":1}");
+    }
 
-        assert_eq!(cleaned, "{\"status\":\"continue\"}");
+    #[test]
+    fn strip_json_fence_markers() {
+        assert_eq!(strip_json_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(strip_json_fence("```\n{\"a\":1}\n```"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn parse_loop_decision_valid() {
+        let d = parse_loop_decision("{\"status\":\"done\",\"message\":\"ok\",\"sleep_seconds\":3}");
+        assert_eq!(d.status.as_deref(), Some("done"));
+        assert_eq!(d.message.as_deref(), Some("ok"));
+        assert_eq!(d.sleep_seconds, Some(3));
+    }
+
+    #[test]
+    fn parse_loop_decision_fenced() {
+        let d = parse_loop_decision("```json\n{\"status\":\"continue\",\"message\":\"m\"}\n```");
+        assert_eq!(d.status.as_deref(), Some("continue"));
+        assert_eq!(d.message.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn parse_loop_decision_invalid_falls_back_to_message() {
+        let d = parse_loop_decision("just some text, not json");
+        assert!(d.status.is_none());
+        assert_eq!(d.message.as_deref(), Some("just some text, not json"));
+    }
+
+    #[test]
+    fn status_from_decision_maps_variants() {
+        assert_eq!(status_from_decision("done"), AgentLoopStatus::Completed);
+        assert_eq!(status_from_decision("complete"), AgentLoopStatus::Completed);
+        assert_eq!(status_from_decision("ask_user"), AgentLoopStatus::WaitingForUser);
+        assert_eq!(status_from_decision("need_user"), AgentLoopStatus::WaitingForUser);
+        assert_eq!(status_from_decision("failed"), AgentLoopStatus::Failed);
+        assert_eq!(status_from_decision("error"), AgentLoopStatus::Failed);
+        assert_eq!(status_from_decision("stopped"), AgentLoopStatus::Stopped);
+        assert_eq!(status_from_decision("continue"), AgentLoopStatus::Running);
+        assert_eq!(status_from_decision("whatever"), AgentLoopStatus::Running);
+    }
+
+    #[test]
+    fn status_from_decision_case_insensitive_and_trimmed() {
+        assert_eq!(status_from_decision("  DONE  "), AgentLoopStatus::Completed);
+        assert_eq!(status_from_decision("Ask_User"), AgentLoopStatus::WaitingForUser);
+    }
+
+    #[test]
+    fn loop_status_str_all() {
+        assert_eq!(loop_status_str(&AgentLoopStatus::Running), "running");
+        assert_eq!(loop_status_str(&AgentLoopStatus::Completed), "completed");
+        assert_eq!(
+            loop_status_str(&AgentLoopStatus::WaitingForUser),
+            "waiting_for_user"
+        );
+        assert_eq!(loop_status_str(&AgentLoopStatus::Stopping), "stopping");
+        assert_eq!(loop_status_str(&AgentLoopStatus::Stopped), "stopped");
+        assert_eq!(loop_status_str(&AgentLoopStatus::Failed), "failed");
+    }
+
+    #[test]
+    fn format_observation_contains_key_fields() {
+        let s = format_observation(&sample_step());
+        assert!(s.contains("Step 2"));
+        assert!(s.contains("hello"));
+        assert!(s.contains("tool_a"));
+        assert!(s.contains("result_a"));
+    }
+
+    #[test]
+    fn format_observation_no_tools() {
+        let mut step = sample_step();
+        step.tool_calls.clear();
+        assert!(format_observation(&step).contains("无"));
+    }
+
+    #[test]
+    fn build_loop_prompt_includes_goal_step_and_empty_obs() {
+        let prompt = build_loop_prompt("my goal", &[], 1, 5);
+        assert!(prompt.contains("my goal"));
+        assert!(prompt.contains("1/5"));
+        assert!(prompt.contains("（暂无）"));
+    }
+
+    #[test]
+    fn build_loop_prompt_includes_observations() {
+        let obs = vec!["obs-1".to_string(), "obs-2".to_string()];
+        let prompt = build_loop_prompt("g", &obs, 3, 8);
+        assert!(prompt.contains("obs-1"));
+        assert!(prompt.contains("obs-2"));
+        assert!(prompt.contains("3/8"));
+    }
+
+    #[test]
+    fn reconcile_marks_running_as_interrupted() {
+        let mut s = make_snapshot("a", AgentLoopStatus::Running);
+        assert!(reconcile_restored_status(&mut s));
+        assert_eq!(s.status, AgentLoopStatus::Failed);
+        assert_eq!(s.error.as_deref(), Some("interrupted by process restart"));
+    }
+
+    #[test]
+    fn reconcile_marks_stopping_as_interrupted() {
+        let mut s = make_snapshot("a", AgentLoopStatus::Stopping);
+        assert!(reconcile_restored_status(&mut s));
+        assert_eq!(s.status, AgentLoopStatus::Failed);
+    }
+
+    #[test]
+    fn reconcile_keeps_terminal_status() {
+        let mut s = make_snapshot("a", AgentLoopStatus::Completed);
+        assert!(!reconcile_restored_status(&mut s));
+        assert_eq!(s.status, AgentLoopStatus::Completed);
+    }
+
+    #[test]
+    fn persist_save_and_reload_roundtrip() {
+        let path = temp_db_path("roundtrip");
+        {
+            let p = AgentLoopPersist::open_path(&path).expect("open");
+            p.save(&make_snapshot("id-1", AgentLoopStatus::Running));
+        }
+        // 重新打开（模拟重启）
+        let p2 = AgentLoopPersist::open_path(&path).expect("reopen");
+        let loaded = p2.load_all();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "id-1");
+        assert_eq!(loaded[0].status, AgentLoopStatus::Running);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_upsert_updates_same_id() {
+        let path = temp_db_path("upsert");
+        let p = AgentLoopPersist::open_path(&path).expect("open");
+        p.save(&make_snapshot("id-x", AgentLoopStatus::Running));
+        let mut updated = make_snapshot("id-x", AgentLoopStatus::Completed);
+        updated.steps_taken = 5;
+        p.save(&updated);
+        let loaded = p.load_all();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].status, AgentLoopStatus::Completed);
+        assert_eq!(loaded[0].steps_taken, 5);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Actor 级测试（mock 依赖注入）──────────────────────────────────────
+
+    struct MockLlm {
+        response: String,
+    }
+    impl Actor for MockLlm {
+        type Context = Context<Self>;
+    }
+    impl Handler<RetryChatRequest> for MockLlm {
+        type Result = Result<LlmResponse, String>;
+        fn handle(&mut self, _msg: RetryChatRequest, _ctx: &mut Self::Context) -> Self::Result {
+            Ok(LlmResponse {
+                content: self.response.clone(),
+                model: "mock".into(),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                prompt_cache_hit_tokens: 0,
+                prompt_cache_miss_tokens: 0,
+                tool_calls: vec![],
+            })
+        }
+    }
+
+    struct MockRefresher;
+    impl Actor for MockRefresher {
+        type Context = Context<Self>;
+    }
+    impl Handler<RefreshSnapshotsForPeer> for MockRefresher {
+        type Result = ();
+        fn handle(&mut self, _msg: RefreshSnapshotsForPeer, _ctx: &mut Self::Context) {}
+    }
+
+    struct MockTokenUsage;
+    impl Actor for MockTokenUsage {
+        type Context = Context<Self>;
+    }
+    impl Handler<RecordTokenUsage> for MockTokenUsage {
+        type Result = ();
+        fn handle(&mut self, _msg: RecordTokenUsage, _ctx: &mut Self::Context) {}
+    }
+
+    /// 构造一个注入 mock 依赖、不落盘（persist=None）的 AgentLoopActor。
+    fn build_actor(llm: Recipient<RetryChatRequest>) -> AgentLoopActor {
+        AgentLoopActor::from_parts(
+            llm,
+            MockRefresher.start().recipient(),
+            Arc::new(Mutex::new(ToolRegistry::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            EventBus::new().start(),
+            MockTokenUsage.start().recipient(),
+            MetricsActor::new().start(),
+            None,
+        )
+    }
+
+    async fn wait_terminal(actor: &Addr<AgentLoopActor>, id: &str) -> AgentLoopStatus {
+        let mut status = AgentLoopStatus::Running;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if let Some(s) = actor.send(GetAgentLoop { id: id.to_string() }).await.unwrap() {
+                status = s.status.clone();
+                if status != AgentLoopStatus::Running {
+                    break;
+                }
+            }
+        }
+        status
+    }
+
+    #[actix_rt::test]
+    async fn start_rejects_empty_goal() {
+        let llm = MockLlm { response: "{}".into() }.start();
+        let actor = build_actor(llm.recipient()).start();
+        let res = actor
+            .send(StartAgentLoop {
+                goal: "   ".into(),
+                peer_id: None,
+                max_steps: Some(1),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap();
+        assert!(res.is_err());
+    }
+
+    #[actix_rt::test]
+    async fn start_clamps_and_defaults() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"d"}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "  trimmed goal  ".into(),
+                peer_id: None,
+                max_steps: Some(9999),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.goal, "trimmed goal");
+        assert_eq!(snap.peer_id, "agent-loop:default");
+        assert_eq!(snap.max_steps, MAX_STEPS_CAP);
+        assert_eq!(snap.status, AgentLoopStatus::Running);
+    }
+
+    #[actix_rt::test]
+    async fn loop_completes_with_mock_llm() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"完成"}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g".into(),
+                peer_id: Some("test:peer".into()),
+                max_steps: Some(5),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let status = wait_terminal(&actor, &snap.id).await;
+        assert_eq!(status, AgentLoopStatus::Completed);
+    }
+
+    #[actix_rt::test]
+    async fn stop_request_terminates_loop() {
+        let llm = MockLlm {
+            response: r#"{"status":"continue","message":"x","sleep_seconds":0}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g".into(),
+                peer_id: None,
+                max_steps: Some(50),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = actor
+            .send(StopAgentLoop {
+                id: snap.id.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(stopped);
+        let status = wait_terminal(&actor, &snap.id).await;
+        assert_eq!(status, AgentLoopStatus::Stopped);
+    }
+
+    #[actix_rt::test]
+    async fn get_and_list_return_loops() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"d"}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g1".into(),
+                peer_id: None,
+                max_steps: Some(1),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let got = actor
+            .send(GetAgentLoop {
+                id: snap.id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(got.map(|s| s.goal), Some("g1".to_string()));
+        let list = actor.send(ListAgentLoops).await.unwrap();
+        assert!(list.iter().any(|s| s.id == snap.id));
+        let none = actor
+            .send(GetAgentLoop { id: "nope".into() })
+            .await
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[actix_rt::test]
+    async fn pause_holds_then_resume_completes() {
+        let llm = MockLlm {
+            response: r#"{"status":"continue","message":"x","sleep_seconds":0}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g".into(),
+                peer_id: None,
+                max_steps: Some(50),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let id = snap.id;
+
+        let paused = actor.send(PauseAgentLoop { id: id.clone() }).await.unwrap();
+        assert!(paused);
+
+        // 等 runner 进入暂停等待，status 应稳定为 Paused
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let s = actor
+            .send(GetAgentLoop { id: id.clone() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.status, AgentLoopStatus::Paused);
+        let steps_when_paused = s.steps_taken;
+
+        // 暂停期间 steps 不再增长
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let s2 = actor
+            .send(GetAgentLoop { id: id.clone() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(s2.status, AgentLoopStatus::Paused);
+        assert_eq!(s2.steps_taken, steps_when_paused);
+
+        let resumed = actor.send(ResumeAgentLoop { id: id.clone() }).await.unwrap();
+        assert!(resumed);
+
+        // 恢复后继续推进，continue 跑满 max_steps → Completed
+        let status = wait_terminal(&actor, &id).await;
+        assert_eq!(status, AgentLoopStatus::Completed);
+    }
+
+    #[actix_rt::test]
+    async fn pause_resume_rejected_in_wrong_state() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"d"}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g".into(),
+                peer_id: None,
+                max_steps: Some(1),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = wait_terminal(&actor, &snap.id).await;
+        // 已 Completed：pause 与 resume 均应拒绝
+        let paused = actor
+            .send(PauseAgentLoop {
+                id: snap.id.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(!paused);
+        let resumed = actor.send(ResumeAgentLoop { id: snap.id }).await.unwrap();
+        assert!(!resumed);
+    }
+
+    #[test]
+    fn prune_keeps_when_under_limit() {
+        let items = vec![
+            ("a".to_string(), AgentLoopStatus::Completed, 1),
+            ("b".to_string(), AgentLoopStatus::Failed, 2),
+        ];
+        assert!(terminal_ids_to_prune(&items, 5).is_empty());
+    }
+
+    #[test]
+    fn prune_removes_oldest_terminal_beyond_keep() {
+        let items = vec![
+            ("old".to_string(), AgentLoopStatus::Completed, 1),
+            ("mid".to_string(), AgentLoopStatus::Stopped, 2),
+            ("new".to_string(), AgentLoopStatus::Failed, 3),
+        ];
+        let removed = terminal_ids_to_prune(&items, 1);
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"old".to_string()));
+        assert!(removed.contains(&"mid".to_string()));
+        assert!(!removed.contains(&"new".to_string()));
+    }
+
+    #[test]
+    fn prune_never_removes_active() {
+        let items = vec![
+            ("run".to_string(), AgentLoopStatus::Running, 1),
+            ("pause".to_string(), AgentLoopStatus::Paused, 2),
+            ("done1".to_string(), AgentLoopStatus::Completed, 3),
+            ("done2".to_string(), AgentLoopStatus::Completed, 4),
+        ];
+        let removed = terminal_ids_to_prune(&items, 0);
+        assert!(removed.contains(&"done1".to_string()));
+        assert!(removed.contains(&"done2".to_string()));
+        assert!(!removed.contains(&"run".to_string()));
+        assert!(!removed.contains(&"pause".to_string()));
     }
 }

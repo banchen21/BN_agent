@@ -405,7 +405,7 @@ impl Plugin for ImagePlugin {
         self.client = Some(client.clone());
 
         if let Some(ref reg) = ctx.tool_registry {
-            let mut reg = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut reg = reg.lock();
             reg.register(Arc::new(ImageUnderstandTool::new(client.clone())));
             reg.register(Arc::new(ImageDescribeTool::new(client.clone())));
             reg.register(Arc::new(ImageCompareTool::new(client.clone())));

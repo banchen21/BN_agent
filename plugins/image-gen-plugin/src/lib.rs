@@ -407,7 +407,6 @@ impl Plugin for ImageGenPlugin {
 
             tool_registry
                 .lock()
-                .unwrap()
                 .register(Arc::new(GenerateImageTool { state: tool_state }));
             ctx.logger.info("工具 generate_image 已注册");
         }

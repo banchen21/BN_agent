@@ -69,7 +69,7 @@ impl Plugin for AsrTtsPlugin {
         self.logger = Some(ctx.logger.clone());
 
         if let Some(ref reg) = ctx.tool_registry {
-            let mut r = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut r = reg.lock();
 
             r.register(Arc::new(TtsTool {
                 client: self.client.clone(),

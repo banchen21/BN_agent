@@ -19,9 +19,12 @@
 //! | GET    | `/api/agent-loop/list`       | List agent loops                 |
 //! | GET    | `/api/agent-loop/status/{id}` | Get one agent loop status       |
 //! | POST   | `/api/agent-loop/stop/{id}`  | Stop a running agent loop        |
+//! | POST   | `/api/agent-loop/pause/{id}` | Pause a running agent loop       |
+//! | POST   | `/api/agent-loop/resume/{id}`| Resume a paused agent loop       |
 //! | GET    | `/api/metrics`               | Prometheus-format metrics        |
 //! | GET    | `/api/metrics/json`          | JSON-format metrics              |
 //! | GET    | `/api/token-usage`           | Global token usage summary       |
+//! | GET    | `/api/token-usage/budget`    | Token budget status              |
 //! | POST   | `/api/cancel`                | Cancel in-flight request         |
 //! | GET    | `/api/retry/state`           | Circuit breaker state            |
 //! | ANY    | `/api/plugin/{name}/{path:.*}` | Proxy to plugin API handler    |
@@ -41,11 +44,13 @@ mod plugin_tools;
 mod rate_limit_actor;
 mod retry_actor;
 mod token_usage_actor;
+mod tool_exec;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
 use agent_loop_actor::{
-    AgentLoopActor, GetAgentLoop, ListAgentLoops, StartAgentLoop, StopAgentLoop,
+    AgentLoopActor, GetAgentLoop, ListAgentLoops, PauseAgentLoop, ResumeAgentLoop, StartAgentLoop,
+    StopAgentLoop,
 };
 use cancellation_actor::CancellationActor;
 use chat_store::{ChatStoreActor, ClearAll};
@@ -58,7 +63,8 @@ use plugin_manager::PluginManager;
 use rate_limit_actor::RateLimitActor;
 use retry_actor::RetryActor;
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use token_usage_actor::TokenUsageActor;
 
 // ── App state ────────────────────────────────────────────────────────────────
@@ -253,17 +259,17 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             peer_id: peer_id.clone(),
         })
         .await;
-    let contexts: Vec<String> = state.snapshots.lock().unwrap().clone();
+    let contexts: Vec<String> = state.snapshots.lock().clone();
 
-    let tools: Vec<serde_json::Value> = match state.tool_registry.lock() {
-        Ok(reg) => reg.all_defs().iter()
+    let tools: Vec<serde_json::Value> = {
+        let reg = state.tool_registry.lock();
+        reg.all_defs().iter()
             .filter(|d| !d.internal)
             .map(|d| serde_json::json!({
                 "type": "function",
                 "function": { "name": d.name, "description": d.description, "parameters": d.parameters }
             }))
-            .collect(),
-        Err(_) => vec![],
+            .collect()
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -317,11 +323,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 async fn list_tools(state: web::Data<AppState>) -> impl Responder {
-    match state.tool_registry.lock() {
-        Ok(reg) => HttpResponse::Ok().json(reg.all_defs()),
-        Err(_) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({ "error": "registry locked" })),
-    }
+    let reg = state.tool_registry.lock();
+    HttpResponse::Ok().json(reg.all_defs())
 }
 
 #[derive(Deserialize)]
@@ -331,9 +334,9 @@ struct ToolCallPayload {
 }
 
 async fn tool_call(state: web::Data<AppState>, body: web::Json<ToolCallPayload>) -> impl Responder {
-    let result = match state.tool_registry.lock() {
-        Ok(reg) => reg.execute(&body.tool_name, &body.arguments),
-        Err(_) => None,
+    let result = {
+        let reg = state.tool_registry.lock();
+        reg.execute(&body.tool_name, &body.arguments)
     };
     match result {
         Some(r) => HttpResponse::Ok().json(serde_json::json!({
@@ -428,6 +431,38 @@ async fn stop_agent_loop(state: web::Data<AppState>, path: web::Path<String>) ->
     }
 }
 
+async fn pause_agent_loop(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    let id = path.into_inner();
+    match agent_loop_addr.send(PauseAgentLoop { id }).await {
+        Ok(true) => HttpResponse::Ok().json(serde_json::json!({ "status": "paused" })),
+        Ok(false) => HttpResponse::Conflict()
+            .json(serde_json::json!({ "error": "loop not found or not running" })),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
+async fn resume_agent_loop(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let Some(agent_loop_addr) = &state.agent_loop_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Agent loop not available" }));
+    };
+
+    let id = path.into_inner();
+    match agent_loop_addr.send(ResumeAgentLoop { id }).await {
+        Ok(true) => HttpResponse::Ok().json(serde_json::json!({ "status": "running" })),
+        Ok(false) => HttpResponse::Conflict()
+            .json(serde_json::json!({ "error": "loop not found or not paused" })),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
 // ── Metrics ──────────────────────────────────────────────────────────────────
 
 async fn get_metrics(state: web::Data<AppState>) -> impl Responder {
@@ -476,6 +511,23 @@ async fn get_global_token_usage(state: web::Data<AppState>) -> impl Responder {
         }
     };
     HttpResponse::Ok().json(summary)
+}
+
+async fn get_token_budget(state: web::Data<AppState>) -> impl Responder {
+    let Some(tu) = &state.token_usage_addr else {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": "Token usage tracking not available" }));
+    };
+    match tu.send(token_usage_actor::CheckTokenBudget).await {
+        Ok(check) => HttpResponse::Ok().json(serde_json::json!({
+            "allowed": check.allowed,
+            "exceeded_period": check.period,
+            "used": check.used,
+            "limit": check.limit,
+        })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
 }
 
 // ── Cancellation ─────────────────────────────────────────────────────────────
@@ -804,12 +856,12 @@ fn main() -> std::io::Result<()> {
             log::info!("PipelineActor subscribed to 'user.message' + 'proactive.trigger'");
 
             let agent_loop = AgentLoopActor::new(
-                retry.clone(),
-                plugin_manager.clone(),
+                retry.clone().recipient(),
+                plugin_manager.clone().recipient(),
                 tool_registry.clone(),
                 snapshots.clone(),
                 event_bus.clone(),
-                tu.clone(),
+                tu.clone().recipient(),
                 metrics.clone(),
             );
             let agent_loop_addr = agent_loop.start();
@@ -823,7 +875,7 @@ fn main() -> std::io::Result<()> {
         // ── Register host-level tools (plugin management for LLM) ──
         {
             use std::sync::Arc;
-            let mut reg = tool_registry.lock().unwrap();
+            let mut reg = tool_registry.lock();
             reg.register(Arc::new(plugin_tools::LoadPluginTool::new(plugin_manager.clone())));
             reg.register(Arc::new(plugin_tools::UnloadPluginTool::new(plugin_manager.clone())));
             reg.register(Arc::new(plugin_tools::ReloadPluginTool::new(plugin_manager.clone())));
@@ -864,9 +916,12 @@ fn main() -> std::io::Result<()> {
                 .route("/api/agent-loop/list", web::get().to(list_agent_loops))
                 .route("/api/agent-loop/status/{id}", web::get().to(get_agent_loop))
                 .route("/api/agent-loop/stop/{id}", web::post().to(stop_agent_loop))
+                .route("/api/agent-loop/pause/{id}", web::post().to(pause_agent_loop))
+                .route("/api/agent-loop/resume/{id}", web::post().to(resume_agent_loop))
                 .route("/api/metrics", web::get().to(get_metrics))
                 .route("/api/metrics/json", web::get().to(get_metrics_json))
                 .route("/api/token-usage", web::get().to(get_global_token_usage))
+                .route("/api/token-usage/budget", web::get().to(get_token_budget))
                 .route("/api/cancel", web::post().to(cancel_handler))
                 .route("/api/retry/state", web::get().to(retry_state))
                 .route("/api/shutdown", web::post().to(shutdown))

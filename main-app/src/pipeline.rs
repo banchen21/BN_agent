@@ -14,7 +14,8 @@
 
 use actix::prelude::*;
 use plugin_interface::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use crate::chat_store::{AppendJsonMessage, ChatStoreActor};
 use crate::metrics_actor::MetricsActor;
@@ -131,6 +132,33 @@ async fn process_message(
         return;
     }
 
+    // 1b. Token budget check.
+    if let Ok(check) = token_usage_addr
+        .send(crate::token_usage_actor::CheckTokenBudget)
+        .await
+    {
+        if !check.allowed {
+            let period = check.period.as_deref().unwrap_or("?");
+            log::warn!(
+                "[Pipeline] token budget exceeded ({}): {}/{}",
+                period,
+                check.used,
+                check.limit
+            );
+            emit_reply(
+                &format!(
+                    "🪙 Token 额度（{}）已用尽（{}/{}），请稍后再试。",
+                    period, check.used, check.limit
+                ),
+                &source,
+                &peer_id,
+                &event_bus,
+            )
+            .await;
+            return;
+        }
+    }
+
     // 2. Generate request_id and register with cancellation.
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -140,28 +168,26 @@ async fn process_message(
             peer_id: peer_id.clone(),
         })
         .await;
-    let contexts: Vec<String> = snapshots.lock().unwrap().clone();
+    let contexts: Vec<String> = snapshots.lock().clone();
 
     // 4. Collect tool definitions.
     let tools: Vec<serde_json::Value> = if allow_tools {
-        match tool_registry.lock() {
-            Ok(reg) => reg
-                .all_defs()
-                .iter()
-                .filter(|d| !d.internal)
-                .map(|d| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": d.name,
-                            "description": d.description,
-                            "parameters": d.parameters,
-                        }
-                    })
+        let reg = tool_registry.lock();
+        reg
+            .all_defs()
+            .iter()
+            .filter(|d| !d.internal)
+            .map(|d| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": d.name,
+                        "description": d.description,
+                        "parameters": d.parameters,
+                    }
                 })
-                .collect(),
-            Err(_) => vec![],
-        }
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -174,7 +200,7 @@ async fn process_message(
             peer_id: peer_id.clone(),
             tools: tools.clone(),
             skip_store: defer_store,
-            contexts,
+            contexts: contexts.clone(),
             jailbreak_index: None,
             image_base64,
             video_base64,
@@ -362,17 +388,23 @@ async fn process_message(
         let mut round_results: Vec<String> = Vec::new();
         for tc in &current_resp.tool_calls {
             let executor = {
-                match tool_registry.lock() {
-                    Ok(reg) => reg.get_executor(&tc.name),
-                    Err(_) => None,
-                }
+                let reg = tool_registry.lock();
+                reg.get_executor(&tc.name)
             };
 
             let args = tc.arguments.clone();
 
             let tool_start = std::time::Instant::now();
             let result = match executor {
-                Some(exec) => exec.execute(&args),
+                Some(exec) => {
+                    crate::tool_exec::execute_with_timeout(
+                        exec,
+                        args,
+                        &tc.name,
+                        crate::tool_exec::tool_timeout_secs(),
+                    )
+                    .await
+                }
                 None => ToolResult::err(&format!("tool '{}' not found", tc.name)),
             };
             let tool_ms = tool_start.elapsed().as_millis() as u64;
@@ -414,7 +446,8 @@ async fn process_message(
                         }))
                     });
                     if let Some(desc_args) = desc_args {
-                        if let Ok(reg) = tool_registry.lock() {
+                        {
+                            let reg = tool_registry.lock();
                             if let Some(desc_exec) = reg.get_executor("image_describe") {
                                 let desc_result = desc_exec.execute(&desc_args);
                                 if desc_result.success {
@@ -457,7 +490,7 @@ async fn process_message(
                     tools: tools.clone(),
                     skip_store: true,
                     original_user_msg: None,
-                    contexts: vec![],
+                    contexts: contexts.clone(),
                     jailbreak_index: None,
                     image_base64: None,
                     video_base64: None,

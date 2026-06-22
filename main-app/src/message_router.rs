@@ -14,7 +14,8 @@
 use actix::prelude::*;
 use plugin_interface::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::Instant;
 
 // ── Channel state ─────────────────────────────────────────────────────────────
@@ -99,7 +100,7 @@ impl MessageRouter {
             });
         let peer_id = Self::peer_id_from_data(data, &source);
 
-        let mut channels = self.channels.lock().unwrap();
+        let mut channels = self.channels.lock();
         channels.insert(
             source.clone(),
             ChannelState {
@@ -144,33 +145,13 @@ impl MessageRouter {
             .filter(|s| !s.is_empty());
 
         // 4. 确定目标列表
-        let channels = self.channels.lock().unwrap();
-        let targets: Vec<ChannelState> =
-            if requested_source.is_empty() || requested_source == "unknown" {
-                // source 为空或 unknown → 广播到所有已知通道
-                let all: Vec<ChannelState> = channels.values().cloned().collect();
-                if all.is_empty() {
-                    log::warn!("[MessageRouter] broadcast requested but no channels registered");
-                }
-                all
-            } else if let Some(state) = channels.get(&requested_source) {
-                vec![state.clone()]
-            } else if !channels.is_empty() {
-                // 指定的 source 不在注册表中 → 回退到广播
-                log::warn!(
-                    "[MessageRouter] source '{}' not in registry, falling back to broadcast",
-                    requested_source
-                );
-                channels.values().cloned().collect()
-            } else {
-                // 无任何通道 — 发个临时的，听天由命
-                vec![ChannelState {
-                    source: requested_source.clone(),
-                    chat_id: requested_chat_id.clone(),
-                    peer_id: requested_peer_id.clone(),
-                    updated_at: Instant::now(),
-                }]
-            };
+        let channels = self.channels.lock();
+        let targets = resolve_targets(
+            &requested_source,
+            &requested_chat_id,
+            &requested_peer_id,
+            &channels,
+        );
         drop(channels);
 
         // 5. 转发
@@ -178,23 +159,7 @@ impl MessageRouter {
             let chat_id = requested_chat_id.clone().or_else(|| target.chat_id.clone());
             let peer_id = requested_peer_id.clone().or_else(|| target.peer_id.clone());
 
-            let mut payload = serde_json::json!({
-                "text": text,
-                "source": target.source,
-            });
-
-            if let Some(ref pid) = peer_id {
-                payload["peer_id"] = serde_json::json!(pid);
-            }
-
-            if let Some(ref cid) = chat_id {
-                // 尝试数值解析（Telegram 用 i64）
-                if let Ok(n) = cid.parse::<i64>() {
-                    payload["chat_id"] = serde_json::json!(n);
-                } else {
-                    payload["chat_id"] = serde_json::json!(cid);
-                }
-            }
+            let payload = build_route_payload(&text, &target.source, &chat_id, &peer_id);
 
             self.event_bus
                 .do_send(Event::new("assistant.message", payload, "message-router"));
@@ -248,5 +213,147 @@ impl MessageRouter {
                 Some(format!("{}:{}", source, id))
             }
         })
+    }
+}
+
+/// 纯逻辑：根据 requested_source 与已知通道注册表，确定 route.message 的转发目标。
+/// - source 空或 "unknown" → 广播到所有已知通道
+/// - source 命中注册表 → 定向该通道
+/// - source 未命中但有其他通道 → 回退广播
+/// - 无任何通道 → 用请求里的 chat_id/peer_id 发一个临时目标
+fn resolve_targets(
+    requested_source: &str,
+    requested_chat_id: &Option<String>,
+    requested_peer_id: &Option<String>,
+    channels: &HashMap<String, ChannelState>,
+) -> Vec<ChannelState> {
+    if requested_source.is_empty() || requested_source == "unknown" {
+        let all: Vec<ChannelState> = channels.values().cloned().collect();
+        if all.is_empty() {
+            log::warn!("[MessageRouter] broadcast requested but no channels registered");
+        }
+        all
+    } else if let Some(state) = channels.get(requested_source) {
+        vec![state.clone()]
+    } else if !channels.is_empty() {
+        log::warn!(
+            "[MessageRouter] source '{}' not in registry, falling back to broadcast",
+            requested_source
+        );
+        channels.values().cloned().collect()
+    } else {
+        vec![ChannelState {
+            source: requested_source.to_string(),
+            chat_id: requested_chat_id.clone(),
+            peer_id: requested_peer_id.clone(),
+            updated_at: Instant::now(),
+        }]
+    }
+}
+
+/// 纯逻辑：构建 assistant.message 的 payload。chat_id 为纯数字时按 i64 写入（Telegram）。
+fn build_route_payload(
+    text: &str,
+    target_source: &str,
+    chat_id: &Option<String>,
+    peer_id: &Option<String>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "text": text,
+        "source": target_source,
+    });
+    if let Some(pid) = peer_id {
+        payload["peer_id"] = serde_json::json!(pid);
+    }
+    if let Some(cid) = chat_id {
+        if let Ok(n) = cid.parse::<i64>() {
+            payload["chat_id"] = serde_json::json!(n);
+        } else {
+            payload["chat_id"] = serde_json::json!(cid);
+        }
+    }
+    payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(source: &str, chat_id: Option<&str>) -> ChannelState {
+        ChannelState {
+            source: source.to_string(),
+            chat_id: chat_id.map(String::from),
+            peer_id: chat_id.map(|c| format!("{}:{}", source, c)),
+            updated_at: Instant::now(),
+        }
+    }
+
+    fn registry(items: &[ChannelState]) -> HashMap<String, ChannelState> {
+        items
+            .iter()
+            .map(|c| (c.source.clone(), c.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn empty_source_broadcasts_to_all() {
+        let reg = registry(&[ch("telegram", Some("1")), ch("feishu", Some("oc_x"))]);
+        assert_eq!(resolve_targets("", &None, &None, &reg).len(), 2);
+    }
+
+    #[test]
+    fn unknown_source_broadcasts() {
+        let reg = registry(&[ch("telegram", Some("1"))]);
+        assert_eq!(resolve_targets("unknown", &None, &None, &reg).len(), 1);
+    }
+
+    #[test]
+    fn known_source_targets_single() {
+        let reg = registry(&[ch("telegram", Some("1")), ch("feishu", Some("oc_x"))]);
+        let targets = resolve_targets("feishu", &None, &None, &reg);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source, "feishu");
+    }
+
+    #[test]
+    fn unknown_named_source_falls_back_to_broadcast() {
+        let reg = registry(&[ch("telegram", Some("1")), ch("feishu", Some("oc_x"))]);
+        // 指定的 wechat 不在注册表 → 回退广播到其他两个
+        assert_eq!(resolve_targets("wechat", &None, &None, &reg).len(), 2);
+    }
+
+    #[test]
+    fn no_channels_uses_requested_as_temp() {
+        let reg = HashMap::new();
+        let targets = resolve_targets(
+            "telegram",
+            &Some("123".to_string()),
+            &Some("telegram:123".to_string()),
+            &reg,
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source, "telegram");
+        assert_eq!(targets[0].chat_id.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn payload_numeric_chat_id_is_i64() {
+        let p = build_route_payload("hi", "telegram", &Some("123".to_string()), &None);
+        assert_eq!(p["chat_id"], serde_json::json!(123));
+        assert_eq!(p["text"], "hi");
+        assert_eq!(p["source"], "telegram");
+    }
+
+    #[test]
+    fn payload_non_numeric_chat_id_is_string() {
+        let p = build_route_payload("hi", "wechat", &Some("wxid_abc".to_string()), &None);
+        assert_eq!(p["chat_id"], serde_json::json!("wxid_abc"));
+    }
+
+    #[test]
+    fn payload_includes_peer_id_and_omits_missing_chat_id() {
+        let p = build_route_payload("hi", "telegram", &None, &Some("telegram:1".to_string()));
+        assert_eq!(p["peer_id"], serde_json::json!("telegram:1"));
+        assert!(p.get("chat_id").is_none());
     }
 }

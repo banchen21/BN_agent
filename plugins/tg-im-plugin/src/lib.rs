@@ -91,7 +91,7 @@ impl ToolExecutor for SendMessageTool {
 /// tg_send_voice — TTS 后发送语音。
 struct SendVoiceTool {
     bot_handle: BotHandle,
-    tool_registry: Arc<Mutex<ToolRegistry>>,
+    tool_registry: Arc<plugin_interface::Mutex<ToolRegistry>>,
     processing_chats: Arc<Mutex<HashSet<i64>>>,
     current_chat_id: Arc<Mutex<Option<i64>>>,
 }
@@ -150,10 +150,7 @@ impl ToolExecutor for SendVoiceTool {
             .map(String::from);
 
         let tts_exec = {
-            let reg = match self.tool_registry.lock() {
-                Ok(r) => r,
-                Err(e) => return ToolResult::err(&format!("lock: {}", e)),
-            };
+            let reg = self.tool_registry.lock();
             match reg.get_executor("tts_synthesize") {
                 Some(e) => e,
                 None => return ToolResult::err("tts_synthesize not found"),
@@ -455,7 +452,7 @@ impl Plugin for TgImPlugin {
         let pc = self.processing_chats.clone();
         let cc = self.current_chat_id.clone();
         if let Some(ref reg) = ctx.tool_registry {
-            let mut reg = reg.lock().map_err(|e| format!("lock: {}", e))?;
+            let mut reg = reg.lock();
             reg.register(Arc::new(SendMessageTool {
                 bot_handle: bot_handle.clone(),
                 processing_chats: pc.clone(),
@@ -517,19 +514,17 @@ impl Plugin for TgImPlugin {
                 let un = user_name.to_string();
                 std::thread::spawn(move || {
                     eprintln!("[tg-im:voice] calling asr_transcribe...");
-                    let asr_result = match tr.lock() {
-                        Ok(reg) => match reg.get_executor("asr_transcribe") {
-                            Some(exec) => exec.execute(&serde_json::json!({
-                                "audio_base64": audio_b64,
-                                "mime_type": m,
-                            })),
-                            None => {
-                                eprintln!("[tg-im:voice] asr_transcribe tool not found");
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("[tg-im:voice] lock failed: {:?}", e);
+                    let exec = {
+                        let reg = tr.lock();
+                        reg.get_executor("asr_transcribe")
+                    };
+                    let asr_result = match exec {
+                        Some(exec) => exec.execute(&serde_json::json!({
+                            "audio_base64": audio_b64,
+                            "mime_type": m,
+                        })),
+                        None => {
+                            eprintln!("[tg-im:voice] asr_transcribe tool not found");
                             return;
                         }
                     };
