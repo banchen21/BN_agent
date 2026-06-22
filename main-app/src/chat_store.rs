@@ -23,7 +23,7 @@ use rusqlite::{params, Connection, Result as SqlResult};
 pub struct Record {
     pub role: String,
     pub content: String,
-    pub peer_id: Option<String>,
+    pub created_at: String,
     /// Full OpenAI message JSON (supports tool_calls, tool role, etc.).
     /// NULL for legacy records.
     pub message_json: Option<String>,
@@ -137,14 +137,14 @@ impl Handler<FetchRecent> for ChatStoreActor {
     type Result = Vec<Record>;
 
     fn handle(&mut self, msg: FetchRecent, _ctx: &mut Self::Context) -> Self::Result {
-        let sql_scoped = "SELECT role, content, peer_id, message_json FROM (
-                SELECT id, role, content, peer_id, message_json FROM chat_history
+        let sql_scoped = "SELECT role, content, created_at, message_json FROM (
+            SELECT id, role, content, created_at, message_json FROM chat_history
                 WHERE peer_id = ?2
                 ORDER BY id DESC
                 LIMIT ?1
             ) ORDER BY id ASC";
-        let sql_global = "SELECT role, content, peer_id, message_json FROM (
-                SELECT id, role, content, peer_id, message_json FROM chat_history
+        let sql_global = "SELECT role, content, created_at, message_json FROM (
+            SELECT id, role, content, created_at, message_json FROM chat_history
                 ORDER BY id DESC
                 LIMIT ?1
             ) ORDER BY id ASC";
@@ -163,7 +163,7 @@ impl Handler<FetchRecent> for ChatStoreActor {
                 Ok(Record {
                     role: row.get(0)?,
                     content: row.get(1)?,
-                    peer_id: row.get(2)?,
+                    created_at: row.get(2)?,
                     message_json: row.get(3)?,
                 })
             });
@@ -179,7 +179,7 @@ impl Handler<FetchRecent> for ChatStoreActor {
                 Ok(Record {
                     role: row.get(0)?,
                     content: row.get(1)?,
-                    peer_id: row.get(2)?,
+                    created_at: row.get(2)?,
                     message_json: row.get(3)?,
                 })
             });

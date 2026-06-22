@@ -13,7 +13,7 @@
 //! | `llm.response`  | A successful completion        |
 //! | `llm.error`     | HTTP / API / parse failure     |
 
-use crate::chat_store::{AppendJsonMessage, ChatStoreActor, EnsureOwnerPeer, FetchRecent};
+use crate::chat_store::{AppendJsonMessage, ChatStoreActor, EnsureOwnerPeer, FetchRecent, Record};
 use actix::prelude::*;
 use plugin_interface::*;
 use rand::Rng;
@@ -374,15 +374,17 @@ impl Handler<ChatRequest> for LlmActor {
             for ctx in &other_ctx {
                 full_system.push_str(&format!("\n\n[上下文] {}", ctx));
             }
-            let mut messages: Vec<serde_json::Value> = vec![
-                serde_json::json!({ "role": "system", "content": full_system }),
-            ];
-
             // ── 3. Recent history (last 4 messages for immediate context) ──
             let records = store_addr.send(FetchRecent {
                 limit: immediate_limit,
                 peer_id: peer_id.clone(),
             }).await.unwrap_or_default();
+            if let Some(timeline) = build_recent_timeline(&records) {
+                full_system.push_str(&format!("\n\n{}", timeline));
+            }
+            let mut messages: Vec<serde_json::Value> = vec![
+                serde_json::json!({ "role": "system", "content": full_system }),
+            ];
             // Filter orphan tools at the head.
             let mut tool_calls_seen = false;
             for r in &records {
@@ -1066,6 +1068,63 @@ fn build_tool_hint(tools: &[serde_json::Value], source: &str) -> String {
             format!("其他可用：{}。", other_str)
         }
     )
+}
+
+fn build_recent_timeline(records: &[Record]) -> Option<String> {
+    let now = chrono::Local::now();
+    let mut recent: Vec<&Record> = records
+        .iter()
+        .filter(|r| matches!(r.role.as_str(), "user" | "assistant") && !r.content.trim().is_empty())
+        .rev()
+        .take(12)
+        .collect();
+    recent.reverse();
+
+    let mut lines = Vec::new();
+    for record in recent {
+        let created = parse_chat_created_at(&record.created_at);
+        let relative = created
+            .map(|created| format_relative_duration(now.signed_duration_since(created)))
+            .unwrap_or_else(|| "时间未知".to_string());
+        let compact = record.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let preview = truncate_preview(&compact, 80).trim();
+        if preview.is_empty() {
+            continue;
+        }
+        let role = if record.role == "assistant" { "你" } else { "用户" };
+        let absolute = created
+            .map(|created| created.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| record.created_at.clone());
+        lines.push(format!("- {}（{}）：{}：{}", absolute, relative, role, preview));
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "[近期时间线]\n{}\n[时间连续性] 用上面的真实消息时间判断“刚才/多久前/上一条”等表达。你自己刚声明的临时状态也要按现实持续时间处理；如果只过了几秒或几分钟，不要无理由改口说状态已经结束。",
+        lines.join("\n")
+    ))
+}
+
+fn parse_chat_created_at(created_at: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|dt| dt.and_utc().with_timezone(&chrono::Local))
+}
+
+fn format_relative_duration(duration: chrono::Duration) -> String {
+    let secs = duration.num_seconds().max(0);
+    if secs < 60 {
+        format!("约{}秒前", secs)
+    } else if secs < 60 * 60 {
+        format!("约{}分钟前", secs / 60)
+    } else if secs < 24 * 60 * 60 {
+        format!("约{}小时前", secs / 3600)
+    } else {
+        format!("约{}天前", secs / 86_400)
+    }
 }
 
 fn truncate_preview(s: &str, max: usize) -> &str {
