@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build & Test
+    # 项目含 Windows 平台依赖（如 wechat-claw 的 ilink SDK），使用 windows runner 与开发环境一致
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (workspace, all targets)
+        run: cargo build --workspace --all-targets
+
+      - name: Test (workspace)
+        run: cargo test --workspace
+
+      # 现有代码尚有历史 clippy warning；先作为信息性检查，
+      # 待 warning 清零后把此步改为 `cargo clippy --workspace --all-targets -- -D warnings` 作硬门禁。
+      - name: Clippy (informational)
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
