@@ -16,6 +16,7 @@ Agent Loop 是显式目标驱动的后台循环，不替代普通聊天链路。
 - 发布 `agent.loop.step` 与 `agent.loop.done` 事件
 - loop 状态持久化到 SQLite，进程重启后恢复历史（运行中的 loop 标记为中断）
 - 终态 loop 自动清理（内存与 DB 只保留最近 `AGENT_LOOP_MAX_KEEP` 个，默认 200）
+- 事件驱动启动：任何插件发 `agent.loop.start` 事件（data: `{goal, peer_id?, max_steps?, max_tool_rounds?}`）即可启动 loop
 
 当前 MVP 暂不支持：
 

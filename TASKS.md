@@ -21,6 +21,10 @@ Token 用量    ██████████ 完成
 - [x] **P0 健壮性收口** — parking_lot 迁移（消除跨 cdylib 共享锁中毒级联）、熔断状态持久化、Agent Loop 状态持久化三项 P0 全部落地
 - [x] **Agent Loop MVP 已落地** — `8950b7d feat(agent-loop): add goal loop actor mvp`，新增目标循环 actor、HTTP 控制接口、step observation 与事件发布
 - [x] **主动系统升级完成** — 已从定时提醒扩展到带 jitter / probability / daily cap / backoff 的自主主动触发
+- [x] **HTTP API 可选鉴权** — `API_KEY` 中间件（`from_fn`），未设=放行；`/api/health` 免鉴权；支持 `Authorization: Bearer <key>` 与 `X-API-Key`；`check_api_key` 纯函数 5 测试
+- [x] **Agent Loop 事件驱动启动** — 任意插件发 `agent.loop.start` 事件即可启动 loop（与 HTTP/消息入口共用 `start_loop_internal`）
+- [x] **Agent Loop 资源护栏三件套** — 工具 denylist（`AGENT_LOOP_TOOL_DENY`）+ 墙钟时长上限（`AGENT_LOOP_MAX_DURATION_SECS`）+ 并发上限（`AGENT_LOOP_MAX_CONCURRENT`）
+- [x] **结构化健康检查** — `GET /api/health` 返回 version/uptime_secs/plugins_loaded/agent_loops_total（免鉴权，便于探活/监控）
 - [ ] **下一阶段重点** — Agent Loop 规划器（plan/task tree + 反思）、流式推送至 IM、会话管理（标题/摘要/回收）
 
 ---
@@ -75,7 +79,7 @@ Token 用量    ██████████ 完成
 - [x] **memory-plugin** — 长期记忆（Engram 双时态 + 时间分桶 + 矛盾追踪）
 - [ ] **db-plugin** — 数据库查询（SQLite / PostgreSQL）
 - [ ] **weather-plugin** — 天气查询
-- [ ] **auth-plugin** — HTTP API 鉴权
+- [x] **HTTP API 鉴权** — 可选 API key 中间件（`API_KEY`，未设=不鉴权；`/api/health` 免鉴权），支持 `Bearer`/`X-API-Key`，`check_api_key` 纯函数已测（以中间件实现，非独立插件）
 
 ### 架构类
 
@@ -84,8 +88,11 @@ Token 用量    ██████████ 完成
 - [ ] **流式推送至 IM** — 将 `llm.chunk` 事件转发到 Telegram/飞书/微信
 - [x] **Agent Loop 持久化队列** — loop 状态落 SQLite，支持重启恢复、按 peer 归档（`AGENT_LOOP_DB_PATH`）；终态自动清理（`AGENT_LOOP_MAX_KEEP`，默认保留 200）
 - [x] **Agent Loop 暂停/恢复** — 新增 `paused` 状态 + `pause/resume` 消息与 HTTP API；runner 在步骤边界暂停等待，心跳不覆盖外部状态
+- [x] **Agent Loop 工具护栏** — `AGENT_LOOP_TOOL_DENY` 黑名单：denied 工具对 LLM 不可见 + 执行前拒绝（纵深防御），防止自主 loop 误调危险工具
+- [x] **Agent Loop 墙钟时长上限** — `AGENT_LOOP_MAX_DURATION_SECS` 步间检查总耗时，超限标记 failed（与 max_steps 互补，防失控消耗），0=不限
+- [x] **Agent Loop 并发上限** — `AGENT_LOOP_MAX_CONCURRENT` 限制同时运行的 loop 数，达上限拒绝启动（与工具护栏 / 时长上限构成资源护栏三件套），0=不限
 - [ ] **Agent Loop 规划器** — 引入 plan/task tree、step reflection、失败自我修正策略
-- [ ] **Agent Loop 与主动系统联动** — 允许 proactive 触发受控 loop，而不是只能生成一条即时消息
+- [ ] **Agent Loop 与主动系统联动** — 事件驱动启动已落地（任何插件发 `agent.loop.start` 即可启动 loop）；proactive 侧实际触发待做
 - [x] **LLM 重试持久化** — 熔断状态重启后保持（`CIRCUIT_BREAKER_DB_PATH`）
 - [x] **Token 预算控制** — 滚动窗口（日 24h/周 7d/月 30d）token 上限（`TOKEN_BUDGET_DAILY/WEEKLY/MONTHLY`）；pipeline 前置拦截超限请求 + 提示；`GET /api/token-usage/budget` 查询
 - [ ] **会话管理** — 对话标题、自动摘要（历史回收已落地：`CHAT_HISTORY_MAX_PER_PEER` 按 peer 保留上限，append 时清理最旧）

@@ -48,6 +48,10 @@ mod tool_exec;
 
 use actix::prelude::*;
 use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::body::MessageBody;
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::error::ErrorUnauthorized;
+use actix_web::middleware::Next;
 use agent_loop_actor::{
     AgentLoopActor, GetAgentLoop, ListAgentLoops, PauseAgentLoop, ResumeAgentLoop, StartAgentLoop,
     StopAgentLoop,
@@ -70,6 +74,7 @@ use token_usage_actor::TokenUsageActor;
 // ── App state ────────────────────────────────────────────────────────────────
 
 struct AppState {
+    started_at: std::time::Instant,
     plugin_manager: Addr<PluginManager>,
     event_bus: Addr<EventBus>,
     llm: Option<Recipient<LlmRequest>>,
@@ -82,11 +87,77 @@ struct AppState {
     chat_store: Option<Recipient<ChatStoreMsg>>,
     agent_loop_addr: Option<Addr<AgentLoopActor>>,
 }
+// ── API key auth ─────────────────────────────────────────────────────
 
+/// 校验请求提供的鉴权值是否匹配期望 API key。`expected` 为空表示不鉴权（放行）。
+/// 支持 `Bearer <key>` 与裸 key 两种形式。
+fn check_api_key(provided: Option<&str>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return true;
+    }
+    let Some(provided) = provided else {
+        return false;
+    };
+    let token = provided.strip_prefix("Bearer ").unwrap_or(provided).trim();
+    token == expected
+}
+
+/// 可选 API key 鉴权中间件。未设 `API_KEY` 时放行；`/api/health` 始终豁免（便于探活）。
+async fn api_key_middleware(
+    req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    let expected = std::env::var("API_KEY").unwrap_or_default();
+    if expected.is_empty() || req.path() == "/api/health" {
+        return next.call(req).await;
+    }
+    let provided = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()));
+    if check_api_key(provided, &expected) {
+        next.call(req).await
+    } else {
+        Err(ErrorUnauthorized("missing or invalid API key"))
+    }
+}
 // ── Health ───────────────────────────────────────────────────────────────────
 
-async fn health() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
+/// 构建健康检查响应体（纯函数，便于测试）。
+fn build_health_json(
+    version: &str,
+    uptime_secs: u64,
+    plugins_loaded: usize,
+    agent_loops_total: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "version": version,
+        "uptime_secs": uptime_secs,
+        "plugins_loaded": plugins_loaded,
+        "agent_loops_total": agent_loops_total,
+    })
+}
+
+async fn health(state: web::Data<AppState>) -> impl Responder {
+    let uptime_secs = state.started_at.elapsed().as_secs();
+    let plugins_loaded = state
+        .plugin_manager
+        .send(ListPlugins)
+        .await
+        .map(|p| p.len())
+        .unwrap_or(0);
+    let agent_loops_total = match &state.agent_loop_addr {
+        Some(addr) => addr.send(ListAgentLoops).await.map(|v| v.len()).unwrap_or(0),
+        None => 0,
+    };
+    HttpResponse::Ok().json(build_health_json(
+        env!("CARGO_PKG_VERSION"),
+        uptime_secs,
+        plugins_loaded,
+        agent_loops_total,
+    ))
 }
 
 // ── Plugin handlers ──────────────────────────────────────────────────────────
@@ -866,6 +937,11 @@ fn main() -> std::io::Result<()> {
             );
             let agent_loop_addr = agent_loop.start();
             log::info!("AgentLoopActor started");
+            event_bus.do_send(Subscribe {
+                topic: "agent.loop.start".into(),
+                recipient: agent_loop_addr.clone().recipient(),
+            });
+            log::info!("AgentLoopActor subscribed to 'agent.loop.start'");
             Some(agent_loop_addr)
         } else {
             log::warn!("PipelineActor not started — missing LLM or infrastructure actors");
@@ -884,6 +960,7 @@ fn main() -> std::io::Result<()> {
 
         // Build shared state.
         let state = web::Data::new(AppState {
+            started_at: std::time::Instant::now(),
             plugin_manager: plugin_manager.clone(),
             event_bus: event_bus.clone(),
             llm: llm_recipient,
@@ -901,6 +978,7 @@ fn main() -> std::io::Result<()> {
         HttpServer::new(move || {
             actix_web::App::new()
                 .app_data(state.clone())
+                .wrap(actix_web::middleware::from_fn(api_key_middleware))
                 .route("/api/health", web::get().to(health))
                 .route("/api/plugins", web::get().to(list_plugins))
                 .route("/api/plugins/load", web::post().to(load_plugin))
@@ -932,4 +1010,47 @@ fn main() -> std::io::Result<()> {
         .run()
         .await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_health_json, check_api_key};
+
+    #[test]
+    fn empty_expected_allows_all() {
+        assert!(check_api_key(None, ""));
+        assert!(check_api_key(Some("anything"), ""));
+    }
+
+    #[test]
+    fn missing_provided_rejected() {
+        assert!(!check_api_key(None, "secret"));
+    }
+
+    #[test]
+    fn bare_key_matches() {
+        assert!(check_api_key(Some("secret"), "secret"));
+        assert!(!check_api_key(Some("wrong"), "secret"));
+    }
+
+    #[test]
+    fn bearer_prefix_matches() {
+        assert!(check_api_key(Some("Bearer secret"), "secret"));
+        assert!(!check_api_key(Some("Bearer wrong"), "secret"));
+    }
+
+    #[test]
+    fn whitespace_trimmed_after_bearer() {
+        assert!(check_api_key(Some("Bearer  secret "), "secret"));
+    }
+
+    #[test]
+    fn health_json_has_expected_fields() {
+        let v = build_health_json("1.2.3", 42, 5, 2);
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["version"], "1.2.3");
+        assert_eq!(v["uptime_secs"], 42);
+        assert_eq!(v["plugins_loaded"], 5);
+        assert_eq!(v["agent_loops_total"], 2);
+    }
 }

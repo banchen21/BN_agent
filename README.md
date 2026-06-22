@@ -118,6 +118,9 @@ cargo run -p main-app
 | `AGENT_LOOP_MAX_SLEEP_SECS` | `60` | Agent Loop 单步 sleep 上限 |
 | `AGENT_LOOP_DB_PATH` | `data/agent_loops.db` | Agent Loop 状态持久化路径（重启恢复历史） |
 | `AGENT_LOOP_MAX_KEEP` | `200` | 终态 Agent Loop 保留上限，超出清理最旧（防内存/DB 膨胀） |
+| `AGENT_LOOP_TOOL_DENY` | (空) | Agent Loop 工具黑名单（逗号分隔工具名）；自主 loop 不可见且执行前拒绝，用于禁用危险工具 |
+| `AGENT_LOOP_MAX_DURATION_SECS` | `0` | Agent Loop 墙钟总时长上限(秒)，步间检查超限标记 failed，0=不限 |
+| `AGENT_LOOP_MAX_CONCURRENT` | `0` | 同时运行的 Agent Loop 数量上限，达上限拒绝启动新 loop，0=不限 |
 | `LLM_THINKING` | `disabled` | DeepSeek 思考模式 |
 | `PROACTIVE_MODE` | `auto` | 主动追问模式 (auto/semi-auto) |
 | `PROACTIVE_LOOP_INTERVAL` | `15` | 主动追问轮询间隔(秒) |
@@ -134,6 +137,7 @@ cargo run -p main-app
 | `CIRCUIT_BREAKER_DB_PATH` | `data/circuit_breaker.db` | 熔断状态持久化路径（重启恢复 open/half-open） |
 | `RATE_LIMIT_PER_MIN` | `30` | 每分钟每会话请求上限 |
 | `RATE_LIMIT_BURST` | `5` | 令牌桶突发容量 |
+| `API_KEY` | (无) | HTTP API 鉴权密钥；设置后除 `/api/health` 外所有接口需带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），未设=不鉴权 |
 | `SKILL_DIR` | `data/skills/` | Skill 文件目录 |
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI API 地址（image-gen-plugin） |
 | `COMFYUI_OUTPUT_DIR` | `output` | ComfyUI 输出目录（image-gen-plugin） |
@@ -141,9 +145,11 @@ cargo run -p main-app
 
 ### HTTP API
 
+> 🔐 设置 `API_KEY` 后，除 `/api/health` 外所有接口需在请求头携带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），否则返回 401；未设置则不鉴权。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/health` | 健康检查 |
+| GET | `/api/health` | 健康检查，返回 version/uptime_secs/plugins_loaded/agent_loops_total（始终免鉴权，便于探活） |
 | GET | `/api/plugins` | 插件列表 |
 | POST | `/api/plugins/load` | 加载插件 |
 | POST | `/api/plugins/unload/{name}` | 卸载插件 |

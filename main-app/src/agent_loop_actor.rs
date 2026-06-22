@@ -231,24 +231,44 @@ struct AgentLoopProgress {
     error: Option<String>,
 }
 
-impl Handler<StartAgentLoop> for AgentLoopActor {
-    type Result = Result<AgentLoopSnapshot, String>;
-
-    fn handle(&mut self, msg: StartAgentLoop, ctx: &mut Self::Context) -> Self::Result {
-        let goal = msg.goal.trim().to_string();
+impl AgentLoopActor {
+    /// 共享的 loop 启动逻辑：`StartAgentLoop` 消息与 `agent.loop.start` 事件都复用。
+    fn start_loop_internal(
+        &mut self,
+        goal: String,
+        peer_id: Option<String>,
+        max_steps: Option<usize>,
+        max_tool_rounds: Option<usize>,
+        ctx: &mut Context<Self>,
+    ) -> Result<AgentLoopSnapshot, String> {
+        let goal = goal.trim().to_string();
         if goal.is_empty() {
             return Err("goal is required".into());
         }
 
+        let max_concurrent = agent_loop_max_concurrent();
+        if max_concurrent > 0 {
+            let statuses: Vec<AgentLoopStatus> = self
+                .loops
+                .values()
+                .map(|s| s.snapshot.status.clone())
+                .collect();
+            let active = active_loop_count(&statuses);
+            if !can_start_new_loop(active, max_concurrent) {
+                return Err(format!(
+                    "max concurrent agent loops reached ({}/{})",
+                    active, max_concurrent
+                ));
+            }
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
-        let peer_id = msg.peer_id.unwrap_or_else(|| "agent-loop:default".into());
-        let max_steps = msg
-            .max_steps
+        let peer_id = peer_id.unwrap_or_else(|| "agent-loop:default".into());
+        let max_steps = max_steps
             .unwrap_or(DEFAULT_MAX_STEPS)
             .clamp(1, MAX_STEPS_CAP);
-        let max_tool_rounds = msg
-            .max_tool_rounds
+        let max_tool_rounds = max_tool_rounds
             .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS)
             .clamp(0, MAX_TOOL_ROUNDS_CAP);
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -301,6 +321,58 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
         self.prune_terminal();
 
         Ok(snapshot)
+    }
+}
+
+impl Handler<StartAgentLoop> for AgentLoopActor {
+    type Result = Result<AgentLoopSnapshot, String>;
+
+    fn handle(&mut self, msg: StartAgentLoop, ctx: &mut Self::Context) -> Self::Result {
+        self.start_loop_internal(msg.goal, msg.peer_id, msg.max_steps, msg.max_tool_rounds, ctx)
+    }
+}
+
+impl Handler<Event> for AgentLoopActor {
+    type Result = ();
+
+    /// 事件驱动启动：任何插件发 `agent.loop.start`（data: {goal, peer_id?, max_steps?, max_tool_rounds?}）即可启动一个 loop。
+    fn handle(&mut self, event: Event, ctx: &mut Self::Context) {
+        if event.topic != "agent.loop.start" {
+            return;
+        }
+        let goal = event
+            .data
+            .get("goal")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if goal.trim().is_empty() {
+            log::warn!("[AgentLoopActor] agent.loop.start without goal, ignored");
+            return;
+        }
+        let peer_id = event
+            .data
+            .get("peer_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let max_steps = event
+            .data
+            .get("max_steps")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let max_tool_rounds = event
+            .data
+            .get("max_tool_rounds")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        match self.start_loop_internal(goal, peer_id, max_steps, max_tool_rounds, ctx) {
+            Ok(snap) => log::info!(
+                "[AgentLoopActor] started loop '{}' from event (goal={})",
+                snap.id,
+                snap.goal
+            ),
+            Err(e) => log::warn!("[AgentLoopActor] event-driven start failed: {}", e),
+        }
     }
 }
 
@@ -448,10 +520,18 @@ impl AgentLoopRunner {
         let mut observations: Vec<String> = Vec::new();
         let mut final_status = AgentLoopStatus::Completed;
         let mut final_error: Option<String> = None;
+        let loop_start = Instant::now();
+        let max_duration = agent_loop_max_duration_secs();
 
         for step_index in 1..=self.max_steps {
             if self.stop_flag.load(Ordering::SeqCst) {
                 final_status = AgentLoopStatus::Stopped;
+                break;
+            }
+
+            if loop_duration_exceeded(loop_start.elapsed().as_secs(), max_duration) {
+                final_status = AgentLoopStatus::Failed;
+                final_error = Some(format!("exceeded max duration {}s", max_duration));
                 break;
             }
 
@@ -575,7 +655,8 @@ impl AgentLoopRunner {
             })
             .await;
         let contexts = self.snapshots.lock().clone();
-        let tools = collect_tool_defs(&self.tool_registry);
+        let tool_deny = agent_loop_tool_deny();
+        let tools = collect_tool_defs(&self.tool_registry, &tool_deny);
         let prompt = build_loop_prompt(&self.goal, observations, step_index, self.max_steps);
         let request_id = format!("agent-loop-{}-s{}", self.id, step_index);
 
@@ -620,9 +701,13 @@ impl AgentLoopRunner {
             }
 
             let round_tool_calls = response.tool_calls.clone();
-            let round_results =
-                execute_tool_calls(&self.tool_registry, &self.metrics_addr, &round_tool_calls)
-                    .await;
+            let round_results = execute_tool_calls(
+                &self.tool_registry,
+                &self.metrics_addr,
+                &round_tool_calls,
+                &tool_deny,
+            )
+            .await;
             all_tool_calls.extend(round_tool_calls.clone());
             all_tool_results.extend(round_results.clone());
 
@@ -748,12 +833,77 @@ struct LoopDecision {
     sleep_seconds: Option<u64>,
 }
 
-fn collect_tool_defs(tool_registry: &Arc<Mutex<ToolRegistry>>) -> Vec<serde_json::Value> {
+/// 读取 Agent Loop 最大并发数（env `AGENT_LOOP_MAX_CONCURRENT`，0=不限）。
+fn agent_loop_max_concurrent() -> usize {
+    std::env::var("AGENT_LOOP_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// 统计活跃（未终态）loop 数：Running / Paused / WaitingForUser / Stopping。
+fn active_loop_count(statuses: &[AgentLoopStatus]) -> usize {
+    statuses
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                AgentLoopStatus::Running
+                    | AgentLoopStatus::Paused
+                    | AgentLoopStatus::WaitingForUser
+                    | AgentLoopStatus::Stopping
+            )
+        })
+        .count()
+}
+
+/// 是否允许启动新 loop（max=0 表示不限）。
+fn can_start_new_loop(active: usize, max_concurrent: usize) -> bool {
+    max_concurrent == 0 || active < max_concurrent
+}
+
+/// 读取 Agent Loop 墙钟时长上限（env `AGENT_LOOP_MAX_DURATION_SECS`，0=不限）。
+fn agent_loop_max_duration_secs() -> u64 {
+    std::env::var("AGENT_LOOP_MAX_DURATION_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// 墙钟时长是否超限（max_secs=0 表示不限）。
+fn loop_duration_exceeded(elapsed_secs: u64, max_secs: u64) -> bool {
+    max_secs > 0 && elapsed_secs >= max_secs
+}
+
+/// 读取 Agent Loop 工具 denylist（env `AGENT_LOOP_TOOL_DENY`，逗号分隔）。
+fn agent_loop_tool_deny() -> Vec<String> {
+    std::env::var("AGENT_LOOP_TOOL_DENY")
+        .map(|s| parse_tool_deny_list(&s))
+        .unwrap_or_default()
+}
+
+/// 解析 denylist：逗号分隔、去空白、去空项。
+fn parse_tool_deny_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 工具是否被 Agent Loop 策略禁用（精确名匹配）。
+fn is_tool_denied(name: &str, deny: &[String]) -> bool {
+    deny.iter().any(|d| d == name)
+}
+
+fn collect_tool_defs(
+    tool_registry: &Arc<Mutex<ToolRegistry>>,
+    deny: &[String],
+) -> Vec<serde_json::Value> {
     let reg = tool_registry.lock();
     reg
         .all_defs()
         .iter()
-        .filter(|d| !d.internal)
+        .filter(|d| !d.internal && !is_tool_denied(&d.name, deny))
         .map(|d| {
             serde_json::json!({
                 "type": "function",
@@ -771,10 +921,18 @@ async fn execute_tool_calls(
     tool_registry: &Arc<Mutex<ToolRegistry>>,
     metrics_addr: &Addr<MetricsActor>,
     tool_calls: &[ToolCall],
+    deny: &[String],
 ) -> Vec<String> {
     let timeout_secs = crate::tool_exec::tool_timeout_secs();
     let mut results = Vec::new();
     for call in tool_calls {
+        if is_tool_denied(&call.name, deny) {
+            results.push(format!(
+                "【{}】错误：该工具已被 Agent Loop 策略禁用（AGENT_LOOP_TOOL_DENY）",
+                call.name
+            ));
+            continue;
+        }
         let executor = {
             let reg = tool_registry.lock();
             reg.get_executor(&call.name)
@@ -1095,6 +1253,71 @@ mod tests {
         p.push(format!("bn_agent_loop_test_{}_{}.db", tag, std::process::id()));
         let _ = std::fs::remove_file(&p);
         p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn deny_list_parse_trims_and_drops_empty() {
+        assert_eq!(parse_tool_deny_list(""), Vec::<String>::new());
+        assert_eq!(
+            parse_tool_deny_list(" shutdown , , unload_plugin "),
+            vec!["shutdown".to_string(), "unload_plugin".to_string()]
+        );
+    }
+
+    #[test]
+    fn deny_list_matches_exact_name() {
+        let deny = parse_tool_deny_list("shutdown,danger_tool");
+        assert!(is_tool_denied("shutdown", &deny));
+        assert!(is_tool_denied("danger_tool", &deny));
+        assert!(!is_tool_denied("safe_tool", &deny));
+        assert!(!is_tool_denied("shutdown_x", &deny));
+    }
+
+    #[test]
+    fn deny_list_empty_denies_nothing() {
+        let deny: Vec<String> = Vec::new();
+        assert!(!is_tool_denied("anything", &deny));
+    }
+
+    #[test]
+    fn duration_unlimited_when_zero() {
+        assert!(!loop_duration_exceeded(0, 0));
+        assert!(!loop_duration_exceeded(999_999, 0));
+    }
+
+    #[test]
+    fn duration_exceeded_at_or_past_limit() {
+        assert!(!loop_duration_exceeded(9, 10));
+        assert!(loop_duration_exceeded(10, 10));
+        assert!(loop_duration_exceeded(11, 10));
+    }
+
+    #[test]
+    fn concurrent_unlimited_when_zero() {
+        assert!(can_start_new_loop(0, 0));
+        assert!(can_start_new_loop(9999, 0));
+    }
+
+    #[test]
+    fn concurrent_blocks_at_limit() {
+        assert!(can_start_new_loop(0, 2));
+        assert!(can_start_new_loop(1, 2));
+        assert!(!can_start_new_loop(2, 2));
+        assert!(!can_start_new_loop(3, 2));
+    }
+
+    #[test]
+    fn active_count_excludes_terminal() {
+        let statuses = vec![
+            AgentLoopStatus::Running,
+            AgentLoopStatus::Paused,
+            AgentLoopStatus::Completed,
+            AgentLoopStatus::Stopped,
+            AgentLoopStatus::Failed,
+            AgentLoopStatus::WaitingForUser,
+            AgentLoopStatus::Stopping,
+        ];
+        assert_eq!(active_loop_count(&statuses), 4);
     }
 
     #[test]
@@ -1554,5 +1777,45 @@ mod tests {
         assert!(removed.contains(&"done2".to_string()));
         assert!(!removed.contains(&"run".to_string()));
         assert!(!removed.contains(&"pause".to_string()));
+    }
+
+    #[actix_rt::test]
+    async fn event_driven_start_creates_loop() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"d"}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        actor
+            .send(Event::new(
+                "agent.loop.start",
+                serde_json::json!({
+                    "goal": "event goal",
+                    "peer_id": "test:1",
+                    "max_steps": 1,
+                    "max_tool_rounds": 0,
+                }),
+                "test",
+            ))
+            .await
+            .unwrap();
+        let list = actor.send(ListAgentLoops).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].goal, "event goal");
+        assert_eq!(list[0].peer_id, "test:1");
+    }
+
+    #[actix_rt::test]
+    async fn event_without_goal_ignored() {
+        let llm = MockLlm {
+            response: "{}".into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        actor
+            .send(Event::new("agent.loop.start", serde_json::json!({}), "test"))
+            .await
+            .unwrap();
+        assert_eq!(actor.send(ListAgentLoops).await.unwrap().len(), 0);
     }
 }
