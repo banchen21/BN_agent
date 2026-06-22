@@ -12,13 +12,13 @@ Agent Loop 是显式目标驱动的后台循环，不替代普通聊天链路。
 - 将工具结果作为 observation 喂回后续步骤
 - 记录每一步的状态、LLM 消息、工具调用、工具结果和耗时
 - 支持最大 step 数和最大 tool round 数
-- 支持查询、列表和停止
+- 支持查询、列表、停止、暂停与恢复
 - 发布 `agent.loop.step` 与 `agent.loop.done` 事件
+- loop 状态持久化到 SQLite，进程重启后恢复历史（运行中的 loop 标记为中断）
+- 终态 loop 自动清理（内存与 DB 只保留最近 `AGENT_LOOP_MAX_KEEP` 个，默认 200）
 
 当前 MVP 暂不支持：
 
-- loop 状态持久化和重启恢复
-- 暂停/恢复
 - 多目标优先级队列
 - plan/task tree
 - 长期反思压缩
@@ -51,9 +51,17 @@ curl http://127.0.0.1:8080/api/agent-loop/status/{id}
 curl -X POST http://127.0.0.1:8080/api/agent-loop/stop/{id}
 ```
 
+暂停 / 恢复：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/agent-loop/pause/{id}
+curl -X POST http://127.0.0.1:8080/api/agent-loop/resume/{id}
+```
+
 ## 状态
 
 - `running`：loop 正在执行
+- `paused`：已暂停，runner 在步骤边界等待恢复（`resume` 后继续）
 - `completed`：目标完成
 - `waiting_for_user`：需要用户补充信息
 - `stopping`：已收到停止请求，等待当前步结束
@@ -65,6 +73,8 @@ curl -X POST http://127.0.0.1:8080/api/agent-loop/stop/{id}
 - `max_steps`：单个 loop 的最大步骤数，默认 8，硬上限 50
 - `max_tool_rounds`：单步最大工具调用轮数，默认 5，硬上限 20
 - `AGENT_LOOP_MAX_SLEEP_SECS`：LLM 决策 sleep 时的单步上限，默认 60 秒
+- `AGENT_LOOP_DB_PATH`：loop 状态持久化路径，默认 `data/agent_loops.db`；进程重启时残留的 `running`/`stopping`/`paused` 会被标记为 `failed`（`interrupted by process restart`）
+- `AGENT_LOOP_MAX_KEEP`：终态 loop 保留上限，默认 200；每次新建 loop 后清理更旧的终态记录（仅 Completed/Stopped/Failed，活跃 loop 不受影响）
 
 ## 设计关系
 

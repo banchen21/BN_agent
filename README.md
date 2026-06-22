@@ -110,7 +110,13 @@ cargo run -p main-app
 | `CHAT_HISTORY_CLEAR_ON_START` | `false` | 启动时是否清空短期聊天历史，默认保留 |
 | `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
+| `TOOL_TIMEOUT_SECS` | `180` | 单个工具执行超时(秒)，0=禁用；超时返回错误且不阻塞主流程 |
+| `TOKEN_BUDGET_DAILY` | (无) | Token 预算·近 24h 上限；超限拒绝新请求，0/未设=无限 |
+| `TOKEN_BUDGET_WEEKLY` | (无) | Token 预算·近 7d 上限 |
+| `TOKEN_BUDGET_MONTHLY` | (无) | Token 预算·近 30d 上限 |
 | `AGENT_LOOP_MAX_SLEEP_SECS` | `60` | Agent Loop 单步 sleep 上限 |
+| `AGENT_LOOP_DB_PATH` | `data/agent_loops.db` | Agent Loop 状态持久化路径（重启恢复历史） |
+| `AGENT_LOOP_MAX_KEEP` | `200` | 终态 Agent Loop 保留上限，超出清理最旧（防内存/DB 膨胀） |
 | `LLM_THINKING` | `disabled` | DeepSeek 思考模式 |
 | `PROACTIVE_MODE` | `auto` | 主动追问模式 (auto/semi-auto) |
 | `PROACTIVE_LOOP_INTERVAL` | `15` | 主动追问轮询间隔(秒) |
@@ -124,6 +130,7 @@ cargo run -p main-app
 | `RETRY_MAX_DELAY_MS` | `30000` | 最大重试延迟(ms) |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | 熔断触发连续失败数 |
 | `CIRCUIT_BREAKER_COOLDOWN_MS` | `60000` | 熔断冷却时间(ms) |
+| `CIRCUIT_BREAKER_DB_PATH` | `data/circuit_breaker.db` | 熔断状态持久化路径（重启恢复 open/half-open） |
 | `RATE_LIMIT_PER_MIN` | `30` | 每分钟每会话请求上限 |
 | `RATE_LIMIT_BURST` | `5` | 令牌桶突发容量 |
 | `SKILL_DIR` | `data/skills/` | Skill 文件目录 |
@@ -150,10 +157,13 @@ cargo run -p main-app
 | GET | `/api/agent-loop/list` | 列出 Agent Loop 任务 |
 | GET | `/api/agent-loop/status/{id}` | 查询 Agent Loop 状态 |
 | POST | `/api/agent-loop/stop/{id}` | 请求停止 Agent Loop |
+| POST | `/api/agent-loop/pause/{id}` | 暂停 Agent Loop |
+| POST | `/api/agent-loop/resume/{id}` | 恢复已暂停的 Agent Loop |
 | GET | `/api/metrics` | Prometheus 格式指标 |
 | GET | `/api/metrics/json` | JSON 格式指标 |
 | GET | `/api/token-usage` | 全局 Token 用量 |
 | GET | `/api/token-usage/{chat_id}` | 按会话 Token 用量 |
+| GET | `/api/token-usage/budget` | Token 预算状态（是否超限/用量/上限） |
 | POST | `/api/cancel/{chat_id}` | 取消进行中的请求 |
 | GET | `/api/retry/state` | 熔断器状态 |
 | ANY | `/api/plugin/{name}/{path:.*}` | 代理到插件 API |

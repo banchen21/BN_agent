@@ -7,7 +7,7 @@
 多 IM 接入    ██████████ 完成（Telegram / 飞书 / 微信）
 多模态        ██████████ 完成（图片 / 视频 / ASR / TTS）
 工具系统      ██████████ 完成（MCP 桥接 + Skill 系统）
-Agent Loop    ██████░░░░ MVP（目标循环 + HTTP 控制）
+Agent Loop    █████████░ 较完整（循环 + 持久化 + 暂停恢复 + 清理）
 重试/熔断     ██████████ 完成
 Token 用量    ██████████ 完成
 流式响应      ██████████ 完成
@@ -16,11 +16,12 @@ Token 用量    ██████████ 完成
 结构化观测    ██████████ 完成（Prometheus 指标）
 ```
 
-### 最新进展（2026-06-20）
+### 最新进展（2026-06-22）
 
+- [x] **P0 健壮性收口** — parking_lot 迁移（消除跨 cdylib 共享锁中毒级联）、熔断状态持久化、Agent Loop 状态持久化三项 P0 全部落地
 - [x] **Agent Loop MVP 已落地** — `8950b7d feat(agent-loop): add goal loop actor mvp`，新增目标循环 actor、HTTP 控制接口、step observation 与事件发布
 - [x] **主动系统升级完成** — 已从定时提醒扩展到带 jitter / probability / daily cap / backoff 的自主主动触发
-- [ ] **下一阶段重点** — Agent Loop 状态持久化、暂停/恢复、规划器、工具超时与测试体系
+- [ ] **下一阶段重点** — Agent Loop 规划器（plan/task tree + 反思）、流式推送至 IM、会话管理（标题/摘要/回收）
 
 ---
 
@@ -81,22 +82,22 @@ Token 用量    ██████████ 完成
 - [x] **Claude CLI 后端** — `LLM_BACKEND=claude` 用 `--resume` 复用原生会话，工具提示词注入
 - [x] **Agent Loop MVP** — `AgentLoopActor` 支持目标启动、observe/decide/act 循环、工具调用、step observation、状态查询与停止
 - [ ] **流式推送至 IM** — 将 `llm.chunk` 事件转发到 Telegram/飞书/微信
-- [ ] **Agent Loop 持久化队列** — loop 状态落库，支持重启恢复、按 peer 归档
-- [ ] **Agent Loop 暂停/恢复** — 在 `running/stopping/stopped` 之外补齐 `paused` 控制语义和 API
+- [x] **Agent Loop 持久化队列** — loop 状态落 SQLite，支持重启恢复、按 peer 归档（`AGENT_LOOP_DB_PATH`）；终态自动清理（`AGENT_LOOP_MAX_KEEP`，默认保留 200）
+- [x] **Agent Loop 暂停/恢复** — 新增 `paused` 状态 + `pause/resume` 消息与 HTTP API；runner 在步骤边界暂停等待，心跳不覆盖外部状态
 - [ ] **Agent Loop 规划器** — 引入 plan/task tree、step reflection、失败自我修正策略
 - [ ] **Agent Loop 与主动系统联动** — 允许 proactive 触发受控 loop，而不是只能生成一条即时消息
-- [ ] **LLM 重试持久化** — 熔断状态重启后保持
-- [ ] **Token 预算控制** — 按天/周/月设置 token 上限
+- [x] **LLM 重试持久化** — 熔断状态重启后保持（`CIRCUIT_BREAKER_DB_PATH`）
+- [x] **Token 预算控制** — 滚动窗口（日 24h/周 7d/月 30d）token 上限（`TOKEN_BUDGET_DAILY/WEEKLY/MONTHLY`）；pipeline 前置拦截超限请求 + 提示；`GET /api/token-usage/budget` 查询
 - [ ] **会话管理** — 对话标题、自动摘要、长时间未活动会话回收
-- [ ] **工具调用超时** — per-tool 超时控制
+- [x] **工具调用超时** — per-tool 超时控制（`TOOL_TIMEOUT_SECS`，默认 180s）；工具改在 blocking 池执行，避免同步工具阻塞 actix arbiter
 - [ ] **速率限制提升** — 支持 IP 级别限流 + 分布式（Redis）
 - [ ] **插件沙箱** — Wasm / Lua 沙箱运行插件
 
 ### 测试类
 
-- [ ] **单元测试** — 每个 actor 的核心逻辑
-- [ ] **集成测试** — 端到端 LLM 调用 + 工具执行
-- [ ] **插件测试框架** — 模拟 PluginContext 测试插件
+- [x] **单元测试** — 核心纯逻辑 + AgentLoopActor handler 级（mock 依赖注入）+ MessageRouter 路由解析 + 工具超时 + token 预算 + loop 清理 ～72 个测试全绿；PipelineActor / LlmActor handler 级待补
+- [x] **集成测试** — mock LLM 驱动 Agent Loop 端到端（observe→decide→act 跑完整 loop 至 Completed）
+- [x] **插件测试框架** — `PluginContext::for_test` 提供最小可注入上下文（plugin-interface）
 
 ---
 
@@ -107,21 +108,21 @@ Token 用量    ██████████ 完成
 ### P0 — 正确性与健壮性（阻塞成熟版）
 
 - [x] **多 Peer 关系隔离** — `peer_id` 已贯穿 IM 插件 → pipeline → ChatRequest → chat_store → memory；按人隔离对话历史与记忆，首个互动者自动绑定为主人。详见下方「多 Peer 关系」设计
-- [ ] **Agent Loop 状态持久化** — 当前 loop 仍在内存中，主进程重启会丢失运行中目标；成熟版需要 SQLite 状态表与恢复策略
-- [ ] **收敛 panic 面** — 关键路径 `.lock().unwrap()` 改用 `parking_lot::Mutex`（不中毒）或优雅降级，避免单线程 panic 级联崩溃
-- [ ] **熔断状态持久化** — 重启后保持 open/half-open，避免雪崩后立即重试
+- [x] **Agent Loop 状态持久化** — `AgentLoopActor` 状态落 SQLite（`data/agent_loops.db`，整快照 JSON），重启恢复历史；残留 running/stopping 标记为中断
+- [x] **收敛 panic 面** — main-app 全部 + plugin-interface 共享 `ToolRegistry` 锁迁至 `parking_lot::Mutex`（不中毒）；插件私有 std 锁（局部不级联）与 `token_usage_actor` 优雅降级保留
+- [x] **熔断状态持久化** — `RetryActor` 熔断状态落 SQLite（`data/circuit_breaker.db`），重启保持 open/half-open；冷却已过的 open 恢复为 half-open
 
 ### P1 — 测试体系（质量保障，详见上方「测试类」）
 
-- [ ] Agent Loop 单元测试：状态转换、预算耗尽、停止请求、JSON 决策解析
-- [ ] 单元测试：PipelineActor / LlmActor / 工具注册-调用链
-- [ ] 集成测试：mock LLM 端点跑端到端工具执行
-- [ ] 插件测试框架：模拟 PluginContext
-- [ ] CI 门禁：`cargo build` + `clippy -D warnings` + `test`
+- [x] Agent Loop 单测：纯逻辑（决策/状态/格式化/持久化）+ actor 级（clamp/默认值、停止请求终止、get/list、空 goal 拒绝）
+- [x] `ToolRegistry` 注册-调用链单测（plugin-interface）；PipelineActor / LlmActor actor 级单测待补
+- [x] 集成测试：mock LLM 驱动 AgentLoopActor 端到端跑完整 loop（`loop_completes_with_mock_llm`）
+- [x] 插件测试框架：`PluginContext::for_test`（plugin-interface）+ 示例插件工具注册测试
+- [x] CI 门禁：`.github/workflows/ci.yml`（windows runner）build + test 硬门禁；clippy 信息性（待历史 warning 清零后升级 `-D warnings`）
 
 ### P2 — 运维与打磨
 
-- [ ] 工具调用 per-tool 超时控制
+- [x] 工具调用 per-tool 超时控制（`TOOL_TIMEOUT_SECS`，spawn_blocking + timeout，不阻塞 arbiter）
 - [ ] 微信图片/语音真实环境端到端联调验证
 - [ ] ASR 调用链整体超时（ffmpeg 管道 + API）
 - [ ] 流式工具调用参数解析兼容非标准分块
@@ -158,7 +159,6 @@ Token 用量    ██████████ 完成
 ## 已知问题
 
 - **流式工具调用** — 部分模型在流式模式下分 chunk 发送 function call 参数，非标准实现可能解析异常
-- **熔断状态非持久化** — 重启后重置为 closed
 - **ASR 偶发超时** — ffmpeg 管道 + API 调用链缺乏整体超时控制
 - **ComfyUI 依赖外部启动** — 生图需要独立运行 ComfyUI 服务
 
@@ -177,6 +177,9 @@ Token 用量    ██████████ 完成
 - **重启后短期聊天历史丢失** — 主程序曾在启动时无条件清空 `chat_history`。解决方案：默认保留历史，仅当 `CHAT_HISTORY_CLEAR_ON_START=true` 时才执行清空
 - **微信回复整段发送** — 不像真人。解决方案：按换行/句末标点分句逐条发送（与 tg-im 一致），段间延时防限频
 - **多人接入共享历史/记忆** — chat_history 与 memory 曾全局单桶。解决方案：引入 `peer_id={source}:{平台内id}`，历史按 peer 读写；memory-plugin 的 buffer/facts/snapshot 按 peer 分桶；首个互动者持久化为主人并注入 owner/visitor 关系守则
+- **锁中毒级联 panic 风险** — 满屏 `std::sync::Mutex` + `.lock().unwrap()`，单线程 panic 会毒化锁级联崩溃。解决方案：plugin-interface `pub use parking_lot::{Mutex, RwLock}` 统一跨 cdylib 共享锁；main-app 全量迁移；插件共享 `ctx.tool_registry` 访问改 `.lock()`；插件私有 std 锁（局部不级联）与 `token_usage_actor` 优雅降级保留
+- **熔断 / Agent Loop 状态重启丢失** — 二者原先仅存内存。解决方案：分别持久化到 `data/circuit_breaker.db` 与 `data/agent_loops.db`，启动恢复；熔断冷却已过的 open 恢复为 half-open；Agent Loop 残留 running/stopping 标记为中断（interrupted by process restart）
+- **同步工具阻塞 / 无超时** — 工具 `execute()` 同步执行会阻塞 actix arbiter 线程，且卡死的工具无限挂起。解决方案：新增 `tool_exec::execute_with_timeout`，经 `spawn_blocking` 移到 blocking 池执行（工具已设计为线程无关、内部自建 runtime）+ `TOOL_TIMEOUT_SECS` 超时（默认 180s，0 禁用）；pipeline 与 agent loop 工具执行均接入
 
 ---
 
