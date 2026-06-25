@@ -410,6 +410,8 @@ pub struct TgImPlugin {
     processing_chats: Arc<Mutex<HashSet<i64>>>,
     /// 当前平台会话 ID（pipeline 不再注入，插件自行维护）
     current_chat_id: Arc<Mutex<Option<i64>>>,
+    /// 流式 LLM 文本聚合与最终消息去重状态
+    streaming_text: Arc<Mutex<TextStreamState>>,
 }
 
 impl TgImPlugin {
@@ -427,8 +429,73 @@ impl TgImPlugin {
             bot_thread: None,
             processing_chats: Arc::new(Mutex::new(HashSet::new())),
             current_chat_id: Arc::new(Mutex::new(None)),
+            streaming_text: Arc::new(Mutex::new(TextStreamState::default())),
         }
     }
+}
+
+fn im_stream_chunks_enabled() -> bool {
+    std::env::var("IM_STREAM_CHUNKS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "disabled")
+        })
+        .unwrap_or(true)
+}
+
+fn stream_request_id(event: &Event) -> Option<String> {
+    event
+        .data
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn telegram_chat_id_from_event(event: &Event, fallback: Option<i64>) -> Option<i64> {
+    event
+        .data
+        .get("chat_id")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            event
+                .data
+                .get("chat_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i64>().ok())
+        })
+        .or_else(|| {
+            event
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.strip_prefix("telegram:"))
+                .and_then(|s| s.parse::<i64>().ok())
+        })
+        .or(fallback)
+}
+
+fn send_tg_stream_segments(handle: BotHandle, chat_id: i64, segments: Vec<String>) {
+    if segments.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        rt.block_on(async {
+            for (idx, segment) in segments.iter().enumerate() {
+                let _ = handle.send_typing(chat_id).await;
+                if let Err(e) = handle.send_message(chat_id, segment).await {
+                    eprintln!("[tg-im] stream send failed: {}", e);
+                }
+                if idx + 1 < segments.len() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                }
+            }
+        });
+    });
 }
 
 impl Plugin for TgImPlugin {
@@ -687,6 +754,49 @@ impl Plugin for TgImPlugin {
             .unwrap_or("");
         let chat_id = self.current_chat_id.lock().unwrap().unwrap_or(0);
 
+        if im_stream_chunks_enabled() && event.topic == "llm.chunk" && source == "telegram" {
+            let Some(request_id) = stream_request_id(event) else {
+                return true;
+            };
+            let Some(content) = event.data.get("content").and_then(|v| v.as_str()) else {
+                return true;
+            };
+            let Some(target_chat_id) =
+                telegram_chat_id_from_event(event, if chat_id == 0 { None } else { Some(chat_id) })
+            else {
+                return true;
+            };
+            let segments = self
+                .streaming_text
+                .lock()
+                .unwrap()
+                .push_chunk(&request_id, content);
+            if let Some(ref handle) = self.bot_handle {
+                send_tg_stream_segments(handle.clone(), target_chat_id, segments);
+            }
+            return true;
+        }
+
+        if im_stream_chunks_enabled() && event.topic == "llm.response" && source == "telegram" {
+            let Some(request_id) = stream_request_id(event) else {
+                return true;
+            };
+            let Some(target_chat_id) =
+                telegram_chat_id_from_event(event, if chat_id == 0 { None } else { Some(chat_id) })
+            else {
+                return true;
+            };
+            let segments = self.streaming_text.lock().unwrap().flush(&request_id);
+            if let Some(ref handle) = self.bot_handle {
+                send_tg_stream_segments(handle.clone(), target_chat_id, segments);
+            }
+            self.processing_chats
+                .lock()
+                .unwrap()
+                .remove(&target_chat_id);
+            return true;
+        }
+
         // ── user.message from Telegram → 持续发 Typing 直到回复 ──
         if event.topic == "user.message" && source == "telegram" && chat_id != 0 {
             if let Some(ref handle) = self.bot_handle {
@@ -725,6 +835,17 @@ impl Plugin for TgImPlugin {
 
         // ── assistant.message from Telegram → 停止 typing + 逐条发送回复 ──
         if event.topic == "assistant.message" && source == "telegram" && chat_id != 0 {
+            if let Some(request_id) = stream_request_id(event) {
+                if self
+                    .streaming_text
+                    .lock()
+                    .unwrap()
+                    .take_streamed_request(&request_id)
+                {
+                    self.processing_chats.lock().unwrap().remove(&chat_id);
+                    return true;
+                }
+            }
             // 静默事件：仅供插件（proactive 等）感知回复，不实际发送
             if event
                 .data

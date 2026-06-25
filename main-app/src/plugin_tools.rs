@@ -4,8 +4,8 @@
 //! hold a reference to `Addr<PluginManager>`.
 
 use actix::prelude::*;
-use plugin_interface::*;
 use futures_executor::block_on;
+use plugin_interface::*;
 
 // ── LoadPluginTool ───────────────────────────────────────────────────────────
 
@@ -23,7 +23,8 @@ impl ToolExecutor for LoadPluginTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "load_plugin".into(),
-            description: "Load a plugin from a .dll / .so path. Returns plugin info on success.".into(),
+            description: "Load a plugin from a .dll / .so path. Returns plugin info on success."
+                .into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -72,7 +73,8 @@ impl ToolExecutor for UnloadPluginTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "unload_plugin".into(),
-            description: "Unload a loaded plugin by name. The plugin stops receiving events.".into(),
+            description: "Unload a loaded plugin by name. The plugin stops receiving events."
+                .into(),
             internal: false,
             parameters: serde_json::json!({
                 "type": "object",
@@ -116,7 +118,8 @@ impl ReloadPluginTool {
 
 impl ToolExecutor for ReloadPluginTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "reload_plugin".into(),
             description: "Reload a plugin by name (unload + load again from same path). Returns new plugin info.".into(),
             internal: false,
@@ -130,6 +133,7 @@ impl ToolExecutor for ReloadPluginTool {
                 },
                 "required": ["name"]
             }),
+        }
         });
         &DEF
     }

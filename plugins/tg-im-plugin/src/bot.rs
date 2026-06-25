@@ -4,8 +4,8 @@
 
 use std::io::Cursor;
 use std::sync::Arc;
-use teloxide::prelude::*;
 use teloxide::net::Download;
+use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ChatId, InputFile, ParseMode};
 
 // ── BotHandle — 供插件和工具调用 ────────────────────────────────────────────
@@ -38,28 +38,29 @@ impl BotHandle {
         // MarkdownV2 需要转义: _ * [ ] ( ) ~ ` > # + - = | { } . !
         fn escape_md(s: &str) -> String {
             s.replace('\\', "\\\\")
-             .replace('_', "\\_")
-             .replace('*', "\\*")
-             .replace('[', "\\[")
-             .replace(']', "\\]")
-             .replace('(', "\\(")
-             .replace(')', "\\)")
-             .replace('~', "\\~")
-             .replace('`', "\\`")
-             .replace('>', "\\>")
-             .replace('#', "\\#")
-             .replace('+', "\\+")
-             .replace('-', "\\-")
-             .replace('=', "\\=")
-             .replace('|', "\\|")
-             .replace('{', "\\{")
-             .replace('}', "\\}")
-             .replace('.', "\\.")
-             .replace('!', "\\!")
+                .replace('_', "\\_")
+                .replace('*', "\\*")
+                .replace('[', "\\[")
+                .replace(']', "\\]")
+                .replace('(', "\\(")
+                .replace(')', "\\)")
+                .replace('~', "\\~")
+                .replace('`', "\\`")
+                .replace('>', "\\>")
+                .replace('#', "\\#")
+                .replace('+', "\\+")
+                .replace('-', "\\-")
+                .replace('=', "\\=")
+                .replace('|', "\\|")
+                .replace('{', "\\{")
+                .replace('}', "\\}")
+                .replace('.', "\\.")
+                .replace('!', "\\!")
         }
 
         // 尝试先直接发（假设内容已正确格式化），失败则转义后重发
-        let result = self.bot
+        let result = self
+            .bot
             .send_message(ChatId(chat_id), text)
             .parse_mode(ParseMode::MarkdownV2)
             .await;
@@ -145,7 +146,8 @@ impl BotHandle {
         if let Some(cap) = caption {
             req = req.caption(cap);
         }
-        req.await.map_err(|e| format!("send_document failed: {}", e))?;
+        req.await
+            .map_err(|e| format!("send_document failed: {}", e))?;
         Ok(())
     }
 }
@@ -363,11 +365,13 @@ pub fn build_reqwest_client() -> Result<reqwest::Client, String> {
         .timeout(std::time::Duration::from_secs(30));
 
     if let Ok(proxy_url) = std::env::var("TG_PROXY_URL") {
-        let proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(|e| format!("proxy config failed: {}", e))?;
+        let proxy =
+            reqwest::Proxy::all(&proxy_url).map_err(|e| format!("proxy config failed: {}", e))?;
         builder = builder.proxy(proxy);
         log::info!("[tg-im] using proxy: {}", proxy_url);
     }
 
-    builder.build().map_err(|e| format!("reqwest build failed: {}", e))
+    builder
+        .build()
+        .map_err(|e| format!("reqwest build failed: {}", e))
 }

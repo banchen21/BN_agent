@@ -51,15 +51,25 @@ impl RetryConfig {
     pub fn from_env() -> Self {
         Self {
             max_retries: std::env::var("RETRY_MAX_ATTEMPTS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
             base_delay_ms: std::env::var("RETRY_BASE_DELAY_MS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_000),
             max_delay_ms: std::env::var("RETRY_MAX_DELAY_MS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(30_000),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30_000),
             circuit_breaker_threshold: std::env::var("CIRCUIT_BREAKER_THRESHOLD")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             circuit_breaker_cooldown_ms: std::env::var("CIRCUIT_BREAKER_COOLDOWN_MS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(60_000),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60_000),
         }
     }
 }
@@ -211,7 +221,8 @@ impl RetryActor {
         if !matches!(circuit, CircuitState::Closed) {
             log::info!(
                 "[RetryActor] restored circuit state: {} (consecutive_failures={})",
-                circuit, consecutive_failures,
+                circuit,
+                consecutive_failures,
             );
         }
         Self {
@@ -251,9 +262,13 @@ impl Handler<RetryChatRequest> for RetryActor {
         match &self.circuit {
             CircuitState::Open { until } if Instant::now() < *until => {
                 let remaining = until.saturating_duration_since(Instant::now()).as_secs();
-                log::warn!("[RetryActor] circuit open, rejecting (cooldown {}s remaining)", remaining);
+                log::warn!(
+                    "[RetryActor] circuit open, rejecting (cooldown {}s remaining)",
+                    remaining
+                );
                 return Box::pin(fut::ready(Err(format!(
-                    "service temporarily unavailable (circuit open, {}s cooldown)", remaining
+                    "service temporarily unavailable (circuit open, {}s cooldown)",
+                    remaining
                 ))));
             }
             CircuitState::Open { .. } => {
@@ -299,14 +314,19 @@ impl Handler<RetryChatRequest> for RetryActor {
 
                 if attempt >= max_retries {
                     log::error!("[RetryActor] exhausted {max_retries} attempts, giving up");
-                    return Err(format!("retry exhausted after {max_retries} attempts: {last_error}"));
+                    return Err(format!(
+                        "retry exhausted after {max_retries} attempts: {last_error}"
+                    ));
                 }
 
                 // Exponential backoff.
                 let delay = (base_delay_ms as u64)
                     .saturating_mul(1u64 << (attempt - 1).min(10))
                     .min(max_delay_ms);
-                log::info!("[RetryActor] retrying in {delay}ms (attempt {}/{max_retries})", attempt + 1);
+                log::info!(
+                    "[RetryActor] retrying in {delay}ms (attempt {}/{max_retries})",
+                    attempt + 1
+                );
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
         }
@@ -325,14 +345,17 @@ impl Handler<RetryChatRequest> for RetryActor {
                         let until = Instant::now() + Duration::from_millis(cooldown);
                         log::warn!(
                             "[RetryActor] {} consecutive failures → circuit open for {}ms",
-                            this.consecutive_failures, cooldown,
+                            this.consecutive_failures,
+                            cooldown,
                         );
                         this.circuit = CircuitState::Open { until };
                     } else if matches!(this.circuit, CircuitState::HalfOpen) {
                         // Half-open + failure → back to open.
                         let cooldown = this.config.circuit_breaker_cooldown_ms;
                         let until = Instant::now() + Duration::from_millis(cooldown);
-                        log::warn!("[RetryActor] half-open test failed → circuit open for {cooldown}ms");
+                        log::warn!(
+                            "[RetryActor] half-open test failed → circuit open for {cooldown}ms"
+                        );
                         this.circuit = CircuitState::Open { until };
                     }
                 }
@@ -348,7 +371,10 @@ impl Handler<RetryChatRequest> for RetryActor {
 impl Handler<CircuitStateQuery> for RetryActor {
     type Result = String;
     fn handle(&mut self, _: CircuitStateQuery, _: &mut Self::Context) -> String {
-        format!("circuit={}, consecutive_failures={}", self.circuit, self.consecutive_failures)
+        format!(
+            "circuit={}, consecutive_failures={}",
+            self.circuit, self.consecutive_failures
+        )
     }
 }
 
@@ -360,7 +386,11 @@ mod tests {
 
     fn temp_db_path(tag: &str) -> String {
         let mut p = std::env::temp_dir();
-        p.push(format!("bn_agent_cb_test_{}_{}.db", tag, std::process::id()));
+        p.push(format!(
+            "bn_agent_cb_test_{}_{}.db",
+            tag,
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&p);
         p.to_string_lossy().to_string()
     }

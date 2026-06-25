@@ -12,10 +12,10 @@
 //! - `chat_id` 缺失 → 从注册表中补全
 
 use actix::prelude::*;
+use parking_lot::Mutex;
 use plugin_interface::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::Instant;
 
 // ── Channel state ─────────────────────────────────────────────────────────────
@@ -143,6 +143,11 @@ impl MessageRouter {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let requested_request_id = data
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         // 4. 确定目标列表
         let channels = self.channels.lock();
@@ -159,7 +164,13 @@ impl MessageRouter {
             let chat_id = requested_chat_id.clone().or_else(|| target.chat_id.clone());
             let peer_id = requested_peer_id.clone().or_else(|| target.peer_id.clone());
 
-            let payload = build_route_payload(&text, &target.source, &chat_id, &peer_id);
+            let payload = build_route_payload(
+                &text,
+                &target.source,
+                &chat_id,
+                &peer_id,
+                &requested_request_id,
+            );
 
             self.event_bus
                 .do_send(Event::new("assistant.message", payload, "message-router"));
@@ -257,6 +268,7 @@ fn build_route_payload(
     target_source: &str,
     chat_id: &Option<String>,
     peer_id: &Option<String>,
+    request_id: &Option<String>,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({
         "text": text,
@@ -264,6 +276,9 @@ fn build_route_payload(
     });
     if let Some(pid) = peer_id {
         payload["peer_id"] = serde_json::json!(pid);
+    }
+    if let Some(rid) = request_id {
+        payload["request_id"] = serde_json::json!(rid);
     }
     if let Some(cid) = chat_id {
         if let Ok(n) = cid.parse::<i64>() {
@@ -338,7 +353,7 @@ mod tests {
 
     #[test]
     fn payload_numeric_chat_id_is_i64() {
-        let p = build_route_payload("hi", "telegram", &Some("123".to_string()), &None);
+        let p = build_route_payload("hi", "telegram", &Some("123".to_string()), &None, &None);
         assert_eq!(p["chat_id"], serde_json::json!(123));
         assert_eq!(p["text"], "hi");
         assert_eq!(p["source"], "telegram");
@@ -346,14 +361,26 @@ mod tests {
 
     #[test]
     fn payload_non_numeric_chat_id_is_string() {
-        let p = build_route_payload("hi", "wechat", &Some("wxid_abc".to_string()), &None);
+        let p = build_route_payload("hi", "wechat", &Some("wxid_abc".to_string()), &None, &None);
         assert_eq!(p["chat_id"], serde_json::json!("wxid_abc"));
     }
 
     #[test]
     fn payload_includes_peer_id_and_omits_missing_chat_id() {
-        let p = build_route_payload("hi", "telegram", &None, &Some("telegram:1".to_string()));
+        let p = build_route_payload(
+            "hi",
+            "telegram",
+            &None,
+            &Some("telegram:1".to_string()),
+            &None,
+        );
         assert_eq!(p["peer_id"], serde_json::json!("telegram:1"));
         assert!(p.get("chat_id").is_none());
+    }
+
+    #[test]
+    fn payload_preserves_request_id() {
+        let p = build_route_payload("hi", "telegram", &None, &None, &Some("req-1".to_string()));
+        assert_eq!(p["request_id"], serde_json::json!("req-1"));
     }
 }

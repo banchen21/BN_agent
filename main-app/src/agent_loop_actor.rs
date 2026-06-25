@@ -4,13 +4,13 @@
 //! while agent loops run as explicit goal-driven jobs with budgets and status APIs.
 
 use actix::prelude::*;
+use parking_lot::Mutex;
 use plugin_interface::*;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::metrics_actor::MetricsActor;
@@ -36,12 +36,46 @@ pub enum AgentLoopStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopPlanStatus {
+    Pending,
+    InProgress,
+    Done,
+    Blocked,
+    Skipped,
+}
+
+impl Default for AgentLoopPlanStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentLoopPlanItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, deserialize_with = "deserialize_plan_status")]
+    pub status: AgentLoopPlanStatus,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub children: Vec<AgentLoopPlanItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentLoopStep {
     pub step: usize,
     pub status: AgentLoopStatus,
     pub llm_message: String,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub reflection: Option<String>,
+    #[serde(default)]
+    pub correction: Option<String>,
     pub tool_calls: Vec<String>,
     pub tool_results: Vec<String>,
     pub elapsed_ms: u64,
@@ -57,6 +91,8 @@ pub struct AgentLoopSnapshot {
     pub max_steps: usize,
     pub max_tool_rounds: usize,
     pub steps_taken: usize,
+    #[serde(default)]
+    pub plan: Vec<AgentLoopPlanItem>,
     pub observations: Vec<AgentLoopStep>,
     pub error: Option<String>,
     pub created_at_ms: u64,
@@ -169,7 +205,13 @@ impl AgentLoopActor {
         let items: Vec<(String, AgentLoopStatus, u64)> = self
             .loops
             .iter()
-            .map(|(id, st)| (id.clone(), st.snapshot.status.clone(), st.snapshot.updated_at_ms))
+            .map(|(id, st)| {
+                (
+                    id.clone(),
+                    st.snapshot.status.clone(),
+                    st.snapshot.updated_at_ms,
+                )
+            })
             .collect();
         let to_remove = terminal_ids_to_prune(&items, keep);
         if to_remove.is_empty() {
@@ -228,6 +270,7 @@ struct AgentLoopProgress {
     id: String,
     step: Option<AgentLoopStep>,
     status: Option<AgentLoopStatus>,
+    plan: Option<Vec<AgentLoopPlanItem>>,
     error: Option<String>,
 }
 
@@ -282,6 +325,7 @@ impl AgentLoopActor {
             max_steps,
             max_tool_rounds,
             steps_taken: 0,
+            plan: Vec::new(),
             observations: Vec::new(),
             error: None,
             created_at_ms: now,
@@ -328,7 +372,13 @@ impl Handler<StartAgentLoop> for AgentLoopActor {
     type Result = Result<AgentLoopSnapshot, String>;
 
     fn handle(&mut self, msg: StartAgentLoop, ctx: &mut Self::Context) -> Self::Result {
-        self.start_loop_internal(msg.goal, msg.peer_id, msg.max_steps, msg.max_tool_rounds, ctx)
+        self.start_loop_internal(
+            msg.goal,
+            msg.peer_id,
+            msg.max_steps,
+            msg.max_tool_rounds,
+            ctx,
+        )
     }
 }
 
@@ -489,6 +539,9 @@ impl Handler<AgentLoopProgress> for AgentLoopActor {
                 state.snapshot.status = status;
             }
         }
+        if let Some(plan) = msg.plan {
+            state.snapshot.plan = plan;
+        }
         if let Some(error) = msg.error {
             state.snapshot.error = Some(error);
         }
@@ -518,6 +571,7 @@ struct AgentLoopRunner {
 impl AgentLoopRunner {
     async fn run(self) {
         let mut observations: Vec<String> = Vec::new();
+        let mut plan: Vec<AgentLoopPlanItem> = Vec::new();
         let mut final_status = AgentLoopStatus::Completed;
         let mut final_error: Option<String> = None;
         let loop_start = Instant::now();
@@ -536,9 +590,7 @@ impl AgentLoopRunner {
             }
 
             // 暂停：pause_flag 置位且未请求停止时，循环等待恢复
-            while self.pause_flag.load(Ordering::SeqCst)
-                && !self.stop_flag.load(Ordering::SeqCst)
-            {
+            while self.pause_flag.load(Ordering::SeqCst) && !self.stop_flag.load(Ordering::SeqCst) {
                 actix::clock::sleep(Duration::from_millis(200)).await;
             }
             if self.stop_flag.load(Ordering::SeqCst) {
@@ -547,14 +599,20 @@ impl AgentLoopRunner {
             }
 
             let step_start = Instant::now();
-            let result = self.run_step(step_index, &observations).await;
+            let result = self.run_step(step_index, &observations, &plan).await;
             match result {
                 Ok(step_outcome) => {
+                    let plan_update = step_outcome.plan.clone();
+                    if let Some(updated_plan) = plan_update.clone() {
+                        plan = updated_plan;
+                    }
                     let step = AgentLoopStep {
                         step: step_index,
                         status: step_outcome.status.clone(),
                         llm_message: step_outcome.message.clone(),
                         reason: step_outcome.reason.clone(),
+                        reflection: step_outcome.reflection.clone(),
+                        correction: step_outcome.correction.clone(),
                         tool_calls: step_outcome.tool_calls.clone(),
                         tool_results: step_outcome.tool_results.clone(),
                         elapsed_ms: step_start.elapsed().as_millis() as u64,
@@ -564,6 +622,7 @@ impl AgentLoopRunner {
                         id: self.id.clone(),
                         step: Some(step.clone()),
                         status: Some(AgentLoopStatus::Running),
+                        plan: plan_update,
                         error: None,
                     });
                     self.event_bus.do_send(Event::new(
@@ -573,7 +632,10 @@ impl AgentLoopRunner {
                             "step": step_index,
                             "status": step.status,
                             "message": step.llm_message,
+                            "reflection": step.reflection,
+                            "correction": step.correction,
                             "tool_calls": step.tool_calls,
+                            "plan": plan,
                         }),
                         "agent-loop",
                     ));
@@ -615,6 +677,7 @@ impl AgentLoopRunner {
                         id: self.id.clone(),
                         step: None,
                         status: Some(AgentLoopStatus::Failed),
+                        plan: None,
                         error: Some(error),
                     });
                     break;
@@ -630,6 +693,7 @@ impl AgentLoopRunner {
             id: self.id.clone(),
             step: None,
             status: Some(final_status.clone()),
+            plan: None,
             error: final_error.clone(),
         });
         self.event_bus.do_send(Event::new(
@@ -647,6 +711,7 @@ impl AgentLoopRunner {
         &self,
         step_index: usize,
         observations: &[String],
+        plan: &[AgentLoopPlanItem],
     ) -> Result<StepOutcome, String> {
         let _ = self
             .plugin_manager
@@ -657,7 +722,7 @@ impl AgentLoopRunner {
         let contexts = self.snapshots.lock().clone();
         let tool_deny = agent_loop_tool_deny();
         let tools = collect_tool_defs(&self.tool_registry, &tool_deny);
-        let prompt = build_loop_prompt(&self.goal, observations, step_index, self.max_steps);
+        let prompt = build_loop_prompt(&self.goal, observations, plan, step_index, self.max_steps);
         let request_id = format!("agent-loop-{}-s{}", self.id, step_index);
 
         let mut response = self
@@ -694,6 +759,9 @@ impl AgentLoopRunner {
                     status: AgentLoopStatus::Stopped,
                     message: "stopped".into(),
                     reason: None,
+                    reflection: None,
+                    correction: None,
+                    plan: None,
                     sleep_seconds: None,
                     tool_calls: tool_call_names(&all_tool_calls),
                     tool_results: all_tool_results,
@@ -742,6 +810,12 @@ impl AgentLoopRunner {
                 status: AgentLoopStatus::Failed,
                 message: "工具调用轮次已达到上限，Agent Loop 已停止。".into(),
                 reason: Some("tool round budget exhausted".into()),
+                reflection: None,
+                correction: Some(
+                    "工具调用轮次达到上限；需要缩小步骤、减少连续工具调用或改用可验证的替代路径。"
+                        .into(),
+                ),
+                plan: None,
                 sleep_seconds: None,
                 tool_calls: tool_call_names(&all_tool_calls),
                 tool_results: all_tool_results,
@@ -759,11 +833,22 @@ impl AgentLoopRunner {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| response.content.clone());
+        let correction_required = observations_need_correction(observations)
+            || tool_results_need_correction(&all_tool_results);
 
         Ok(StepOutcome {
             status,
             message,
             reason: decision.reason,
+            reflection: decision.reflection,
+            correction: decision.correction.or_else(|| {
+                if correction_required {
+                    Some("检测到前序失败；下一步需要更新计划、说明替代路径，并避免原样重复失败动作。".into())
+                } else {
+                    None
+                }
+            }),
+            plan: decision.plan,
             sleep_seconds: decision.sleep_seconds,
             tool_calls: tool_call_names(&all_tool_calls),
             tool_results: all_tool_results,
@@ -820,6 +905,9 @@ struct StepOutcome {
     status: AgentLoopStatus,
     message: String,
     reason: Option<String>,
+    reflection: Option<String>,
+    correction: Option<String>,
+    plan: Option<Vec<AgentLoopPlanItem>>,
     sleep_seconds: Option<u64>,
     tool_calls: Vec<String>,
     tool_results: Vec<String>,
@@ -830,7 +918,33 @@ struct LoopDecision {
     status: Option<String>,
     message: Option<String>,
     reason: Option<String>,
+    reflection: Option<String>,
+    #[serde(default, alias = "self_correction", alias = "recovery_plan")]
+    correction: Option<String>,
+    #[serde(default, alias = "tasks")]
+    plan: Option<Vec<AgentLoopPlanItem>>,
     sleep_seconds: Option<u64>,
+}
+
+fn deserialize_plan_status<'de, D>(deserializer: D) -> Result<AgentLoopPlanStatus, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value
+        .as_deref()
+        .map(plan_status_from_str)
+        .unwrap_or_default())
+}
+
+fn plan_status_from_str(status: &str) -> AgentLoopPlanStatus {
+    match status.trim().to_lowercase().as_str() {
+        "in_progress" | "in-progress" | "doing" | "active" => AgentLoopPlanStatus::InProgress,
+        "done" | "completed" | "complete" => AgentLoopPlanStatus::Done,
+        "blocked" | "waiting" => AgentLoopPlanStatus::Blocked,
+        "skipped" | "skip" | "cancelled" | "canceled" => AgentLoopPlanStatus::Skipped,
+        _ => AgentLoopPlanStatus::Pending,
+    }
 }
 
 /// 读取 Agent Loop 最大并发数（env `AGENT_LOOP_MAX_CONCURRENT`，0=不限）。
@@ -900,8 +1014,7 @@ fn collect_tool_defs(
     deny: &[String],
 ) -> Vec<serde_json::Value> {
     let reg = tool_registry.lock();
-    reg
-        .all_defs()
+    reg.all_defs()
         .iter()
         .filter(|d| !d.internal && !is_tool_denied(&d.name, deny))
         .map(|d| {
@@ -975,6 +1088,7 @@ fn tool_call_names(tool_calls: &[ToolCall]) -> Vec<String> {
 fn build_loop_prompt(
     goal: &str,
     observations: &[String],
+    plan: &[AgentLoopPlanItem],
     step_index: usize,
     max_steps: usize,
 ) -> String {
@@ -983,10 +1097,82 @@ fn build_loop_prompt(
     } else {
         observations.join("\n\n")
     };
+    let plan_text = format_plan(plan);
+    let correction_hint = build_correction_hint(observations);
     format!(
-        "[系统·Agent Loop]\n目标：{}\n当前步数：{}/{}\n已有观察：\n{}\n\n请执行一次 observe -> decide -> act。你可以调用可用工具完成下一步行动。\n如果需要行动，请直接调用工具。工具执行结果会作为 observation 进入下一轮。\n如果不需要工具，请严格输出 JSON，不要包裹 Markdown：\n{{\"status\":\"continue|done|ask_user\",\"message\":\"你对本步的简短观察或最终结论\",\"reason\":\"为什么这样判断\",\"sleep_seconds\":0}}\n状态含义：continue=还要继续；done=目标完成；ask_user=需要用户补充信息。",
-        goal, step_index, max_steps, observation_text
+        "[系统·Agent Loop]\n目标：{}\n当前步数：{}/{}\n当前计划：\n{}\n\n已有观察：\n{}{}\n\n请执行一次 observe -> decide -> act。你可以调用可用工具完成下一步行动。\n如果需要行动，请直接调用工具。工具执行结果会作为 observation 进入下一轮。\n如果不需要工具，请严格输出 JSON，不要包裹 Markdown；第一步、计划变化或失败修正时必须带上完整 plan：\n{{\"status\":\"continue|done|ask_user|failed\",\"message\":\"本步的简短观察或最终结论\",\"reason\":\"为什么这样判断\",\"reflection\":\"本步学到的约束、风险或下一步调整，保持一句话\",\"correction\":\"若前序失败，本步如何修正：改参数、改路径、标记阻塞或向用户确认\",\"sleep_seconds\":0,\"plan\":[{{\"id\":\"1\",\"title\":\"任务标题\",\"status\":\"pending|in_progress|done|blocked|skipped\",\"notes\":\"可选备注\",\"children\":[]}}]}}\n状态含义：continue=还要继续；done=目标完成；ask_user=需要用户补充信息；failed=无法继续。",
+        goal, step_index, max_steps, plan_text, observation_text, correction_hint
     )
+}
+
+fn build_correction_hint(observations: &[String]) -> String {
+    if observations_need_correction(observations) {
+        "\n\n失败自我修正要求：上一步或更早的 observation 出现工具错误、LLM 错误、预算耗尽或 failed 状态。下一步必须先写 correction，说明失败原因和修正策略；必须更新 plan，把失败分支标为 blocked/skipped 或写出替代路径；不要原样重复刚失败的工具调用，除非 correction 明确说明改变了参数、前置条件或验证方式。除非目标逻辑上不可能，否则优先 continue 或 ask_user，不要直接 failed。".to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn observations_need_correction(observations: &[String]) -> bool {
+    observations
+        .iter()
+        .any(|observation| observation_indicates_failure(observation))
+}
+
+fn tool_results_need_correction(results: &[String]) -> bool {
+    results
+        .iter()
+        .any(|result| observation_indicates_failure(result))
+}
+
+fn observation_indicates_failure(observation: &str) -> bool {
+    let lower = observation.to_ascii_lowercase();
+    observation.contains("错误：")
+        || observation.contains("该工具已被 Agent Loop 策略禁用")
+        || lower.contains("[failed]")
+        || lower.contains("failed")
+        || lower.contains("error")
+        || lower.contains("timeout")
+        || observation.contains("达到上限")
+        || observation.contains("预算耗尽")
+}
+
+fn format_plan(plan: &[AgentLoopPlanItem]) -> String {
+    if plan.is_empty() {
+        return "（暂无，第一步请先拆解计划）".to_string();
+    }
+    let mut lines = Vec::new();
+    for item in plan {
+        format_plan_item(item, 0, &mut lines);
+    }
+    lines.join("\n")
+}
+
+fn format_plan_item(item: &AgentLoopPlanItem, depth: usize, lines: &mut Vec<String>) {
+    let indent = "  ".repeat(depth);
+    let id = if item.id.trim().is_empty() {
+        "-".to_string()
+    } else {
+        item.id.clone()
+    };
+    let title = if item.title.trim().is_empty() {
+        "未命名任务".to_string()
+    } else {
+        item.title.clone()
+    };
+    let notes = item
+        .notes
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" ({})", s))
+        .unwrap_or_default();
+    lines.push(format!(
+        "{}- {} [{:?}]: {}{}",
+        indent, id, item.status, title, notes
+    ));
+    for child in &item.children {
+        format_plan_item(child, depth + 1, lines);
+    }
 }
 
 fn parse_loop_decision(content: &str) -> LoopDecision {
@@ -995,6 +1181,9 @@ fn parse_loop_decision(content: &str) -> LoopDecision {
         status: None,
         message: Some(content.trim().to_string()),
         reason: None,
+        reflection: None,
+        correction: None,
+        plan: None,
         sleep_seconds: None,
     })
 }
@@ -1026,11 +1215,25 @@ fn format_observation(step: &AgentLoopStep) -> String {
     } else {
         step.tool_calls.join(", ")
     };
+    let reflection = step
+        .reflection
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("\n反思：{}", s))
+        .unwrap_or_default();
+    let correction = step
+        .correction
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("\n修正：{}", s))
+        .unwrap_or_default();
     format!(
-        "Step {} [{:?}]\n消息：{}\n工具：{}\n结果：{}",
+        "Step {} [{:?}]\n消息：{}{}{}\n工具：{}\n结果：{}",
         step.step,
         step.status,
         step.llm_message,
+        reflection,
+        correction,
         tools,
         step.tool_results.join("\n")
     )
@@ -1178,7 +1381,10 @@ impl AgentLoopPersist {
     /// 从持久化删除指定 id 的 loop（清理终态旧记录）。
     fn prune(&self, ids: &[String]) {
         for id in ids {
-            if let Err(e) = self.conn.execute("DELETE FROM agent_loops WHERE id = ?1", [id]) {
+            if let Err(e) = self
+                .conn
+                .execute("DELETE FROM agent_loops WHERE id = ?1", [id])
+            {
                 log::warn!("[AgentLoopActor] prune loop {} failed: {}", id, e);
             }
         }
@@ -1225,6 +1431,8 @@ mod tests {
             status: AgentLoopStatus::Running,
             llm_message: "hello".into(),
             reason: None,
+            reflection: Some("reflect".into()),
+            correction: Some("adjust".into()),
             tool_calls: vec!["tool_a".into()],
             tool_results: vec!["result_a".into()],
             elapsed_ms: 10,
@@ -1241,6 +1449,7 @@ mod tests {
             max_steps: 8,
             max_tool_rounds: 5,
             steps_taken: 0,
+            plan: Vec::new(),
             observations: Vec::new(),
             error: None,
             created_at_ms: 1,
@@ -1250,7 +1459,11 @@ mod tests {
 
     fn temp_db_path(tag: &str) -> String {
         let mut p = std::env::temp_dir();
-        p.push(format!("bn_agent_loop_test_{}_{}.db", tag, std::process::id()));
+        p.push(format!(
+            "bn_agent_loop_test_{}_{}.db",
+            tag,
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&p);
         p.to_string_lossy().to_string()
     }
@@ -1354,11 +1567,67 @@ mod tests {
     }
 
     #[test]
+    fn parse_loop_decision_extracts_plan_and_reflection() {
+        let d = parse_loop_decision(
+            r#"{"status":"continue","message":"m","reflection":"learned","correction":"retry differently","plan":[{"id":"1","title":"Root","status":"in_progress","children":[{"id":"1.1","title":"Child","status":"done"}]}]}"#,
+        );
+        assert_eq!(d.reflection.as_deref(), Some("learned"));
+        assert_eq!(d.correction.as_deref(), Some("retry differently"));
+        let plan = d.plan.expect("plan");
+        assert_eq!(plan[0].status, AgentLoopPlanStatus::InProgress);
+        assert_eq!(plan[0].children[0].status, AgentLoopPlanStatus::Done);
+    }
+
+    #[test]
+    fn parse_loop_decision_accepts_correction_aliases() {
+        let d = parse_loop_decision(
+            r#"{"status":"continue","message":"m","self_correction":"change args"}"#,
+        );
+        assert_eq!(d.correction.as_deref(), Some("change args"));
+
+        let d = parse_loop_decision(
+            r#"{"status":"continue","message":"m","recovery_plan":"ask user"}"#,
+        );
+        assert_eq!(d.correction.as_deref(), Some("ask user"));
+    }
+
+    #[test]
+    fn plan_status_from_str_maps_variants() {
+        assert_eq!(
+            plan_status_from_str("pending"),
+            AgentLoopPlanStatus::Pending
+        );
+        assert_eq!(
+            plan_status_from_str("doing"),
+            AgentLoopPlanStatus::InProgress
+        );
+        assert_eq!(plan_status_from_str("complete"), AgentLoopPlanStatus::Done);
+        assert_eq!(
+            plan_status_from_str("waiting"),
+            AgentLoopPlanStatus::Blocked
+        );
+        assert_eq!(
+            plan_status_from_str("cancelled"),
+            AgentLoopPlanStatus::Skipped
+        );
+        assert_eq!(
+            plan_status_from_str("unknown"),
+            AgentLoopPlanStatus::Pending
+        );
+    }
+
+    #[test]
     fn status_from_decision_maps_variants() {
         assert_eq!(status_from_decision("done"), AgentLoopStatus::Completed);
         assert_eq!(status_from_decision("complete"), AgentLoopStatus::Completed);
-        assert_eq!(status_from_decision("ask_user"), AgentLoopStatus::WaitingForUser);
-        assert_eq!(status_from_decision("need_user"), AgentLoopStatus::WaitingForUser);
+        assert_eq!(
+            status_from_decision("ask_user"),
+            AgentLoopStatus::WaitingForUser
+        );
+        assert_eq!(
+            status_from_decision("need_user"),
+            AgentLoopStatus::WaitingForUser
+        );
         assert_eq!(status_from_decision("failed"), AgentLoopStatus::Failed);
         assert_eq!(status_from_decision("error"), AgentLoopStatus::Failed);
         assert_eq!(status_from_decision("stopped"), AgentLoopStatus::Stopped);
@@ -1369,7 +1638,10 @@ mod tests {
     #[test]
     fn status_from_decision_case_insensitive_and_trimmed() {
         assert_eq!(status_from_decision("  DONE  "), AgentLoopStatus::Completed);
-        assert_eq!(status_from_decision("Ask_User"), AgentLoopStatus::WaitingForUser);
+        assert_eq!(
+            status_from_decision("Ask_User"),
+            AgentLoopStatus::WaitingForUser
+        );
     }
 
     #[test]
@@ -1390,6 +1662,7 @@ mod tests {
         let s = format_observation(&sample_step());
         assert!(s.contains("Step 2"));
         assert!(s.contains("hello"));
+        assert!(s.contains("修正：adjust"));
         assert!(s.contains("tool_a"));
         assert!(s.contains("result_a"));
     }
@@ -1403,19 +1676,61 @@ mod tests {
 
     #[test]
     fn build_loop_prompt_includes_goal_step_and_empty_obs() {
-        let prompt = build_loop_prompt("my goal", &[], 1, 5);
+        let prompt = build_loop_prompt("my goal", &[], &[], 1, 5);
         assert!(prompt.contains("my goal"));
         assert!(prompt.contains("1/5"));
         assert!(prompt.contains("（暂无）"));
+        assert!(prompt.contains("第一步请先拆解计划"));
+        assert!(!prompt.contains("失败自我修正要求"));
     }
 
     #[test]
     fn build_loop_prompt_includes_observations() {
         let obs = vec!["obs-1".to_string(), "obs-2".to_string()];
-        let prompt = build_loop_prompt("g", &obs, 3, 8);
+        let prompt = build_loop_prompt("g", &obs, &[], 3, 8);
         assert!(prompt.contains("obs-1"));
         assert!(prompt.contains("obs-2"));
         assert!(prompt.contains("3/8"));
+    }
+
+    #[test]
+    fn observations_need_correction_detects_failures() {
+        assert!(observations_need_correction(&["【tool】错误：boom".into()]));
+        assert!(observations_need_correction(&["Step 1 [Failed]".into()]));
+        assert!(!observations_need_correction(&[
+            "Step 1 [Running]\n结果：ok".into()
+        ]));
+    }
+
+    #[test]
+    fn build_loop_prompt_includes_correction_hint_after_failure() {
+        let observations = vec!["Step 1 [Running]\n结果：【tool】错误：bad args".to_string()];
+        let prompt = build_loop_prompt("g", &observations, &[], 2, 5);
+
+        assert!(prompt.contains("失败自我修正要求"));
+        assert!(prompt.contains("不要原样重复刚失败的工具调用"));
+        assert!(prompt.contains("\"correction\""));
+    }
+
+    #[test]
+    fn format_plan_includes_nested_items() {
+        let plan = vec![AgentLoopPlanItem {
+            id: "1".into(),
+            title: "Root".into(),
+            status: AgentLoopPlanStatus::InProgress,
+            notes: Some("note".into()),
+            children: vec![AgentLoopPlanItem {
+                id: "1.1".into(),
+                title: "Child".into(),
+                status: AgentLoopPlanStatus::Pending,
+                notes: None,
+                children: Vec::new(),
+            }],
+        }];
+        let text = format_plan(&plan);
+        assert!(text.contains("Root"));
+        assert!(text.contains("note"));
+        assert!(text.contains("Child"));
     }
 
     #[test]
@@ -1530,7 +1845,11 @@ mod tests {
         let mut status = AgentLoopStatus::Running;
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            if let Some(s) = actor.send(GetAgentLoop { id: id.to_string() }).await.unwrap() {
+            if let Some(s) = actor
+                .send(GetAgentLoop { id: id.to_string() })
+                .await
+                .unwrap()
+            {
                 status = s.status.clone();
                 if status != AgentLoopStatus::Running {
                     break;
@@ -1542,7 +1861,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn start_rejects_empty_goal() {
-        let llm = MockLlm { response: "{}".into() }.start();
+        let llm = MockLlm {
+            response: "{}".into(),
+        }
+        .start();
         let actor = build_actor(llm.recipient()).start();
         let res = actor
             .send(StartAgentLoop {
@@ -1598,6 +1920,43 @@ mod tests {
             .unwrap();
         let status = wait_terminal(&actor, &snap.id).await;
         assert_eq!(status, AgentLoopStatus::Completed);
+    }
+
+    #[actix_rt::test]
+    async fn loop_stores_plan_and_reflection_from_llm() {
+        let llm = MockLlm {
+            response: r#"{"status":"done","message":"完成","reflection":"计划已收敛","correction":"无需修正","plan":[{"id":"1","title":"确认目标","status":"done"}]}"#.into(),
+        }
+        .start();
+        let actor = build_actor(llm.recipient()).start();
+        let snap = actor
+            .send(StartAgentLoop {
+                goal: "g".into(),
+                peer_id: Some("test:peer".into()),
+                max_steps: Some(2),
+                max_tool_rounds: Some(0),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let status = wait_terminal(&actor, &snap.id).await;
+        assert_eq!(status, AgentLoopStatus::Completed);
+
+        let stored = actor
+            .send(GetAgentLoop { id: snap.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.plan.len(), 1);
+        assert_eq!(stored.plan[0].status, AgentLoopPlanStatus::Done);
+        assert_eq!(
+            stored.observations[0].reflection.as_deref(),
+            Some("计划已收敛")
+        );
+        assert_eq!(
+            stored.observations[0].correction.as_deref(),
+            Some("无需修正")
+        );
     }
 
     #[actix_rt::test]
@@ -1703,7 +2062,10 @@ mod tests {
         assert_eq!(s2.status, AgentLoopStatus::Paused);
         assert_eq!(s2.steps_taken, steps_when_paused);
 
-        let resumed = actor.send(ResumeAgentLoop { id: id.clone() }).await.unwrap();
+        let resumed = actor
+            .send(ResumeAgentLoop { id: id.clone() })
+            .await
+            .unwrap();
         assert!(resumed);
 
         // 恢复后继续推进，continue 跑满 max_steps → Completed
@@ -1813,7 +2175,11 @@ mod tests {
         .start();
         let actor = build_actor(llm.recipient()).start();
         actor
-            .send(Event::new("agent.loop.start", serde_json::json!({}), "test"))
+            .send(Event::new(
+                "agent.loop.start",
+                serde_json::json!({}),
+                "test",
+            ))
             .await
             .unwrap();
         assert_eq!(actor.send(ListAgentLoops).await.unwrap().len(), 0);

@@ -25,13 +25,10 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self as ct_event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Color, Colors, Print, ResetColor, SetColors};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use plugin_interface::{
-    Addr, Event as PluginEvent, EventBus, Plugin, PluginContext, PluginInfo,
-};
+use plugin_interface::{Addr, Event as PluginEvent, EventBus, Plugin, PluginContext, PluginInfo};
 use std::io::{stdout, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -207,7 +204,10 @@ fn tui_run_inner(
     let messages_clone = messages.clone();
 
     // 产线消息：显示系统启动提示。
-    messages_clone.lock().unwrap().push("  TUI 聊天界面已启动。输入 /quit 退出 TUI。".into());
+    messages_clone
+        .lock()
+        .unwrap()
+        .push("  TUI 聊天界面已启动。输入 /quit 退出 TUI。".into());
 
     // ── 输入缓冲区 ──
     let mut input: String = String::new();
@@ -300,7 +300,14 @@ fn tui_run_inner(
 
         // ── 重绘屏幕 ──
         if needs_repaint {
-            draw_screen(&mut stdout, term_w, term_h, &messages_clone, &input, input_line);
+            draw_screen(
+                &mut stdout,
+                term_w,
+                term_h,
+                &messages_clone,
+                &input,
+                input_line,
+            );
             needs_repaint = false;
         }
     }
@@ -328,11 +335,12 @@ fn draw_screen(
     let _ = stdout.execute(Clear(ClearType::All));
 
     // ── 标题行 ──
-    let _ = stdout.execute(SetColors(Colors::new(
-        Color::White,
-        Color::DarkBlue,
-    )));
-    let title = format!("{:^width$}", " BN Agent — Chat TUI (Ctrl+C / /quit 退出) ", width = w as usize);
+    let _ = stdout.execute(SetColors(Colors::new(Color::White, Color::DarkBlue)));
+    let title = format!(
+        "{:^width$}",
+        " BN Agent — Chat TUI (Ctrl+C / /quit 退出) ",
+        width = w as usize
+    );
     let _ = stdout.execute(Print(&title[..title.len().min(w as usize)]));
     let _ = stdout.execute(ResetColor);
     let _ = stdout.execute(MoveTo(0, 0));
@@ -362,7 +370,8 @@ fn draw_screen(
         let display = if msg.len() > w as usize {
             let max = w as usize;
             // 找到 ≤ max-4 的最近字符边界
-            let cut = msg.char_indices()
+            let cut = msg
+                .char_indices()
                 .take_while(|(i, _)| *i < max.saturating_sub(4))
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
@@ -390,7 +399,8 @@ fn draw_screen(
     let input_display = if input.len() > (w as usize).saturating_sub(prompt.len() + 1) {
         let max_w = w as usize;
         // 从末尾找最近的安全字符边界
-        let cut = input.char_indices()
+        let cut = input
+            .char_indices()
             .rev()
             .find(|(i, _)| *i >= input.len().saturating_sub(max_w - prompt.len() - 1))
             .map(|(i, _)| i)

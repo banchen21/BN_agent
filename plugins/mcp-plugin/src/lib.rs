@@ -37,10 +37,18 @@ impl McpConnection {
             .map_err(|e| format!("spawn '{}': {}", command, e))?;
 
         let stdin = child.stdin.take().ok_or("stdin not available")?;
-        Ok(Self { process: child, stdin, next_id: 1 })
+        Ok(Self {
+            process: child,
+            stdin,
+            next_id: 1,
+        })
     }
 
-    fn call(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    fn call(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -54,7 +62,8 @@ impl McpConnection {
         let mut line = serde_json::to_string(&request).map_err(|e| format!("serialize: {}", e))?;
         line.push('\n');
 
-        self.stdin.write_all(line.as_bytes())
+        self.stdin
+            .write_all(line.as_bytes())
             .and_then(|_| self.stdin.flush())
             .map_err(|e| format!("write: {}", e))?;
 
@@ -63,16 +72,26 @@ impl McpConnection {
         let mut buf = String::new();
         loop {
             buf.clear();
-            reader.read_line(&mut buf).map_err(|e| format!("read: {}", e))?;
-            if buf.trim().is_empty() { continue; }
-            let parsed: serde_json::Value = serde_json::from_str(&buf)
-                .map_err(|e| format!("parse: {}", e))?;
+            reader
+                .read_line(&mut buf)
+                .map_err(|e| format!("read: {}", e))?;
+            if buf.trim().is_empty() {
+                continue;
+            }
+            let parsed: serde_json::Value =
+                serde_json::from_str(&buf).map_err(|e| format!("parse: {}", e))?;
             if parsed.get("id").and_then(|v| v.as_u64()) == Some(id) {
                 if let Some(err) = parsed.get("error") {
-                    let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let msg = err
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     return Err(msg.to_string());
                 }
-                return Ok(parsed.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                return Ok(parsed
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
             }
         }
     }
@@ -112,7 +131,9 @@ impl McpPlugin {
 }
 
 impl Plugin for McpPlugin {
-    fn info(&self) -> PluginInfo { self.info.clone() }
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         if self.servers.is_empty() {
@@ -120,31 +141,55 @@ impl Plugin for McpPlugin {
             return Ok(());
         }
 
-        log::info!("[mcp] connecting to {} MCP server(s)...", self.servers.len());
+        log::info!(
+            "[mcp] connecting to {} MCP server(s)...",
+            self.servers.len()
+        );
 
         for config in &self.servers {
-            log::info!("[mcp:{}] spawning: {} {}", config.name, config.command, config.args.join(" "));
+            log::info!(
+                "[mcp:{}] spawning: {} {}",
+                config.name,
+                config.command,
+                config.args.join(" ")
+            );
 
             let mut conn = match McpConnection::spawn(&config.command, &config.args) {
                 Ok(c) => c,
-                Err(e) => { log::warn!("[mcp:{}] spawn failed: {}", config.name, e); continue; }
+                Err(e) => {
+                    log::warn!("[mcp:{}] spawn failed: {}", config.name, e);
+                    continue;
+                }
             };
 
-            match conn.call("initialize", Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "bn-agent", "version": "0.1.0" },
-            }))) {
+            match conn.call(
+                "initialize",
+                Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "bn-agent", "version": "0.1.0" },
+                })),
+            ) {
                 Ok(_) => {
                     let _ = conn.call("notifications/initialized", None);
                     log::info!("[mcp:{}] initialized", config.name);
                 }
-                Err(e) => { log::warn!("[mcp:{}] init failed: {}", config.name, e); continue; }
+                Err(e) => {
+                    log::warn!("[mcp:{}] init failed: {}", config.name, e);
+                    continue;
+                }
             }
 
             let tool_list = match conn.call("tools/list", None) {
-                Ok(r) => r.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
-                Err(e) => { log::warn!("[mcp:{}] tools/list failed: {}", config.name, e); continue; }
+                Ok(r) => r
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                Err(e) => {
+                    log::warn!("[mcp:{}] tools/list failed: {}", config.name, e);
+                    continue;
+                }
             };
 
             {
@@ -155,9 +200,19 @@ impl Plugin for McpPlugin {
             if let Some(ref reg) = ctx.tool_registry {
                 let mut r = reg.lock();
                 for td in &tool_list {
-                    let tool_name = td.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                    let desc = td.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let input_schema = td.get("inputSchema").cloned()
+                    let tool_name = td
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let desc = td
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input_schema = td
+                        .get("inputSchema")
+                        .cloned()
                         .unwrap_or(serde_json::json!({"type":"object","properties":{}}));
 
                     let qname = format!("{}__{}", config.name, tool_name);
@@ -186,8 +241,12 @@ impl Plugin for McpPlugin {
         Ok(())
     }
 
-    fn on_event(&self, _event: &Event) -> bool { true }
-    fn stop(&mut self) { log::info!("[mcp] stopped"); }
+    fn on_event(&self, _event: &Event) -> bool {
+        true
+    }
+    fn stop(&mut self) {
+        log::info!("[mcp] stopped");
+    }
 }
 
 // ── Tool proxy ───────────────────────────────────────────────────────────────
@@ -207,7 +266,9 @@ impl ToolExecutor for McpToolProxy {
         let pool = MCP_POOL.lock().unwrap();
         let mutex = match pool.get(&self.server_name) {
             Some(m) => m,
-            None => return ToolResult::err(&format!("MCP server '{}' disconnected", self.server_name)),
+            None => {
+                return ToolResult::err(&format!("MCP server '{}' disconnected", self.server_name))
+            }
         };
         let mut conn = match mutex.lock() {
             Ok(c) => c,
@@ -219,12 +280,17 @@ impl ToolExecutor for McpToolProxy {
             map.remove("chat_id");
         }
 
-        match conn.call("tools/call", Some(serde_json::json!({
-            "name": self.tool_name,
-            "arguments": clean,
-        }))) {
+        match conn.call(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": self.tool_name,
+                "arguments": clean,
+            })),
+        ) {
             Ok(result) => {
-                let content = result.get("content").and_then(|c| c.as_array())
+                let content = result
+                    .get("content")
+                    .and_then(|c| c.as_array())
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|item| item.get("text").and_then(|t| t.as_str()))

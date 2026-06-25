@@ -25,7 +25,12 @@ struct ToyState {
 
 impl Default for ToyState {
     fn default() -> Self {
-        Self { frequency: 0, pattern: "constant".into(), locations: vec![], running: false }
+        Self {
+            frequency: 0,
+            pattern: "constant".into(),
+            locations: vec![],
+            running: false,
+        }
     }
 }
 
@@ -65,10 +70,13 @@ impl ToyControlPlugin {
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
-struct VibrateTool { state: StateRef }
+struct VibrateTool {
+    state: StateRef,
+}
 impl ToolExecutor for VibrateTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "toy_vibrate".into(),
             description: "控制你（齐悦）身上的跳蛋。设置震动频率(0-100)和位置：left_breast(左奶)、right_breast(右奶)、genital(小穴)、anal(肛门)。跳蛋在你身上，你可以随时调整。".into(),
             parameters: serde_json::json!({
@@ -84,28 +92,43 @@ impl ToolExecutor for VibrateTool {
                 "required": ["frequency", "locations"]
             }),
             internal: false,
+        }
         });
         &DEF
     }
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
         let freq: u8 = args.get("frequency").and_then(|v| v.as_u64()).unwrap_or(50) as u8;
         let freq = freq.min(100);
-        let locations: Vec<String> = args.get("locations")
+        let locations: Vec<String> = args
+            .get("locations")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut s = self.state.lock().unwrap();
-        s.frequency = freq; s.locations = locations; s.running = true;
+        s.frequency = freq;
+        s.locations = locations;
+        s.running = true;
         let labels: Vec<&str> = s.locations.iter().map(|l| loc_label(l)).collect();
-        ToolResult::ok(&format!("你身上的跳蛋已启动：{}%力度，位置：{}", freq, labels.join("、")))
+        ToolResult::ok(&format!(
+            "你身上的跳蛋已启动：{}%力度，位置：{}",
+            freq,
+            labels.join("、")
+        ))
     }
 }
 
-struct StopTool { state: StateRef }
+struct StopTool {
+    state: StateRef,
+}
 impl ToolExecutor for StopTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "toy_stop".into(), description: "停止你身上跳蛋的震动".into(),
+            name: "toy_stop".into(),
+            description: "停止你身上跳蛋的震动".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
             internal: false,
         });
@@ -113,17 +136,22 @@ impl ToolExecutor for StopTool {
     }
     fn execute(&self, _: &serde_json::Value) -> ToolResult {
         let mut s = self.state.lock().unwrap();
-        s.running = false; s.frequency = 0;
+        s.running = false;
+        s.frequency = 0;
         ToolResult::ok("你身上的跳蛋已停止")
     }
 }
 
-struct SetPatternTool { state: StateRef }
+struct SetPatternTool {
+    state: StateRef,
+}
 impl ToolExecutor for SetPatternTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
             name: "toy_set_pattern".into(),
-            description: "设置你身上跳蛋的震动模式：constant(恒定)、wave(波浪)、pulse(脉冲)、random(随机)".into(),
+            description:
+                "设置你身上跳蛋的震动模式：constant(恒定)、wave(波浪)、pulse(脉冲)、random(随机)"
+                    .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {"pattern": {"type": "string", "enum": ["constant","wave","pulse","random"]}},
@@ -134,17 +162,23 @@ impl ToolExecutor for SetPatternTool {
         &DEF
     }
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
-        let p = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("constant");
+        let p = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("constant");
         self.state.lock().unwrap().pattern = p.to_string();
         ToolResult::ok(&format!("你身上跳蛋的震动模式已切换为：{}", pat_label(p)))
     }
 }
 
-struct StatusTool { state: StateRef }
+struct StatusTool {
+    state: StateRef,
+}
 impl ToolExecutor for StatusTool {
     fn def(&self) -> &ToolDef {
         static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
-            name: "toy_status".into(), description: "查询你身上跳蛋的当前状态".into(),
+            name: "toy_status".into(),
+            description: "查询你身上跳蛋的当前状态".into(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
             internal: false,
         });
@@ -152,28 +186,50 @@ impl ToolExecutor for StatusTool {
     }
     fn execute(&self, _: &serde_json::Value) -> ToolResult {
         let s = self.state.lock().unwrap();
-        if !s.running { return ToolResult::ok("你身上的跳蛋当前未启动"); }
+        if !s.running {
+            return ToolResult::ok("你身上的跳蛋当前未启动");
+        }
         let labels: Vec<&str> = s.locations.iter().map(|l| loc_label(l)).collect();
-        ToolResult::ok(&format!("你身上跳蛋状态：{}%力度 | 模式：{} | 位置：{}",
-            s.frequency, pat_label(&s.pattern), labels.join("、")))
+        ToolResult::ok(&format!(
+            "你身上跳蛋状态：{}%力度 | 模式：{} | 位置：{}",
+            s.frequency,
+            pat_label(&s.pattern),
+            labels.join("、")
+        ))
     }
 }
 
 fn loc_label(k: &str) -> &str {
-    match k { "left_breast"=>"左奶","right_breast"=>"右奶","genital"=>"小穴","anal"=>"肛门", _=>k }
+    match k {
+        "left_breast" => "左奶",
+        "right_breast" => "右奶",
+        "genital" => "小穴",
+        "anal" => "肛门",
+        _ => k,
+    }
 }
 fn pat_label(k: &str) -> &str {
-    match k { "constant"=>"恒定","wave"=>"波浪","pulse"=>"脉冲","random"=>"随机", _=>k }
+    match k {
+        "constant" => "恒定",
+        "wave" => "波浪",
+        "pulse" => "脉冲",
+        "random" => "随机",
+        _ => k,
+    }
 }
 
 // ── Plugin impl ──────────────────────────────────────────────────────────────
 
 impl Plugin for ToyControlPlugin {
-    fn info(&self) -> PluginInfo { self.info.clone() }
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         let port: u16 = std::env::var("TOY_CONTROL_PORT")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(8090);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8090);
 
         self.event_bus = Some(ctx.event_bus.clone());
 
@@ -197,7 +253,9 @@ impl Plugin for ToyControlPlugin {
 
         let handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().expect("tokio");
+                .enable_all()
+                .build()
+                .expect("tokio");
             let _ = rt.block_on(async {
                 let srv = HttpServer::new(move || {
                     let st = state.clone();
@@ -227,7 +285,10 @@ impl Plugin for ToyControlPlugin {
         });
 
         self.server_handle = Some(handle);
-        ctx.logger.info(format!("toy-control web server listening on http://0.0.0.0:{}", port));
+        ctx.logger.info(format!(
+            "toy-control web server listening on http://0.0.0.0:{}",
+            port
+        ));
         Ok(())
     }
 
@@ -270,7 +331,9 @@ impl Plugin for ToyControlPlugin {
 // ── Web handlers ─────────────────────────────────────────────────────────────
 
 async fn serve_ui() -> HttpResponse {
-    HttpResponse::Ok().content_type("text/html; charset=utf-8").body(HTML_PAGE)
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(HTML_PAGE)
 }
 
 async fn get_status(data: aweb::Data<StateRef>) -> HttpResponse {
@@ -295,15 +358,25 @@ async fn post_control(
 ) -> HttpResponse {
     let cmd = body.into_inner();
     let mut s = data.lock().unwrap();
-    if let Some(p) = cmd.pattern { s.pattern = p; }
-    if let Some(locs) = cmd.locations { s.locations = locs; }
-    if let Some(f) = cmd.freq { s.frequency = f as u8; }
+    if let Some(p) = cmd.pattern {
+        s.pattern = p;
+    }
+    if let Some(locs) = cmd.locations {
+        s.locations = locs;
+    }
+    if let Some(f) = cmd.freq {
+        s.frequency = f as u8;
+    }
 
     match cmd.action.as_deref() {
-        Some("start") => { s.running = true; }
+        Some("start") => {
+            s.running = true;
+        }
         Some("stop") => {
             s.running = false;
-            if cmd.freq.is_none() { s.frequency = 0; }
+            if cmd.freq.is_none() {
+                s.frequency = 0;
+            }
         }
         _ => {}
     }
@@ -321,10 +394,18 @@ async fn post_control(
             thread::sleep(std::time::Duration::from_secs(2));
             if gen_clone.load(Ordering::SeqCst) == my_gen {
                 if let Some(ref eb) = eb_clone.as_ref() {
-                    let source = ls.lock().unwrap().clone().unwrap_or_else(|| "telegram".to_string());
+                    let source = ls
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "telegram".to_string());
                     let labels: Vec<&str> = locs.iter().map(|l| loc_label(l)).collect();
-                    let msg = format!("[系统] 跳蛋参数已调整：{}，{}%，{}模式。不要复述这句话，自然地继续聊。",
-                        labels.join("和"), freq, pat_label(&pat));
+                    let msg = format!(
+                        "[系统] 跳蛋参数已调整：{}，{}%，{}模式。不要复述这句话，自然地继续聊。",
+                        labels.join("和"),
+                        freq,
+                        pat_label(&pat)
+                    );
                     eb.do_send(Event::new(
                         "user.message",
                         serde_json::json!({"text": msg, "source": source}),

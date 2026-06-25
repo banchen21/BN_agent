@@ -11,6 +11,9 @@ Agent Loop 是显式目标驱动的后台循环，不替代普通聊天链路。
 - 让 LLM 决策下一步，并可调用已注册工具
 - 将工具结果作为 observation 喂回后续步骤
 - 记录每一步的状态、LLM 消息、工具调用、工具结果和耗时
+- 维护 plan/task tree（支持嵌套任务与 pending/in_progress/done/blocked/skipped 状态）
+- 记录每一步的 step reflection，并反馈给后续步骤
+- 记录每一步的 correction；检测到工具错误、预算耗尽或 failed observation 后，会在下一步提示中强制要求自我修正、更新计划并避免原样重复失败动作
 - 支持最大 step 数和最大 tool round 数
 - 支持查询、列表、停止、暂停与恢复
 - 发布 `agent.loop.step` 与 `agent.loop.done` 事件
@@ -21,8 +24,18 @@ Agent Loop 是显式目标驱动的后台循环，不替代普通聊天链路。
 当前 MVP 暂不支持：
 
 - 多目标优先级队列
-- plan/task tree
-- 长期反思压缩
+- LLM 级长期反思/摘要压缩
+
+## 失败自我修正
+
+Agent Loop 会扫描历史 observation 中的失败信号，例如工具返回 `错误：...`、`failed` 状态、timeout、预算耗尽或工具轮次达到上限。检测到失败后，下一步 prompt 会加入“失败自我修正要求”：
+
+- 必须在 JSON 中填写 `correction`，说明失败原因与修正策略。
+- 必须更新 `plan`，把失败分支标为 `blocked` / `skipped`，或写出替代路径。
+- 不要原样重复刚失败的工具调用，除非 `correction` 明确说明改变了参数、前置条件或验证方式。
+- 除非目标逻辑上不可能，否则优先 `continue` 或 `ask_user`，不要直接 `failed`。
+
+`AgentLoopStep`、SQLite 快照和 `agent.loop.step` 事件都会携带 `correction` 字段，便于 UI 或日志展示修正轨迹。
 
 ## HTTP API
 

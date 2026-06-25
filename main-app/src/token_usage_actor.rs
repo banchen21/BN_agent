@@ -31,8 +31,9 @@ fn open_db() -> Result<Connection, String> {
             total_tokens    INTEGER NOT NULL,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(model);"
-    ).map_err(|e| format!("create table: {}", e))?;
+        CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(model);",
+    )
+    .map_err(|e| format!("create table: {}", e))?;
     // Migrate: add cache hit/miss columns if upgrading from old schema
     let _ = conn.execute_batch(
         "ALTER TABLE token_usage ADD COLUMN prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0;",
@@ -288,14 +289,17 @@ fn build_summary(db: &Connection) -> TokenUsageSummary {
     if let Ok(mut rows) = stmt.query([]) {
         while let Ok(Some(row)) = rows.next() {
             let model: String = row.get(0).unwrap_or_default();
-            by_model.insert(model, ModelUsage {
-                prompt_tokens: row.get(1).unwrap_or(0),
-                completion_tokens: row.get(2).unwrap_or(0),
-                prompt_cache_hit_tokens: row.get(3).unwrap_or(0),
-                prompt_cache_miss_tokens: row.get(4).unwrap_or(0),
-                total_tokens: row.get(5).unwrap_or(0),
-                call_count: row.get(6).unwrap_or(0),
-            });
+            by_model.insert(
+                model,
+                ModelUsage {
+                    prompt_tokens: row.get(1).unwrap_or(0),
+                    completion_tokens: row.get(2).unwrap_or(0),
+                    prompt_cache_hit_tokens: row.get(3).unwrap_or(0),
+                    prompt_cache_miss_tokens: row.get(4).unwrap_or(0),
+                    total_tokens: row.get(5).unwrap_or(0),
+                    call_count: row.get(6).unwrap_or(0),
+                },
+            );
         }
     }
 

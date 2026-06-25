@@ -59,7 +59,10 @@ impl Handler<RegisterRequest> for CancellationActor {
     fn handle(&mut self, msg: RegisterRequest, _ctx: &mut Self::Context) {
         // If there's already an active request, cancel it.
         if let Some((prev_id, cancel_tx)) = self.active.take() {
-            log::info!("[Cancellation] replacing request {prev_id} with {}", msg.request_id);
+            log::info!(
+                "[Cancellation] replacing request {prev_id} with {}",
+                msg.request_id
+            );
             let _ = cancel_tx.send(());
         }
         self.active = Some((msg.request_id, msg.cancel_tx));

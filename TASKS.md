@@ -25,7 +25,12 @@ Token 用量    ██████████ 完成
 - [x] **Agent Loop 事件驱动启动** — 任意插件发 `agent.loop.start` 事件即可启动 loop（与 HTTP/消息入口共用 `start_loop_internal`）
 - [x] **Agent Loop 资源护栏三件套** — 工具 denylist（`AGENT_LOOP_TOOL_DENY`）+ 墙钟时长上限（`AGENT_LOOP_MAX_DURATION_SECS`）+ 并发上限（`AGENT_LOOP_MAX_CONCURRENT`）
 - [x] **结构化健康检查** — `GET /api/health` 返回 version/uptime_secs/plugins_loaded/agent_loops_total（免鉴权，便于探活/监控）
-- [ ] **下一阶段重点** — Agent Loop 规划器（plan/task tree + 反思）、流式推送至 IM、会话管理（标题/摘要/回收）
+- [x] **Agent Loop 规划器 MVP** — loop 快照新增 plan/task tree，步骤 observation 新增 reflection，LLM 决策 JSON 可持续更新计划并持久化
+- [x] **流式推送至 IM** — `llm.chunk` 事件携带 request/source/peer 元数据，Telegram/飞书/微信按句聚合转发，最终回复按 request 去重
+- [x] **会话管理 MVP** — `chat_sessions` 元数据表按 peer 自动维护 title/recent summary/message_count/时间戳，新增 `/api/chat/sessions` 查询与刷新接口
+- [x] **Agent Loop 失败自我修正 MVP** — 步骤快照新增 `correction`，失败 observation 会触发修正提示：要求更新 plan、说明替代路径并避免原样重复失败工具调用
+- [x] **LLM 级长期摘要压缩 MVP** — `chat_sessions` 新增长期滚动摘要字段；LLM 回复后后台压缩即时窗口外的旧消息，并把摘要注入后续 system prompt
+- [ ] **下一阶段重点** — PipelineActor / LlmActor handler 级测试补强
 
 ---
 
@@ -85,24 +90,26 @@ Token 用量    ██████████ 完成
 
 - [x] **Claude CLI 后端** — `LLM_BACKEND=claude` 用 `--resume` 复用原生会话，工具提示词注入
 - [x] **Agent Loop MVP** — `AgentLoopActor` 支持目标启动、observe/decide/act 循环、工具调用、step observation、状态查询与停止
-- [ ] **流式推送至 IM** — 将 `llm.chunk` 事件转发到 Telegram/飞书/微信
+- [x] **流式推送至 IM** — 将 `llm.chunk` / `llm.response` 事件转发到 Telegram/飞书/微信；按 request_id 聚合与去重，`IM_STREAM_CHUNKS=false` 可关闭
 - [x] **Agent Loop 持久化队列** — loop 状态落 SQLite，支持重启恢复、按 peer 归档（`AGENT_LOOP_DB_PATH`）；终态自动清理（`AGENT_LOOP_MAX_KEEP`，默认保留 200）
 - [x] **Agent Loop 暂停/恢复** — 新增 `paused` 状态 + `pause/resume` 消息与 HTTP API；runner 在步骤边界暂停等待，心跳不覆盖外部状态
 - [x] **Agent Loop 工具护栏** — `AGENT_LOOP_TOOL_DENY` 黑名单：denied 工具对 LLM 不可见 + 执行前拒绝（纵深防御），防止自主 loop 误调危险工具
 - [x] **Agent Loop 墙钟时长上限** — `AGENT_LOOP_MAX_DURATION_SECS` 步间检查总耗时，超限标记 failed（与 max_steps 互补，防失控消耗），0=不限
 - [x] **Agent Loop 并发上限** — `AGENT_LOOP_MAX_CONCURRENT` 限制同时运行的 loop 数，达上限拒绝启动（与工具护栏 / 时长上限构成资源护栏三件套），0=不限
-- [ ] **Agent Loop 规划器** — 引入 plan/task tree、step reflection、失败自我修正策略
-- [ ] **Agent Loop 与主动系统联动** — 事件驱动启动已落地（任何插件发 `agent.loop.start` 即可启动 loop）；proactive 侧实际触发待做
+- [x] **Agent Loop 规划器 MVP** — 引入 plan/task tree + step reflection；计划随 `AgentLoopSnapshot` 持久化，`agent.loop.step` 事件同步输出 plan/reflection
+- [x] **Agent Loop 失败自我修正 MVP** — 解析并持久化 `correction`；检测工具错误/failed/timeout/预算耗尽后，下一步 prompt 强制要求修正策略、更新 plan 并避免原样重复失败动作
+- [x] **Agent Loop 与主动系统联动** — `PROACTIVE_AGENT_LOOP_MODE=mirror|replace` 时，proactive 自主空闲触发会发布 `agent.loop.start`，可灰度并行或替代原 `proactive.trigger`
 - [x] **LLM 重试持久化** — 熔断状态重启后保持（`CIRCUIT_BREAKER_DB_PATH`）
 - [x] **Token 预算控制** — 滚动窗口（日 24h/周 7d/月 30d）token 上限（`TOKEN_BUDGET_DAILY/WEEKLY/MONTHLY`）；pipeline 前置拦截超限请求 + 提示；`GET /api/token-usage/budget` 查询
-- [ ] **会话管理** — 对话标题、自动摘要（历史回收已落地：`CHAT_HISTORY_MAX_PER_PEER` 按 peer 保留上限，append 时清理最旧）
+- [x] **会话管理 MVP** — 对话标题、近期摘要、消息计数和时间戳落 `chat_sessions`，append 后自动刷新；`GET /api/chat/sessions` 列表查询，`POST /api/chat/sessions/refresh` 手动刷新；历史回收继续由 `CHAT_HISTORY_MAX_PER_PEER` 控制
+- [x] **LLM 级长期摘要压缩** — `chat_sessions.long_summary` + `summarized_until_id` 记录滚动摘要游标；`LLM_LONG_SUMMARY_*` 控制后台批量压缩；后续请求注入 `[长期对话摘要]`，近期时间线和当前消息优先
 - [x] **工具调用超时** — per-tool 超时控制（`TOOL_TIMEOUT_SECS`，默认 180s）；工具改在 blocking 池执行，避免同步工具阻塞 actix arbiter
 - [ ] **速率限制提升** — 支持 IP 级别限流 + 分布式（Redis）
 - [ ] **插件沙箱** — Wasm / Lua 沙箱运行插件
 
 ### 测试类
 
-- [x] **单元测试** — 核心纯逻辑 + AgentLoopActor handler 级（mock 依赖注入）+ MessageRouter 路由解析 + 工具超时 + token 预算 + loop 清理 ～72 个测试全绿；PipelineActor / LlmActor handler 级待补
+- [x] **单元测试** — 核心纯逻辑 + AgentLoopActor handler 级（mock 依赖注入）+ MessageRouter 路由解析 + 工具超时 + token 预算 + loop 清理 / 修正提示 / 长期摘要压缩等 ～91 个 main-app 测试全绿；PipelineActor / LlmActor handler 级待补
 - [x] **集成测试** — mock LLM 驱动 Agent Loop 端到端（observe→decide→act 跑完整 loop 至 Completed）
 - [x] **插件测试框架** — `PluginContext::for_test` 提供最小可注入上下文（plugin-interface）
 
@@ -180,6 +187,10 @@ Token 用量    ██████████ 完成
 - **generate_image 默认发到 TG** — tg-im 硬编码订阅 `image.gen.complete` 自动发图且不校验来源，跨平台误发。解决方案：移除自动发图订阅，`generate_image` 返回本地 file_path，由 LLM 按当前平台调 `tg_send_photo`/`wechat_send_image` 发送
 - **主动消息机制重构** — 旧机制靠 `[SCHEDULE:N]` 文本标签，易被 IM 发送工具剥离而不触发。解决方案：改为工具驱动（`proactive_schedule_once`/`recurring`）+ 到期发 `proactive.trigger` 回调 LLM 按当前上下文实时生成
 - **主动插件扩展为自主主动系统** — 原先只能处理用户/LLM 安排后的定时任务。解决方案：proactive-plugin 记录 peer 最近互动，为每个 peer 计算带 jitter/probability/daily limit/backoff 的下一次自主主动机会，到点后自主发布 `proactive.trigger(reason=autonomous_idle)`；Pipeline 使用自主主动提示词回调 LLM，允许返回内部跳过标记避免打扰
+- **主动系统缺少 Agent Loop 联动** — 事件驱动启动虽已支持，但 proactive 侧不会真正触发 loop。解决方案：新增 `PROACTIVE_AGENT_LOOP_MODE=off|mirror|replace`，自主空闲触发可同时或改为发布 `agent.loop.start`，并携带 peer/平台上下文、目标模板和 loop 预算
+- **缺少会话元信息层** — 原先只有 `chat_history` 明细和 per-peer 回收，无法快速列出会话标题/摘要/更新时间。解决方案：新增 `chat_sessions` 元数据表，启动时从历史重建，每次 append 后自动刷新 title/recent summary/message_count/时间戳，并开放 `/api/chat/sessions` 查询与 refresh 接口
+- **长期聊天上下文只能靠最近 N 条** — 旧对话超过即时窗口后只能依赖 memory-plugin 的事实抽取，缺少会话级滚动压缩。解决方案：`chat_sessions` 增加 `long_summary` / `summarized_until_id`，LLM 回复成功后后台压缩窗口外旧消息，后续请求注入 `[长期对话摘要]` 并声明近期内容优先
+- **Agent Loop 失败后容易机械重试** — 原先失败只作为普通 observation 回灌，模型可能重复同一工具或直接 failed。解决方案：`AgentLoopStep` 新增 `correction`，失败 observation 会触发修正提示，要求写明失败原因/替代路径、更新 plan，并避免原样重复失败工具调用
 - **缺少完整 Agent Loop 模式** — 原先只有 Pipeline 单次对话工具循环和 proactive tick。解决方案：新增 `AgentLoopActor`，通过 `/api/agent-loop/start` 接收目标，执行 bounded observe→decide→act 循环，记录每步 observation，并提供 list/status/stop 控制接口
 - **重启后短期聊天历史丢失** — 主程序曾在启动时无条件清空 `chat_history`。解决方案：默认保留历史，仅当 `CHAT_HISTORY_CLEAR_ON_START=true` 时才执行清空
 - **微信回复整段发送** — 不像真人。解决方案：按换行/句末标点分句逐条发送（与 tg-im 一致），段间延时防限频

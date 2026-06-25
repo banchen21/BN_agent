@@ -21,7 +21,7 @@ pub use actix::prelude::*;
 pub use log;
 use serde::{Deserialize, Serialize};
 pub use serde_json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 // 跨 cdylib 共享的锁统一使用 parking_lot::Mutex（panic 时不会中毒，避免级联崩溃）。
 // re-export 给插件，保证 FFI 边界两侧的锁类型完全一致。
@@ -78,6 +78,98 @@ pub struct Unsubscribe {
 
 pub struct EventBus {
     subscribers: HashMap<String, Vec<Recipient<Event>>>,
+}
+
+// ── Streaming text helpers ──────────────────────────────────────────────────
+
+const TEXT_STREAM_MAX_BUFFER_CHARS: usize = 160;
+const TEXT_STREAM_MAX_TRACKED_REQUESTS: usize = 256;
+
+/// Small reusable state machine for forwarding streamed LLM text to IM plugins.
+/// It buffers tiny chunks until a sentence boundary (or a size cap), and remembers
+/// which request IDs already produced visible streamed output so plugins can skip
+/// the later full `assistant.message` for the same request.
+#[derive(Debug, Default)]
+pub struct TextStreamState {
+    buffers: HashMap<String, String>,
+    streamed_requests: HashSet<String>,
+}
+
+impl TextStreamState {
+    pub fn push_chunk(&mut self, request_id: &str, content: &str) -> Vec<String> {
+        if request_id.trim().is_empty() || content.is_empty() {
+            return Vec::new();
+        }
+        let buffer = self.buffers.entry(request_id.to_string()).or_default();
+        buffer.push_str(content);
+
+        let mut ready = Vec::new();
+        while let Some(cut) = find_text_stream_boundary(buffer) {
+            let segment = buffer[..cut].trim().to_string();
+            buffer.drain(..cut);
+            if visible_stream_segment(&segment) {
+                ready.push(segment);
+            }
+        }
+
+        if buffer.chars().count() >= TEXT_STREAM_MAX_BUFFER_CHARS {
+            let segment = buffer.trim().to_string();
+            buffer.clear();
+            if visible_stream_segment(&segment) {
+                ready.push(segment);
+            }
+        }
+
+        if !ready.is_empty() {
+            self.mark_streamed(request_id);
+        }
+        ready
+    }
+
+    pub fn flush(&mut self, request_id: &str) -> Vec<String> {
+        let Some(buffer) = self.buffers.remove(request_id) else {
+            return Vec::new();
+        };
+        let segment = buffer.trim().to_string();
+        if visible_stream_segment(&segment) {
+            self.mark_streamed(request_id);
+            vec![segment]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn take_streamed_request(&mut self, request_id: &str) -> bool {
+        if request_id.trim().is_empty() {
+            return false;
+        }
+        self.streamed_requests.remove(request_id)
+    }
+
+    fn mark_streamed(&mut self, request_id: &str) {
+        self.streamed_requests.insert(request_id.to_string());
+        if self.streamed_requests.len() > TEXT_STREAM_MAX_TRACKED_REQUESTS {
+            if let Some(oldest) = self.streamed_requests.iter().next().cloned() {
+                self.streamed_requests.remove(&oldest);
+            }
+        }
+    }
+}
+
+fn find_text_stream_boundary(input: &str) -> Option<usize> {
+    input
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '\n' | '\r' | '。' | '！' | '？' | '!' | '?'))
+        .map(|(idx, ch)| idx + ch.len_utf8())
+}
+
+fn visible_stream_segment(input: &str) -> bool {
+    input
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .count()
+        > 1
 }
 
 impl EventBus {
@@ -796,6 +888,30 @@ mod tests {
         let meta = ToolResult::ok_with_metadata("c", serde_json::json!({ "k": "v" }));
         assert!(meta.success);
         assert_eq!(meta.metadata.unwrap()["k"], "v");
+    }
+
+    #[test]
+    fn text_stream_buffers_until_sentence_boundary() {
+        let mut state = TextStreamState::default();
+        assert!(state.push_chunk("req", "你好").is_empty());
+        assert_eq!(state.push_chunk("req", "呀！"), vec!["你好呀！"]);
+        assert!(state.take_streamed_request("req"));
+    }
+
+    #[test]
+    fn text_stream_flushes_remainder() {
+        let mut state = TextStreamState::default();
+        assert!(state.push_chunk("req", "未结束的一句").is_empty());
+        assert_eq!(state.flush("req"), vec!["未结束的一句"]);
+        assert!(state.take_streamed_request("req"));
+        assert!(state.flush("req").is_empty());
+    }
+
+    #[test]
+    fn text_stream_ignores_tiny_fragments() {
+        let mut state = TextStreamState::default();
+        assert!(state.push_chunk("req", "！").is_empty());
+        assert!(!state.take_streamed_request("req"));
     }
 
     struct ToolRegPlugin;

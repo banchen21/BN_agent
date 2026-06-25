@@ -31,9 +31,13 @@ impl RateLimitConfig {
     pub fn from_env() -> Self {
         Self {
             requests_per_minute: std::env::var("RATE_LIMIT_PER_MIN")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(30),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
             burst_size: std::env::var("RATE_LIMIT_BURST")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
         }
     }
 }
@@ -44,7 +48,7 @@ struct TokenBucket {
     tokens: f64,
     last_refill: Instant,
     capacity: f64,
-    refill_rate: f64,  // tokens per second
+    refill_rate: f64, // tokens per second
 }
 
 impl TokenBucket {
@@ -119,7 +123,10 @@ impl Handler<CheckRateLimit> for RateLimitActor {
     fn handle(&mut self, _msg: CheckRateLimit, _ctx: &mut Self::Context) -> bool {
         let allowed = self.bucket.try_consume(1.0);
         if !allowed {
-            log::warn!("[RateLimit] rate-limited (tokens={:.1})", self.bucket.tokens);
+            log::warn!(
+                "[RateLimit] rate-limited (tokens={:.1})",
+                self.bucket.tokens
+            );
         }
         allowed
     }

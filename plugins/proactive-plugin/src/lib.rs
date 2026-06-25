@@ -14,8 +14,9 @@
 //!
 //! 自主主动（`PROACTIVE_AUTONOMOUS_ENABLED`）：
 //!   - 记录目标会话最后互动时间
-//!   - 空闲超过弹性窗口后自动发布 `proactive.trigger`
-//!   - 由 PipelineActor 回调 LLM 生成自然主动消息
+//!   - 空闲超过弹性窗口后默认发布 `proactive.trigger`
+//!   - `PROACTIVE_AGENT_LOOP_MODE=mirror|replace` 时，可同时或改为发布 `agent.loop.start`
+//!   - 默认路径由 PipelineActor 回调 LLM 生成自然主动消息；Agent Loop 路径由目标循环自主判断和行动
 //!
 //! 用户主动回复 → 取消该会话**全部**已安排任务（等 LLM 重新安排）。
 //!
@@ -54,6 +55,37 @@ impl ProactiveMode {
             ProactiveMode::Auto => "auto",
             ProactiveMode::SemiAuto => "semi-auto",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentLoopTriggerMode {
+    Off,
+    Mirror,
+    Replace,
+}
+
+impl AgentLoopTriggerMode {
+    fn from_env() -> Self {
+        agent_loop_trigger_mode_from_str(
+            &std::env::var("PROACTIVE_AGENT_LOOP_MODE").unwrap_or_default(),
+        )
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            AgentLoopTriggerMode::Off => "off",
+            AgentLoopTriggerMode::Mirror => "mirror",
+            AgentLoopTriggerMode::Replace => "replace",
+        }
+    }
+}
+
+fn agent_loop_trigger_mode_from_str(raw: &str) -> AgentLoopTriggerMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mirror" | "both" | "also" => AgentLoopTriggerMode::Mirror,
+        "replace" | "agent-loop" | "agent_loop" | "loop" => AgentLoopTriggerMode::Replace,
+        _ => AgentLoopTriggerMode::Off,
     }
 }
 
@@ -196,6 +228,10 @@ struct SharedState {
     autonomous_chance_pct: u64,
     autonomous_daily_limit: u64,
     autonomous_max_backoff_multiplier: u64,
+    agent_loop_mode: AgentLoopTriggerMode,
+    agent_loop_goal_template: String,
+    agent_loop_max_steps: usize,
+    agent_loop_max_tool_rounds: usize,
 }
 
 impl SharedState {
@@ -223,6 +259,13 @@ fn env_duration(name: &str, default_secs: u64) -> Duration {
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -360,6 +403,30 @@ fn chat_id_from_peer_id(peer_id: &str) -> String {
         .split_once(':')
         .map(|(_, id)| id.to_string())
         .unwrap_or_else(|| peer_id.to_string())
+}
+
+const DEFAULT_AGENT_LOOP_GOAL: &str = "用户已经空闲约 {idle_secs} 秒。请根据该 peer 的最近上下文自主判断是否适合自然地主动联系用户。当前平台 source={source}，chat_id={chat_id}，peer_id={peer_id}。如果适合，请使用当前平台的文本发送工具发一条简短自然的消息：Telegram 用 tg_send_message，微信用 wechat_send_message，飞书用 feishu_send_message；如果不适合，请输出 done 并说明跳过。";
+
+fn render_agent_loop_goal(
+    template: &str,
+    source: &str,
+    chat_id: &str,
+    peer_id: &str,
+    idle_secs: Option<u64>,
+) -> String {
+    let idle = idle_secs
+        .map(|secs| secs.to_string())
+        .unwrap_or_else(|| "未知".to_string());
+    let template = if template.trim().is_empty() {
+        DEFAULT_AGENT_LOOP_GOAL
+    } else {
+        template
+    };
+    template
+        .replace("{source}", source)
+        .replace("{chat_id}", chat_id)
+        .replace("{peer_id}", peer_id)
+        .replace("{idle_secs}", &idle)
 }
 
 /// 解析 `seconds` + `minutes` 参数，累加为总秒数。
@@ -535,6 +602,10 @@ impl ProactivePlugin {
                 autonomous_chance_pct: 65,
                 autonomous_daily_limit: 4,
                 autonomous_max_backoff_multiplier: 4,
+                agent_loop_mode: AgentLoopTriggerMode::Off,
+                agent_loop_goal_template: String::new(),
+                agent_loop_max_steps: 6,
+                agent_loop_max_tool_rounds: 3,
             })),
             running: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
@@ -565,6 +636,12 @@ impl Plugin for ProactivePlugin {
         let autonomous_daily_limit = env_u64("PROACTIVE_AUTONOMOUS_DAILY_LIMIT", 4);
         let autonomous_max_backoff_multiplier =
             env_u64("PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER", 4).max(1);
+        let agent_loop_mode = AgentLoopTriggerMode::from_env();
+        let agent_loop_goal_template =
+            std::env::var("PROACTIVE_AGENT_LOOP_GOAL").unwrap_or_default();
+        let agent_loop_max_steps = env_usize("PROACTIVE_AGENT_LOOP_MAX_STEPS", 6).clamp(1, 50);
+        let agent_loop_max_tool_rounds =
+            env_usize("PROACTIVE_AGENT_LOOP_MAX_TOOL_ROUNDS", 3).min(20);
 
         {
             let mut s = self.state.lock().unwrap();
@@ -590,6 +667,10 @@ impl Plugin for ProactivePlugin {
             s.autonomous_chance_pct = autonomous_chance_pct;
             s.autonomous_daily_limit = autonomous_daily_limit;
             s.autonomous_max_backoff_multiplier = autonomous_max_backoff_multiplier;
+            s.agent_loop_mode = agent_loop_mode;
+            s.agent_loop_goal_template = agent_loop_goal_template.clone();
+            s.agent_loop_max_steps = agent_loop_max_steps;
+            s.agent_loop_max_tool_rounds = agent_loop_max_tool_rounds;
         }
 
         // 注册工具给 LLM。
@@ -611,7 +692,7 @@ impl Plugin for ProactivePlugin {
         }
 
         ctx.logger.info(format!(
-            "started, mode={}, chat_id={}, source={}, autonomous={}, idle={}s±{}%, cooldown={}s±{}%, chance={}%, daily_limit={}, max_backoff={}x",
+            "started, mode={}, chat_id={}, source={}, autonomous={}, idle={}s±{}%, cooldown={}s±{}%, chance={}%, daily_limit={}, max_backoff={}x, agent_loop_mode={}, agent_loop_steps={}, agent_loop_tool_rounds={}",
             mode.as_str(),
             if chat_id_from_env {
                 env_chat_id.as_str()
@@ -631,6 +712,9 @@ impl Plugin for ProactivePlugin {
             autonomous_chance_pct,
             autonomous_daily_limit,
             autonomous_max_backoff_multiplier,
+            agent_loop_mode.as_str(),
+            agent_loop_max_steps,
+            agent_loop_max_tool_rounds,
         ));
 
         // 启动后台轮询线程。
@@ -778,11 +862,23 @@ fn background_loop(state: Arc<Mutex<SharedState>>, running: Arc<AtomicBool>) {
     log::info!("[proactive-plugin] background loop stopped");
 }
 
+struct TriggerEvent {
+    peer_id: String,
+    chat_id: String,
+    source: String,
+    note: Option<String>,
+    reason: String,
+    idle_secs: Option<u64>,
+    send_proactive_trigger: bool,
+    start_agent_loop: bool,
+    agent_loop_goal: Option<String>,
+    agent_loop_max_steps: usize,
+    agent_loop_max_tool_rounds: usize,
+}
+
 /// 一次轮询：检查到期任务和自主主动条件，发布 `proactive.trigger` 事件。
 fn tick(state: &Arc<Mutex<SharedState>>) {
-    // (peer_id, chat_id, source, note, reason, idle_secs)
-    let mut triggers: Vec<(String, String, String, Option<String>, String, Option<u64>)> =
-        Vec::new();
+    let mut triggers: Vec<TriggerEvent> = Vec::new();
 
     let event_bus = {
         let mut s = match state.lock() {
@@ -818,14 +914,19 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
                 let mut keep: Vec<ScheduledTask> = Vec::with_capacity(tasks.len());
                 for mut task in tasks.drain(..) {
                     if now >= task.send_at {
-                        triggers.push((
-                            peer_id.clone(),
-                            chat_id.clone(),
-                            source.clone(),
-                            task.note.clone(),
-                            "scheduled".to_string(),
-                            None,
-                        ));
+                        triggers.push(TriggerEvent {
+                            peer_id: peer_id.clone(),
+                            chat_id: chat_id.clone(),
+                            source: source.clone(),
+                            note: task.note.clone(),
+                            reason: "scheduled".to_string(),
+                            idle_secs: None,
+                            send_proactive_trigger: true,
+                            start_agent_loop: false,
+                            agent_loop_goal: None,
+                            agent_loop_max_steps: 0,
+                            agent_loop_max_tool_rounds: 0,
+                        });
                         match task.kind {
                             ScheduleKind::Once => { /* 触发后丢弃 */ }
                             ScheduleKind::Recurring(iv) => {
@@ -850,6 +951,10 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
             let chance_pct = s.autonomous_chance_pct;
             let daily_limit = s.autonomous_daily_limit;
             let max_backoff_multiplier = s.autonomous_max_backoff_multiplier;
+            let agent_loop_mode = s.agent_loop_mode;
+            let agent_loop_goal_template = s.agent_loop_goal_template.clone();
+            let agent_loop_max_steps = s.agent_loop_max_steps;
+            let agent_loop_max_tool_rounds = s.agent_loop_max_tool_rounds;
             let peers_with_scheduled: Vec<String> = s
                 .scheduled
                 .iter()
@@ -916,24 +1021,52 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
                     cooldown_jitter_pct,
                     max_backoff_multiplier,
                 );
-                triggers.push((
-                    peer_id.clone(),
-                    peer.chat_id.clone(),
-                    peer.source.clone(),
-                    None,
-                    "autonomous_idle".to_string(),
-                    Some(idle_for.as_secs()),
-                ));
+                let start_agent_loop = agent_loop_mode != AgentLoopTriggerMode::Off;
+                let send_proactive_trigger = agent_loop_mode != AgentLoopTriggerMode::Replace;
+                let agent_loop_goal = if start_agent_loop {
+                    Some(render_agent_loop_goal(
+                        &agent_loop_goal_template,
+                        &peer.source,
+                        &peer.chat_id,
+                        peer_id,
+                        Some(idle_for.as_secs()),
+                    ))
+                } else {
+                    None
+                };
+                triggers.push(TriggerEvent {
+                    peer_id: peer_id.clone(),
+                    chat_id: peer.chat_id.clone(),
+                    source: peer.source.clone(),
+                    note: None,
+                    reason: "autonomous_idle".to_string(),
+                    idle_secs: Some(idle_for.as_secs()),
+                    send_proactive_trigger,
+                    start_agent_loop,
+                    agent_loop_goal,
+                    agent_loop_max_steps,
+                    agent_loop_max_tool_rounds,
+                });
             }
         }
-        for (peer_id, _, _, _, reason, idle_secs) in &triggers {
-            if let Some(secs) = idle_secs {
+        for trigger in &triggers {
+            if let Some(secs) = trigger.idle_secs {
                 s.log(format!(
-                    "triggering {} for peer={} (idle={}s)",
-                    reason, peer_id, secs
+                    "triggering {} for peer={} (idle={}s, proactive={}, agent_loop={})",
+                    trigger.reason,
+                    trigger.peer_id,
+                    secs,
+                    trigger.send_proactive_trigger,
+                    trigger.start_agent_loop,
                 ));
             } else {
-                s.log(format!("triggering {} for peer={}", reason, peer_id));
+                s.log(format!(
+                    "triggering {} for peer={} (proactive={}, agent_loop={})",
+                    trigger.reason,
+                    trigger.peer_id,
+                    trigger.send_proactive_trigger,
+                    trigger.start_agent_loop,
+                ));
             }
         }
         s.event_bus.clone()
@@ -943,20 +1076,44 @@ fn tick(state: &Arc<Mutex<SharedState>>) {
         return;
     }
     if let Some(bus) = event_bus {
-        for (peer_id, chat_id, source, note, reason, idle_secs) in triggers {
-            let mut data = serde_json::json!({
-                "chat_id": chat_id,
-                "source": source,
-                "peer_id": peer_id,
-                "reason": reason,
-            });
-            if let Some(n) = note {
-                data["note"] = serde_json::json!(n);
+        for trigger in triggers {
+            if trigger.send_proactive_trigger {
+                let mut data = serde_json::json!({
+                    "chat_id": trigger.chat_id.clone(),
+                    "source": trigger.source.clone(),
+                    "peer_id": trigger.peer_id.clone(),
+                    "reason": trigger.reason.clone(),
+                });
+                if let Some(n) = trigger.note.clone() {
+                    data["note"] = serde_json::json!(n);
+                }
+                if let Some(secs) = trigger.idle_secs {
+                    data["idle_secs"] = serde_json::json!(secs);
+                }
+                bus.do_send(Event::new("proactive.trigger", data, "proactive-plugin"));
             }
-            if let Some(secs) = idle_secs {
-                data["idle_secs"] = serde_json::json!(secs);
+
+            if trigger.start_agent_loop {
+                let goal = trigger.agent_loop_goal.unwrap_or_else(|| {
+                    render_agent_loop_goal(
+                        "",
+                        &trigger.source,
+                        &trigger.chat_id,
+                        &trigger.peer_id,
+                        trigger.idle_secs,
+                    )
+                });
+                bus.do_send(Event::new(
+                    "agent.loop.start",
+                    serde_json::json!({
+                        "goal": goal,
+                        "peer_id": trigger.peer_id,
+                        "max_steps": trigger.agent_loop_max_steps,
+                        "max_tool_rounds": trigger.agent_loop_max_tool_rounds,
+                    }),
+                    "proactive-plugin",
+                ));
             }
-            bus.do_send(Event::new("proactive.trigger", data, "proactive-plugin"));
         }
     }
 }
@@ -992,6 +1149,54 @@ mod tests {
         .expect("next autonomous time");
 
         assert!(next >= now + Duration::from_secs(400));
+    }
+
+    #[test]
+    fn agent_loop_mode_parses_variants() {
+        assert_eq!(
+            agent_loop_trigger_mode_from_str(""),
+            AgentLoopTriggerMode::Off
+        );
+        assert_eq!(
+            agent_loop_trigger_mode_from_str("off"),
+            AgentLoopTriggerMode::Off
+        );
+        assert_eq!(
+            agent_loop_trigger_mode_from_str("mirror"),
+            AgentLoopTriggerMode::Mirror
+        );
+        assert_eq!(
+            agent_loop_trigger_mode_from_str("both"),
+            AgentLoopTriggerMode::Mirror
+        );
+        assert_eq!(
+            agent_loop_trigger_mode_from_str("replace"),
+            AgentLoopTriggerMode::Replace
+        );
+        assert_eq!(
+            agent_loop_trigger_mode_from_str("agent_loop"),
+            AgentLoopTriggerMode::Replace
+        );
+    }
+
+    #[test]
+    fn render_agent_loop_goal_replaces_placeholders() {
+        let goal = render_agent_loop_goal(
+            "src={source}; chat={chat_id}; peer={peer_id}; idle={idle_secs}",
+            "telegram",
+            "123",
+            "telegram:123",
+            Some(456),
+        );
+        assert_eq!(goal, "src=telegram; chat=123; peer=telegram:123; idle=456");
+    }
+
+    #[test]
+    fn render_agent_loop_goal_uses_default_when_empty() {
+        let goal = render_agent_loop_goal("", "wechat", "wxid", "wechat:wxid", None);
+        assert!(goal.contains("source=wechat"));
+        assert!(goal.contains("chat_id=wxid"));
+        assert!(goal.contains("空闲约 未知 秒"));
     }
 }
 

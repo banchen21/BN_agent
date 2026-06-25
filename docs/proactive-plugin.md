@@ -11,6 +11,8 @@ LLM 仍然可以主动调用工具来安排未来消息：
 
 此外，插件也会记录会话活跃状态；开启自主主动后，用户沉默超过一段弹性时间且冷却结束时，插件会自己发布 `proactive.trigger`，让 Pipeline 回调 LLM 生成自然开场。自主主动不是固定秒表触发，会使用随机浮动、概率触发、每日上限和无人回应退避来减少机械感。
 
+自主主动也可以接入 Agent Loop：默认不启用，开启后空闲触发会发布 `agent.loop.start`，由目标循环自主观察、规划、调用工具并决定是否联系用户。
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -29,6 +31,10 @@ LLM 仍然可以主动调用工具来安排未来消息：
 | `PROACTIVE_AUTONOMOUS_CHANCE_PCT` | `65` | 到达下一次机会时真正触发的概率；未触发会稍后再试 |
 | `PROACTIVE_AUTONOMOUS_DAILY_LIMIT` | `4` | 同一会话每天最多自主主动次数，`0` 表示不限 |
 | `PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER` | `4` | 连续自主主动无人回应时的最大退避倍数 |
+| `PROACTIVE_AGENT_LOOP_MODE` | `off` | 自主空闲触发 Agent Loop 的模式：`off` 只走原 `proactive.trigger`；`mirror` 同时发 `proactive.trigger` 与 `agent.loop.start`；`replace` 只发 `agent.loop.start` |
+| `PROACTIVE_AGENT_LOOP_GOAL` | 内置目标 | Agent Loop 目标模板，支持 `{source}`、`{chat_id}`、`{peer_id}`、`{idle_secs}` 占位符 |
+| `PROACTIVE_AGENT_LOOP_MAX_STEPS` | `6` | proactive 启动 Agent Loop 时的最大步骤数 |
+| `PROACTIVE_AGENT_LOOP_MAX_TOOL_ROUNDS` | `3` | proactive 启动 Agent Loop 时每步最大工具调用轮数；`0` 表示不允许工具轮 |
 
 ## 工作流程
 
@@ -48,7 +54,7 @@ user.message / assistant.message 经过 EventBus
   -> proactive-plugin 记录 peer 的最后互动时间
   -> 为该 peer 计算下一次自主主动机会（idle/cooldown + jitter + backoff）
   -> 后台 tick 到点后检查 daily_limit/min_user_messages/未完成定时任务/chance
-  -> 满足条件时发布 proactive.trigger(reason=autonomous_idle)
+  -> 满足条件时默认发布 proactive.trigger(reason=autonomous_idle)
   -> PipelineActor 使用自主主动提示词回调 LLM
   -> LLM 判断不适合打扰时返回内部跳过标记，不发送也不写入历史
   -> route.message -> MessageRouter -> assistant.message -> IM 插件发送
@@ -60,6 +66,23 @@ user.message / assistant.message 经过 EventBus
 - `autonomous_idle`：无人安排，插件根据会话空闲状态自主触发；LLM 可判断此刻不适合打扰并跳过发送。
 
 如果用户一直不回应自主主动，插件会逐步拉长下一次主动的等待时间，直到 `PROACTIVE_AUTONOMOUS_MAX_BACKOFF_MULTIPLIER`。用户再次发消息后，退避会重置。
+
+## Agent Loop 联动
+
+`PROACTIVE_AGENT_LOOP_MODE` 只影响 `autonomous_idle`，不会改变工具安排的 `scheduled` 提醒语义：
+
+- `off`：默认值，只发布 `proactive.trigger`，保持单次 LLM 回调路径。
+- `mirror`：发布 `proactive.trigger` 的同时发布 `agent.loop.start`，适合灰度观察 Agent Loop 行为。
+- `replace`：不再发布 `proactive.trigger`，改由 Agent Loop 负责判断、规划和工具发送，避免同一次空闲机会产生两条主动消息。
+
+Agent Loop 事件数据包含 `goal`、`peer_id`、`max_steps`、`max_tool_rounds`。默认目标会把当前 `source`、`chat_id`、`peer_id` 与空闲秒数写入目标文本，并要求 loop 只在合适时使用当前平台的发送工具；不合适时完成并说明跳过。
+
+```text
+autonomous_idle 到点
+  -> PROACTIVE_AGENT_LOOP_MODE=mirror: proactive.trigger + agent.loop.start
+  -> PROACTIVE_AGENT_LOOP_MODE=replace: agent.loop.start
+  -> AgentLoopActor 读取 peer 历史快照，执行 bounded observe -> decide -> act
+```
 
 用户一旦回复当前会话，proactive-plugin 会取消该会话全部已安排任务，避免旧提醒在用户已经回来后继续触发。
 

@@ -10,6 +10,7 @@ use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -18,7 +19,6 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_remote::TrackRemote;
-use webrtc::media::Sample;
 
 pub struct AudioTrackSender {
     track: Arc<TrackLocalStaticSample>,
@@ -31,14 +31,19 @@ impl AudioTrackSender {
             duration: std::time::Duration::from_millis(20),
             ..Default::default()
         };
-        self.track.write_sample(&sample).await
+        self.track
+            .write_sample(&sample)
+            .await
             .map_err(|e| format!("write sample: {}", e))?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PeerRole { Offer, Answer }
+pub enum PeerRole {
+    Offer,
+    Answer,
+}
 
 pub struct PeerHandle {
     peer_id: String,
@@ -52,7 +57,8 @@ pub struct PeerHandle {
 impl PeerHandle {
     async fn build_api() -> Result<webrtc::api::API, String> {
         let mut m = MediaEngine::default();
-        m.register_default_codecs().map_err(|e| format!("codecs: {}", e))?;
+        m.register_default_codecs()
+            .map_err(|e| format!("codecs: {}", e))?;
         let registry = interceptor::registry::Registry::new();
         let registry = register_default_interceptors(registry, &mut m)
             .map_err(|e| format!("interceptors: {}", e))?;
@@ -63,19 +69,24 @@ impl PeerHandle {
     }
 
     fn default_config() -> RTCConfiguration {
-        RTCConfiguration { ice_servers: vec![], ..Default::default() }
+        RTCConfiguration {
+            ice_servers: vec![],
+            ..Default::default()
+        }
     }
 
-    pub async fn new_offer(
-        peer_id: &str,
-        eb: Addr<EventBus>,
-    ) -> Result<Self, String> {
+    pub async fn new_offer(peer_id: &str, eb: Addr<EventBus>) -> Result<Self, String> {
         let api = Self::build_api().await?;
-        let connection = Arc::new(api.new_peer_connection(Self::default_config()).await
-            .map_err(|e| format!("create PC: {}", e))?);
+        let connection = Arc::new(
+            api.new_peer_connection(Self::default_config())
+                .await
+                .map_err(|e| format!("create PC: {}", e))?,
+        );
         let local_sdp = Arc::new(tokio::sync::Mutex::new(None));
 
-        let dc = connection.create_data_channel("data", None).await
+        let dc = connection
+            .create_data_channel("data", None)
+            .await
             .map_err(|e| format!("create DC: {}", e))?;
         let audio_sender = Self::add_audio_track(&connection).await?;
 
@@ -84,9 +95,13 @@ impl PeerHandle {
         Self::setup_ice_handler(&connection, peer_id, &eb);
         Self::setup_track_handler(&connection, peer_id, &eb);
 
-        let offer = connection.create_offer(None).await
+        let offer = connection
+            .create_offer(None)
+            .await
             .map_err(|e| format!("create offer: {}", e))?;
-        connection.set_local_description(offer.clone()).await
+        connection
+            .set_local_description(offer.clone())
+            .await
             .map_err(|e| format!("set local desc: {}", e))?;
 
         let sdp = offer.sdp.clone();
@@ -117,8 +132,11 @@ impl PeerHandle {
         eb: Addr<EventBus>,
     ) -> Result<Self, String> {
         let api = Self::build_api().await?;
-        let connection = Arc::new(api.new_peer_connection(Self::default_config()).await
-            .map_err(|e| format!("create PC: {}", e))?);
+        let connection = Arc::new(
+            api.new_peer_connection(Self::default_config())
+                .await
+                .map_err(|e| format!("create PC: {}", e))?,
+        );
         let local_sdp = Arc::new(tokio::sync::Mutex::new(None));
 
         let audio_sender = Self::add_audio_track(&connection).await?;
@@ -142,12 +160,18 @@ impl PeerHandle {
 
         let offer = RTCSessionDescription::offer(remote_offer_sdp.to_string())
             .map_err(|e| format!("parse offer: {}", e))?;
-        connection.set_remote_description(offer).await
+        connection
+            .set_remote_description(offer)
+            .await
             .map_err(|e| format!("set remote: {}", e))?;
 
-        let answer = connection.create_answer(None).await
+        let answer = connection
+            .create_answer(None)
+            .await
             .map_err(|e| format!("create answer: {}", e))?;
-        connection.set_local_description(answer.clone()).await
+        connection
+            .set_local_description(answer.clone())
+            .await
             .map_err(|e| format!("set local desc: {}", e))?;
 
         let sdp = answer.sdp.clone();
@@ -172,7 +196,9 @@ impl PeerHandle {
         })
     }
 
-    async fn add_audio_track(connection: &Arc<RTCPeerConnection>) -> Result<AudioTrackSender, String> {
+    async fn add_audio_track(
+        connection: &Arc<RTCPeerConnection>,
+    ) -> Result<AudioTrackSender, String> {
         let track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: "audio/opus".to_string(),
@@ -184,7 +210,9 @@ impl PeerHandle {
             "audio".to_string(),
             "bn-agent-audio".to_string(),
         ));
-        connection.add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>).await
+        connection
+            .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await
             .map_err(|e| format!("add track: {}", e))?;
         Ok(AudioTrackSender { track })
     }
@@ -209,7 +237,8 @@ impl PeerHandle {
                 if let Ok(ctrl) = serde_json::from_str::<serde_json::Value>(&text) {
                     if let Some(t) = ctrl.get("type").and_then(|v| v.as_str()) {
                         if t == "chat" {
-                            let content = ctrl.get("text").and_then(|v| v.as_str()).unwrap_or(&text);
+                            let content =
+                                ctrl.get("text").and_then(|v| v.as_str()).unwrap_or(&text);
                             eb.do_send(Event::new(
                                 "user.message",
                                 serde_json::json!({
@@ -234,88 +263,115 @@ impl PeerHandle {
         }));
     }
 
-    fn setup_state_handler(connection: &Arc<RTCPeerConnection>, peer_id: &str, eb: &Addr<EventBus>) {
+    fn setup_state_handler(
+        connection: &Arc<RTCPeerConnection>,
+        peer_id: &str,
+        eb: &Addr<EventBus>,
+    ) {
         let eb = eb.clone();
         let pid = peer_id.to_string();
-        connection.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let eb = eb.clone();
-            let pid = pid.clone();
-            Box::pin(async move {
-                log::info!("[webrtc] Peer {} state: {:?}", pid, state);
-                eb.do_send(Event::new(
-                    "webrtc_state_change",
-                    serde_json::json!({"peer_id": pid, "state": format!("{:?}", state)}),
-                    "webrtc-plugin",
-                ));
-            })
-        }));
+        connection.on_peer_connection_state_change(Box::new(
+            move |state: RTCPeerConnectionState| {
+                let eb = eb.clone();
+                let pid = pid.clone();
+                Box::pin(async move {
+                    log::info!("[webrtc] Peer {} state: {:?}", pid, state);
+                    eb.do_send(Event::new(
+                        "webrtc_state_change",
+                        serde_json::json!({"peer_id": pid, "state": format!("{:?}", state)}),
+                        "webrtc-plugin",
+                    ));
+                })
+            },
+        ));
     }
 
     fn setup_ice_handler(connection: &Arc<RTCPeerConnection>, peer_id: &str, eb: &Addr<EventBus>) {
         let eb = eb.clone();
         let pid = peer_id.to_string();
-        connection.on_ice_candidate(Box::new(move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
-            let eb = eb.clone();
-            let pid = pid.clone();
-            Box::pin(async move {
-                if let Some(c) = candidate {
-                    if let Ok(json) = c.to_json() {
-                        eb.do_send(Event::new(
-                            "webrtc_signaling",
-                            serde_json::json!({"peer_id": pid, "signaling": {
-                                "type": "IceCandidate",
-                                "payload": {
-                                    "candidate": json.candidate,
-                                    "sdp_mid": json.sdp_mid,
-                                    "sdp_mline_index": json.sdp_mline_index,
-                                }
-                            }}),
-                            "webrtc-plugin",
-                        ));
+        connection.on_ice_candidate(Box::new(
+            move |candidate: Option<webrtc::ice_transport::ice_candidate::RTCIceCandidate>| {
+                let eb = eb.clone();
+                let pid = pid.clone();
+                Box::pin(async move {
+                    if let Some(c) = candidate {
+                        if let Ok(json) = c.to_json() {
+                            eb.do_send(Event::new(
+                                "webrtc_signaling",
+                                serde_json::json!({"peer_id": pid, "signaling": {
+                                    "type": "IceCandidate",
+                                    "payload": {
+                                        "candidate": json.candidate,
+                                        "sdp_mid": json.sdp_mid,
+                                        "sdp_mline_index": json.sdp_mline_index,
+                                    }
+                                }}),
+                                "webrtc-plugin",
+                            ));
+                        }
                     }
-                }
-            })
-        }));
+                })
+            },
+        ));
     }
 
-    fn setup_track_handler(connection: &Arc<RTCPeerConnection>, peer_id: &str, eb: &Addr<EventBus>) {
+    fn setup_track_handler(
+        connection: &Arc<RTCPeerConnection>,
+        peer_id: &str,
+        eb: &Addr<EventBus>,
+    ) {
         let eb = eb.clone();
         let pid = peer_id.to_string();
-        connection.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver, _transceiver| {
-            let eb = eb.clone();
-            let pid = pid.clone();
-            Box::pin(async move {
-                let kind = track.kind().to_string();
-                let codec = track.codec();
-                let mime = codec.capability.mime_type.clone();
-                log::info!("[webrtc] remote track [{}]: kind={}, codec={}", pid, kind, mime);
+        connection.on_track(Box::new(
+            move |track: Arc<TrackRemote>, _receiver, _transceiver| {
+                let eb = eb.clone();
+                let pid = pid.clone();
+                Box::pin(async move {
+                    let kind = track.kind().to_string();
+                    let codec = track.codec();
+                    let mime = codec.capability.mime_type.clone();
+                    log::info!(
+                        "[webrtc] remote track [{}]: kind={}, codec={}",
+                        pid,
+                        kind,
+                        mime
+                    );
 
-                if kind == "audio" {
-                    tokio::spawn(async move {
-                        loop {
-                            match track.read_rtp().await {
-                                Ok((pkt, _)) => {
-                                    log::debug!("[webrtc] audio RTP [{}]: {} bytes", pid, pkt.payload.len());
-                                    eb.do_send(Event::new(
-                                        "webrtc_audio_received",
-                                        serde_json::json!({
-                                            "peer_id": pid,
-                                            "codec": mime,
-                                            "data": crate::base64_encode(&pkt.payload),
-                                        }),
-                                        "webrtc-plugin",
-                                    ));
-                                }
-                                Err(e) => {
-                                    log::debug!("[webrtc] audio track ended [{}]: {:?}", pid, e);
-                                    break;
+                    if kind == "audio" {
+                        tokio::spawn(async move {
+                            loop {
+                                match track.read_rtp().await {
+                                    Ok((pkt, _)) => {
+                                        log::debug!(
+                                            "[webrtc] audio RTP [{}]: {} bytes",
+                                            pid,
+                                            pkt.payload.len()
+                                        );
+                                        eb.do_send(Event::new(
+                                            "webrtc_audio_received",
+                                            serde_json::json!({
+                                                "peer_id": pid,
+                                                "codec": mime,
+                                                "data": crate::base64_encode(&pkt.payload),
+                                            }),
+                                            "webrtc-plugin",
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        log::debug!(
+                                            "[webrtc] audio track ended [{}]: {:?}",
+                                            pid,
+                                            e
+                                        );
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                    });
-                }
-            })
-        }));
+                        });
+                    }
+                })
+            },
+        ));
     }
 
     pub async fn local_sdp(&self) -> Option<String> {
@@ -325,13 +381,18 @@ impl PeerHandle {
     pub async fn set_remote_sdp(&self, sdp: &str) -> Result<(), String> {
         let desc = RTCSessionDescription::answer(sdp.to_string())
             .map_err(|e| format!("parse answer: {}", e))?;
-        self.connection.set_remote_description(desc).await
+        self.connection
+            .set_remote_description(desc)
+            .await
             .map_err(|e| format!("set remote: {}", e))?;
         Ok(())
     }
 
     pub async fn add_ice_candidate(
-        &self, candidate: &str, sdp_mid: Option<&str>, sdp_mline_index: Option<u16>,
+        &self,
+        candidate: &str,
+        sdp_mid: Option<&str>,
+        sdp_mline_index: Option<u16>,
     ) -> Result<(), String> {
         let init = RTCIceCandidateInit {
             candidate: candidate.to_string(),
@@ -339,15 +400,20 @@ impl PeerHandle {
             sdp_mline_index,
             username_fragment: None,
         };
-        self.connection.add_ice_candidate(init).await
+        self.connection
+            .add_ice_candidate(init)
+            .await
             .map_err(|e| format!("add ICE: {}", e))?;
         Ok(())
     }
 
     pub async fn send_text(&self, text: &str) -> Result<(), String> {
-        let dc = self.data_channel.as_ref()
+        let dc = self
+            .data_channel
+            .as_ref()
             .ok_or_else(|| "DataChannel not ready".to_string())?;
-        dc.send_text(text.to_string()).await
+        dc.send_text(text.to_string())
+            .await
             .map_err(|e| format!("send: {}", e))?;
         Ok(())
     }

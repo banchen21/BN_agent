@@ -3,10 +3,10 @@
 //! and manages the shared ToolRegistry.
 
 use actix::prelude::*;
+use parking_lot::Mutex;
 use plugin_interface::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 // ── LoadedPlugin ─────────────────────────────────────────────────────────────
 

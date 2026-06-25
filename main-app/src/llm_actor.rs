@@ -13,7 +13,10 @@
 //! | `llm.response`  | A successful completion        |
 //! | `llm.error`     | HTTP / API / parse failure     |
 
-use crate::chat_store::{AppendJsonMessage, ChatStoreActor, EnsureOwnerPeer, FetchRecent, Record};
+use crate::chat_store::{
+    AppendJsonMessage, ChatStoreActor, EnsureOwnerPeer, FetchLongSummaryBatch, FetchRecent,
+    GetChatLongSummary, LongSummaryBatch, LongSummaryRecord, Record, UpdateLongSummary,
+};
 use actix::prelude::*;
 use plugin_interface::*;
 use rand::Rng;
@@ -29,6 +32,11 @@ pub struct LlmConfig {
     pub max_history_turns: usize,
     pub max_tokens: u32,
     pub thinking: bool,
+    /// 后台滚动压缩旧对话，生成长期摘要并注入后续上下文。
+    pub long_summary_enabled: bool,
+    pub long_summary_keep_recent: usize,
+    pub long_summary_batch_size: usize,
+    pub long_summary_max_chars: usize,
     /// 固定采样温度，避免回复风格忽冷忽热。
     pub temperature: f32,
     pub jailbreak_prompts: Vec<String>,
@@ -82,6 +90,24 @@ impl LlmConfig {
             .map(|v| v == "enabled" || v == "true" || v == "1")
             .unwrap_or(false);
 
+        let long_summary_enabled = std::env::var("LLM_LONG_SUMMARY_ENABLED")
+            .ok()
+            .map(|v| v.to_lowercase())
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "off" | "disabled"))
+            .unwrap_or(true);
+        let long_summary_keep_recent = std::env::var("LLM_LONG_SUMMARY_KEEP_RECENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        let long_summary_batch_size = std::env::var("LLM_LONG_SUMMARY_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80);
+        let long_summary_max_chars = std::env::var("LLM_LONG_SUMMARY_MAX_CHARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4000);
+
         // 固定采样温度，避免回复风格忽冷忽热。默认 0.8，可用 LLM_TEMPERATURE 覆盖。
         let temperature = std::env::var("LLM_TEMPERATURE")
             .ok()
@@ -103,6 +129,10 @@ impl LlmConfig {
             max_history_turns,
             max_tokens,
             thinking,
+            long_summary_enabled,
+            long_summary_keep_recent,
+            long_summary_batch_size,
+            long_summary_max_chars,
             temperature,
             jailbreak_prompts,
             jailbreak_default_index,
@@ -299,6 +329,9 @@ impl Handler<ChatRequest> for LlmActor {
             .unwrap_or(200);
         let user_msg = msg.message.clone();
         let peer_id = msg.peer_id.clone();
+        let request_id = msg.request_id.clone();
+        let source = msg.source.clone();
+        let user_name = msg.user_name.clone();
         let original_user_msg = msg.original_user_msg.clone();
         let skip_store = msg.skip_store;
         let contexts = msg.contexts.clone();
@@ -319,6 +352,10 @@ impl Handler<ChatRequest> for LlmActor {
         let base_url = self.config.base_url.clone();
         let api_key = self.config.api_key.clone();
         let thinking = self.config.thinking;
+        let long_summary_enabled = self.config.long_summary_enabled;
+        let long_summary_keep_recent = self.config.long_summary_keep_recent;
+        let long_summary_batch_size = self.config.long_summary_batch_size;
+        let long_summary_max_chars = self.config.long_summary_max_chars;
         let temperature = self.config.temperature;
 
         event_bus.do_send(Event::new(
@@ -352,6 +389,17 @@ impl Handler<ChatRequest> for LlmActor {
                 None => String::new(),
             };
 
+            let long_summary = if long_summary_enabled && !peer_id.is_empty() {
+                store_addr
+                    .send(GetChatLongSummary {
+                        peer_id: peer_id.clone(),
+                    })
+                    .await
+                    .unwrap_or(None)
+            } else {
+                None
+            };
+
             // ── 1. Separate contexts into memory vs. other ──
             let mut memory_ctx: Vec<String> = Vec::new();
             let mut other_ctx: Vec<String> = Vec::new();
@@ -367,6 +415,12 @@ impl Handler<ChatRequest> for LlmActor {
             let mut full_system = system_content.clone();
             if !relation_hint.is_empty() {
                 full_system.push_str(&format!("\n\n[关系守则] {}", relation_hint));
+            }
+            if let Some(summary) = long_summary
+                .as_ref()
+                .and_then(|s| build_long_summary_context(&s.summary, s.summarized_until_id, &s.updated_at))
+            {
+                full_system.push_str(&format!("\n\n{}", summary));
             }
             for ctx in &memory_ctx {
                 full_system.push_str(&format!("\n\n[记忆] {}", ctx));
@@ -472,6 +526,12 @@ impl Handler<ChatRequest> for LlmActor {
             let default_model = model.clone();
             let default_base_url = base_url.clone();
             let default_api_key = api_key.clone();
+            let summary_model = default_model.clone();
+            let summary_api_url = format!(
+                "{}/chat/completions",
+                default_base_url.trim_end_matches('/')
+            );
+            let summary_api_key = default_api_key.clone();
             let actual_model = if video_base64.is_some() { video_model }
                 else if image_base64.is_some() { image_model }
                 else { model };
@@ -501,8 +561,14 @@ impl Handler<ChatRequest> for LlmActor {
             body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
             // ── 5. Call LLM ──
+            let stream_meta = StreamEventMeta {
+                request_id: request_id.clone(),
+                source: source.clone(),
+                peer_id: peer_id.clone(),
+                user_name: user_name.clone(),
+            };
             let mut result = if stream {
-                stream_llm(&client, &api_url, &actual_api_key, &body, &event_bus).await
+                stream_llm(&client, &api_url, &actual_api_key, &body, &event_bus, &stream_meta).await
             } else {
                 call_llm(&client, &api_url, &actual_api_key, &body, &event_bus).await
             };
@@ -538,7 +604,7 @@ impl Handler<ChatRequest> for LlmActor {
                     fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
                     result = if stream {
-                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, &stream_meta).await
                     } else {
                         call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     };
@@ -576,7 +642,7 @@ impl Handler<ChatRequest> for LlmActor {
                     fallback_body["thinking"] = serde_json::json!({ "type": if thinking { "enabled" } else { "disabled" } });
 
                     result = if stream {
-                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
+                        stream_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus, &stream_meta).await
                     } else {
                         call_llm(&client, &fallback_api_url, &default_api_key, &fallback_body, &event_bus).await
                     };
@@ -629,6 +695,42 @@ impl Handler<ChatRequest> for LlmActor {
                 }
             }
 
+            if long_summary_enabled
+                && !skip_store
+                && !peer_id.is_empty()
+                && result
+                    .as_ref()
+                    .map(|resp| resp.tool_calls.is_empty())
+                    .unwrap_or(false)
+            {
+                let summary_client = client.clone();
+                let summary_store = store_addr.clone();
+                let summary_event_bus = event_bus.clone();
+                let summary_peer_id = peer_id.clone();
+                actix::spawn(async move {
+                    if let Err(e) = compact_long_summary(
+                        summary_client,
+                        summary_store,
+                        summary_event_bus.clone(),
+                        summary_api_url,
+                        summary_api_key,
+                        summary_model,
+                        summary_peer_id.clone(),
+                        long_summary_keep_recent,
+                        long_summary_batch_size,
+                        long_summary_max_chars,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "[LlmActor] long summary compression failed for peer '{}': {}",
+                            summary_peer_id,
+                            e
+                        );
+                    }
+                });
+            }
+
             result
         }
         .into_actor(self)
@@ -653,6 +755,25 @@ impl Handler<JailbreakCount> for LlmActor {
 
 // ── Streaming LLM call ──────────────────────────────────────────────────────
 
+#[derive(Clone, Debug)]
+struct StreamEventMeta {
+    request_id: String,
+    source: String,
+    peer_id: String,
+    user_name: String,
+}
+
+impl StreamEventMeta {
+    fn payload_base(&self) -> serde_json::Value {
+        serde_json::json!({
+            "request_id": self.request_id.clone(),
+            "source": self.source.clone(),
+            "peer_id": self.peer_id.clone(),
+            "user_name": self.user_name.clone(),
+        })
+    }
+}
+
 /// Call the LLM with SSE streaming, emitting chunks on the EventBus.
 async fn stream_llm(
     client: &reqwest::Client,
@@ -660,6 +781,7 @@ async fn stream_llm(
     api_key: &str,
     body: &serde_json::Value,
     event_bus: &Addr<EventBus>,
+    meta: &StreamEventMeta,
 ) -> Result<LlmResponse, String> {
     use futures_util::StreamExt;
 
@@ -783,14 +905,11 @@ async fn stream_llm(
             if let Some(content) = delta["content"].as_str() {
                 full_content.push_str(content);
                 chunk_count += 1;
-                event_bus.do_send(Event::new(
-                    "llm.chunk",
-                    serde_json::json!({
-                        "content": content,
-                        "accumulated_length": full_content.len(),
-                    }),
-                    "llm-actor",
-                ));
+                let mut payload = meta.payload_base();
+                payload["content"] = serde_json::json!(content);
+                payload["accumulated_length"] = serde_json::json!(full_content.len());
+                payload["chunk_index"] = serde_json::json!(chunk_count);
+                event_bus.do_send(Event::new("llm.chunk", payload, "llm-actor"));
             }
 
             if let Some(tc) = delta.get("tool_calls") {
@@ -849,17 +968,13 @@ async fn stream_llm(
     };
 
     let preview = truncate_preview(&full_content, 200);
-    event_bus.do_send(Event::new(
-        "llm.response",
-        serde_json::json!({
-            "content_preview": preview,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "chunk_count": chunk_count,
-            "streamed": true,
-        }),
-        "llm-actor",
-    ));
+    let mut payload = meta.payload_base();
+    payload["content_preview"] = serde_json::json!(preview);
+    payload["prompt_tokens"] = serde_json::json!(prompt_tokens);
+    payload["completion_tokens"] = serde_json::json!(completion_tokens);
+    payload["chunk_count"] = serde_json::json!(chunk_count);
+    payload["streamed"] = serde_json::json!(true);
+    event_bus.do_send(Event::new("llm.response", payload, "llm-actor"));
     Ok(result)
 }
 
@@ -911,6 +1026,56 @@ async fn call_llm(
         return Err(err);
     }
 
+    let llm_response = parse_chat_completion_response(&json);
+    let tc_count = llm_response.tool_calls.len();
+    let preview = truncate_preview(&llm_response.content, 200);
+    event_bus.do_send(Event::new(
+        "llm.response",
+        serde_json::json!({
+            "content_preview": preview,
+            "prompt_tokens": llm_response.prompt_tokens,
+            "completion_tokens": llm_response.completion_tokens,
+            "tool_calls_count": tc_count,
+        }),
+        "llm-actor",
+    ));
+    Ok(llm_response)
+}
+
+async fn call_llm_silent(
+    client: &reqwest::Client,
+    api_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<LlmResponse, String> {
+    let response = client
+        .post(api_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("LLM summary HTTP error: {}", e))?;
+
+    let status = response.status();
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("LLM summary JSON parse error: {}", e))?;
+
+    if !status.is_success() {
+        let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+        return Err(format!(
+            "LLM summary API error ({}): {}",
+            status.as_u16(),
+            err_msg
+        ));
+    }
+
+    Ok(parse_chat_completion_response(&json))
+}
+
+fn parse_chat_completion_response(json: &serde_json::Value) -> LlmResponse {
     let choice = &json["choices"][0];
     let content = choice["message"]["content"]
         .as_str()
@@ -944,32 +1109,191 @@ async fn call_llm(
         })
         .unwrap_or_default();
 
-    let tc_count = tool_calls.len();
-    let llm_response = LlmResponse {
-        content: content.clone(),
+    LlmResponse {
+        content,
         model: json["model"].as_str().unwrap_or("").to_string(),
         prompt_tokens,
         completion_tokens,
         prompt_cache_hit_tokens,
         prompt_cache_miss_tokens,
         tool_calls,
-    };
+    }
+}
 
-    let preview = truncate_preview(&content, 200);
+async fn compact_long_summary(
+    client: reqwest::Client,
+    store_addr: Addr<ChatStoreActor>,
+    event_bus: Addr<EventBus>,
+    api_url: String,
+    api_key: String,
+    model: String,
+    peer_id: String,
+    keep_recent: usize,
+    batch_size: usize,
+    max_chars: usize,
+) -> Result<(), String> {
+    let Some(batch) = store_addr
+        .send(FetchLongSummaryBatch {
+            peer_id: peer_id.clone(),
+            keep_recent,
+            batch_size,
+        })
+        .await
+        .map_err(|e| format!("long summary batch mailbox error: {}", e))?
+    else {
+        return Ok(());
+    };
+    let Some(last_record) = batch.records.last() else {
+        return Ok(());
+    };
+    let summarized_until_id = last_record.id;
+    let previous_summarized_until_id = batch.summarized_until_id;
+    let record_count = batch.records.len();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": build_long_summary_messages(&batch, max_chars),
+        "temperature": 0.2,
+        "max_tokens": long_summary_max_tokens(max_chars),
+        "thinking": { "type": "disabled" },
+    });
+
+    let response = call_llm_silent(&client, &api_url, &api_key, &body).await?;
+    let summary = normalize_long_summary(&response.content, max_chars);
+    if summary.trim().is_empty() {
+        return Err("LLM summary response was empty".into());
+    }
+
+    let updated = store_addr
+        .send(UpdateLongSummary {
+            peer_id: batch.peer_id.clone(),
+            summary: summary.clone(),
+            summarized_until_id,
+        })
+        .await
+        .map_err(|e| format!("long summary update mailbox error: {}", e))?;
+    let Some(updated) = updated else {
+        return Err("long summary update returned no row".into());
+    };
+    if updated.summarized_until_id != summarized_until_id {
+        return Ok(());
+    }
+
     event_bus.do_send(Event::new(
-        "llm.response",
+        "llm.summary.updated",
         serde_json::json!({
-            "content_preview": preview,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "tool_calls_count": tc_count,
+            "peer_id": peer_id,
+            "record_count": record_count,
+            "previous_summarized_until_id": previous_summarized_until_id,
+            "summarized_until_id": summarized_until_id,
+            "summary_chars": updated.summary.chars().count(),
         }),
         "llm-actor",
     ));
-    Ok(llm_response)
+    Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn build_long_summary_context(
+    summary: &str,
+    summarized_until_id: i64,
+    updated_at: &str,
+) -> Option<String> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    let updated = if updated_at.trim().is_empty() {
+        String::new()
+    } else {
+        format!("，更新时间：{}", updated_at.trim())
+    };
+    Some(format!(
+        "[长期对话摘要]\n已压缩到历史记录 #{}{}。\n{}\n[长期摘要使用规则] 它只保留较早对话的稳定事实、偏好、承诺和未完成事项；如果它与近期时间线或当前用户消息冲突，以近期内容为准。",
+        summarized_until_id, updated, summary
+    ))
+}
+
+fn build_long_summary_messages(
+    batch: &LongSummaryBatch,
+    max_chars: usize,
+) -> Vec<serde_json::Value> {
+    let existing = if batch.existing_summary.trim().is_empty() {
+        "（暂无）".to_string()
+    } else {
+        truncate_chars_owned(batch.existing_summary.trim(), max_chars)
+    };
+    let records = format_long_summary_records(&batch.records);
+    vec![
+        serde_json::json!({
+            "role": "system",
+            "content": "你是 BN Agent 的长期对话摘要压缩器。只输出更新后的摘要正文，不要寒暄、不要 Markdown 标题。"
+        }),
+        serde_json::json!({
+            "role": "user",
+            "content": format!(
+                "请把已有长期摘要与新增旧对话片段合并，输出一份不超过 {} 字的中文长期摘要。\n\n保留：稳定事实、用户偏好、关系状态、称呼、承诺、计划、未完成事项、重要情绪模式。\n丢弃：一次性闲聊、重复铺垫、临时语气、无后续价值的工具细节。\n若新增片段修正旧摘要，以新增片段为准。\n\n已有长期摘要：\n{}\n\n新增旧对话片段（按时间顺序，当前即时上下文之外）：\n{}",
+                max_chars, existing, records
+            )
+        }),
+    ]
+}
+
+fn format_long_summary_records(records: &[LongSummaryRecord]) -> String {
+    records
+        .iter()
+        .filter_map(|record| {
+            let compact = record
+                .content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if compact.trim().is_empty() {
+                return None;
+            }
+            let role = match record.role.as_str() {
+                "assistant" => "你",
+                "user" => "用户",
+                _ => "消息",
+            };
+            Some(format!(
+                "- #{} {} {}：{}",
+                record.id,
+                record.created_at,
+                role,
+                truncate_chars_owned(&compact, 500)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_long_summary(summary: &str, max_chars: usize) -> String {
+    let trimmed = summary
+        .trim()
+        .trim_start_matches("```markdown")
+        .trim_start_matches("```md")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    truncate_chars_owned(trimmed, max_chars)
+}
+
+fn long_summary_max_tokens(max_chars: usize) -> u32 {
+    ((max_chars / 2).clamp(512, 4096)) as u32
+}
+
+fn truncate_chars_owned(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    if max_chars <= 3 {
+        return input.chars().take(max_chars).collect();
+    }
+    let mut out: String = input.chars().take(max_chars - 3).collect();
+    out.push_str("...");
+    out
+}
 
 /// 判断是否需要从多模态模型回退到文本模型 + 工具调用。
 /// 条件：LLM 调用出错，或返回内容太短（说明模型无法处理图片）。
@@ -1086,16 +1410,27 @@ fn build_recent_timeline(records: &[Record]) -> Option<String> {
         let relative = created
             .map(|created| format_relative_duration(now.signed_duration_since(created)))
             .unwrap_or_else(|| "时间未知".to_string());
-        let compact = record.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let compact = record
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let preview = truncate_preview(&compact, 80).trim();
         if preview.is_empty() {
             continue;
         }
-        let role = if record.role == "assistant" { "你" } else { "用户" };
+        let role = if record.role == "assistant" {
+            "你"
+        } else {
+            "用户"
+        };
         let absolute = created
             .map(|created| created.format("%Y-%m-%d %H:%M:%S").to_string())
             .unwrap_or_else(|| record.created_at.clone());
-        lines.push(format!("- {}（{}）：{}：{}", absolute, relative, role, preview));
+        lines.push(format!(
+            "- {}（{}）：{}：{}",
+            absolute, relative, role, preview
+        ));
     }
 
     if lines.is_empty() {
@@ -1136,4 +1471,54 @@ fn truncate_preview(s: &str, max: usize) -> &str {
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     &s[..cut]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_summary_context_skips_empty_summary() {
+        assert!(build_long_summary_context("  ", 10, "").is_none());
+    }
+
+    #[test]
+    fn long_summary_context_mentions_recent_precedence() {
+        let context =
+            build_long_summary_context("用户喜欢夜间工作", 42, "2026-06-26").expect("context");
+
+        assert!(context.contains("[长期对话摘要]"));
+        assert!(context.contains("#42"));
+        assert!(context.contains("用户喜欢夜间工作"));
+        assert!(context.contains("以近期内容为准"));
+    }
+
+    #[test]
+    fn long_summary_prompt_formats_records() {
+        let batch = LongSummaryBatch {
+            peer_id: "telegram:1".into(),
+            existing_summary: "旧摘要".into(),
+            summarized_until_id: 1,
+            records: vec![LongSummaryRecord {
+                id: 2,
+                role: "user".into(),
+                content: "  新   偏好  ".into(),
+                created_at: "2026-06-26 12:00:00".into(),
+            }],
+        };
+
+        let messages = build_long_summary_messages(&batch, 1000);
+        let prompt = messages[1]["content"].as_str().unwrap();
+
+        assert!(prompt.contains("已有长期摘要"));
+        assert!(prompt.contains("旧摘要"));
+        assert!(prompt.contains("#2 2026-06-26 12:00:00 用户：新 偏好"));
+    }
+
+    #[test]
+    fn normalize_long_summary_strips_fence_and_truncates() {
+        let summary = normalize_long_summary("```markdown\nabcdef\n```", 5);
+
+        assert_eq!(summary, "ab...");
+    }
 }

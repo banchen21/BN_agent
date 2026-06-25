@@ -9,8 +9,7 @@ use serde::Deserialize;
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// 最近图片缓存（单会话，只保留最新一张）
-static MEDIA_CACHE: LazyLock<Mutex<Option<(String, String)>>> =
-    LazyLock::new(|| Mutex::new(None));
+static MEDIA_CACHE: LazyLock<Mutex<Option<(String, String)>>> = LazyLock::new(|| Mutex::new(None));
 
 // ── MiMo API 配置 ────────────────────────────────────────────────────────────
 
@@ -29,9 +28,12 @@ impl MiMoConfig {
         let base_url = std::env::var("IMAGE_BASE_URL")
             .or_else(|_| std::env::var("LLM_BASE_URL"))
             .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".into());
-        let model = std::env::var("IMAGE_MODEL")
-            .unwrap_or_else(|_| "mimo-v2.5".into());
-        Ok(Self { api_key, base_url, model })
+        let model = std::env::var("IMAGE_MODEL").unwrap_or_else(|_| "mimo-v2.5".into());
+        Ok(Self {
+            api_key,
+            base_url,
+            model,
+        })
     }
 }
 
@@ -71,7 +73,10 @@ struct MiMoClient {
 
 impl MiMoClient {
     fn new(config: MiMoConfig) -> Self {
-        Self { config, http: reqwest::Client::new() }
+        Self {
+            config,
+            http: reqwest::Client::new(),
+        }
     }
 
     fn chat(&self, messages: Vec<serde_json::Value>, max_tokens: u32) -> Result<String, String> {
@@ -106,7 +111,10 @@ impl MiMoClient {
                     .map_err(|e| format!("HTTP error: {}", e))?;
 
                 let status = response.status();
-                let text = response.text().await.map_err(|e| format!("read body: {}", e))?;
+                let text = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("read body: {}", e))?;
 
                 if !status.is_success() {
                     if let Ok(err) = serde_json::from_str::<MiMoError>(&text) {
@@ -117,10 +125,11 @@ impl MiMoClient {
                     return Err(format!("MiMo API error ({}): {}", status.as_u16(), text));
                 }
 
-                let resp: MiMoResponse = serde_json::from_str(&text)
-                    .map_err(|e| format!("parse response: {}", e))?;
+                let resp: MiMoResponse =
+                    serde_json::from_str(&text).map_err(|e| format!("parse response: {}", e))?;
 
-                let content = resp.choices
+                let content = resp
+                    .choices
                     .first()
                     .and_then(|c| c.message.content.as_deref())
                     .unwrap_or("")
@@ -144,10 +153,7 @@ impl MiMoClient {
 
 // ── 辅助 ─────────────────────────────────────────────────────────────────────
 
-fn build_user_content(
-    images: &[(String, Option<String>)],
-    text: &str,
-) -> serde_json::Value {
+fn build_user_content(images: &[(String, Option<String>)], text: &str) -> serde_json::Value {
     let mut parts: Vec<serde_json::Value> = Vec::new();
     for (b64, mime) in images {
         let mime_type = mime.as_deref().unwrap_or("image/jpeg");
@@ -168,7 +174,8 @@ fn build_user_content(
 fn resolve_image(args: &serde_json::Value) -> Result<(String, String), String> {
     // 优先用显式传入的 base64
     if let Some(b64) = args.get("image_base64").and_then(|v| v.as_str()) {
-        let mime = args.get("mime_type")
+        let mime = args
+            .get("mime_type")
             .and_then(|v| v.as_str())
             .unwrap_or("image/jpeg")
             .to_string();
@@ -190,12 +197,15 @@ struct ImageUnderstandTool {
 }
 
 impl ImageUnderstandTool {
-    fn new(client: Arc<MiMoClient>) -> Self { Self { client } }
+    fn new(client: Arc<MiMoClient>) -> Self {
+        Self { client }
+    }
 }
 
 impl ToolExecutor for ImageUnderstandTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "image_understand".into(),
             description: "理解/分析图片内容。可传入图片 base64，也可省略（自动使用该对话最近收到的图片）。适用于图片描述、OCR、物体识别、场景分析等。".into(),
             internal: false,
@@ -217,6 +227,7 @@ impl ToolExecutor for ImageUnderstandTool {
                 },
                 "required": ["prompt"]
             }),
+        }
         });
         &DEF
     }
@@ -248,12 +259,15 @@ struct ImageDescribeTool {
 }
 
 impl ImageDescribeTool {
-    fn new(client: Arc<MiMoClient>) -> Self { Self { client } }
+    fn new(client: Arc<MiMoClient>) -> Self {
+        Self { client }
+    }
 }
 
 impl ToolExecutor for ImageDescribeTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "image_describe".into(),
             description: "描述图片内容。可省略 image_base64，工具会自动使用该对话最近收到的图片。快捷版，无需手动写 prompt。".into(),
             internal: false,
@@ -270,6 +284,7 @@ impl ToolExecutor for ImageDescribeTool {
                     }
                 }
             }),
+        }
         });
         &DEF
     }
@@ -300,12 +315,15 @@ struct ImageCompareTool {
 }
 
 impl ImageCompareTool {
-    fn new(client: Arc<MiMoClient>) -> Self { Self { client } }
+    fn new(client: Arc<MiMoClient>) -> Self {
+        Self { client }
+    }
 }
 
 impl ToolExecutor for ImageCompareTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "image_compare".into(),
             description: "对比两张图片的异同。传入两张图片 base64（或省略，自动使用该对话最近收到的两张图片）。".into(),
             internal: false,
@@ -328,6 +346,7 @@ impl ToolExecutor for ImageCompareTool {
                     "mime_type_b": {"type": "string", "description": "第二张图片的 MIME 类型"}
                 }
             }),
+        }
         });
         &DEF
     }
@@ -335,32 +354,31 @@ impl ToolExecutor for ImageCompareTool {
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
         let b64_a = match args.get("image_base64_a").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
-            None => {
-                match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
-                    Some((b64, _)) => b64,
-                    None => return ToolResult::err("missing: image_base64_a（且缓存中无图片）"),
-                }
-            }
+            None => match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
+                Some((b64, _)) => b64,
+                None => return ToolResult::err("missing: image_base64_a（且缓存中无图片）"),
+            },
         };
         let b64_b = match args.get("image_base64_b").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
-            None => {
-                match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
-                    Some((b64, _)) => b64,
-                    None => return ToolResult::err("missing: image_base64_b（且缓存中无图片）"),
-                }
-            }
+            None => match MEDIA_CACHE.lock().ok().and_then(|c| c.clone()) {
+                Some((b64, _)) => b64,
+                None => return ToolResult::err("missing: image_base64_b（且缓存中无图片）"),
+            },
         };
-        let prompt = args.get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Please describe the similarities and differences between these two images.");
-        let mime_a = args.get("mime_type_a").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let mime_b = args.get("mime_type_b").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-        let user_content = build_user_content(
-            &[(b64_a, mime_a), (b64_b, mime_b)],
-            prompt,
+        let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or(
+            "Please describe the similarities and differences between these two images.",
         );
+        let mime_a = args
+            .get("mime_type_a")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let mime_b = args
+            .get("mime_type_b")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let user_content = build_user_content(&[(b64_a, mime_a), (b64_b, mime_b)], prompt);
         let messages = vec![serde_json::json!({"role": "user", "content": user_content})];
 
         match self.client.chat(messages, 1024) {
@@ -393,7 +411,9 @@ impl ImagePlugin {
 }
 
 impl Plugin for ImagePlugin {
-    fn info(&self) -> PluginInfo { self.info.clone() }
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         let config = MiMoConfig::from_env().map_err(|e| {
@@ -411,14 +431,17 @@ impl Plugin for ImagePlugin {
             reg.register(Arc::new(ImageCompareTool::new(client.clone())));
         }
 
-        ctx.logger.info("registered 3 tools: image_understand, image_describe, image_compare");
+        ctx.logger
+            .info("registered 3 tools: image_understand, image_describe, image_compare");
         Ok(())
     }
 
     fn on_event(&self, event: &Event) -> bool {
         if event.topic == "user.message" {
             if let Some(b64) = event.data.get("image_base64").and_then(|v| v.as_str()) {
-                let mime = event.data.get("mime_type")
+                let mime = event
+                    .data
+                    .get("mime_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("image/jpeg");
                 if let Ok(mut cache) = MEDIA_CACHE.lock() {

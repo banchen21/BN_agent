@@ -13,6 +13,8 @@
 //! | POST   | `/api/events`                | Publish an event to the bus      |
 //! | POST   | `/api/llm/chat`              | Simple LLM chat                  |
 //! | POST   | `/api/chat`                  | Full chat with tools + history   |
+//! | GET    | `/api/chat/sessions`         | List per-peer chat sessions      |
+//! | POST   | `/api/chat/sessions/refresh` | Refresh one session summary      |
 //! | GET    | `/api/tools`                 | List registered tools            |
 //! | POST   | `/api/tools/call`            | Call a tool directly             |
 //! | POST   | `/api/agent-loop/start`      | Start a goal-driven agent loop   |
@@ -47,28 +49,28 @@ mod token_usage_actor;
 mod tool_exec;
 
 use actix::prelude::*;
-use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::error::ErrorUnauthorized;
 use actix_web::middleware::Next;
+use actix_web::{web, HttpRequest, HttpResponse, HttpServer, Responder};
 use agent_loop_actor::{
     AgentLoopActor, GetAgentLoop, ListAgentLoops, PauseAgentLoop, ResumeAgentLoop, StartAgentLoop,
     StopAgentLoop,
 };
 use cancellation_actor::CancellationActor;
-use chat_store::{ChatStoreActor, ClearAll};
+use chat_store::{ChatStoreActor, ClearAll, ListChatSessions, RefreshChatSession};
 use llm_actor::{LlmActor, LlmConfig};
 
 use message_router::MessageRouter;
 use metrics_actor::MetricsActor;
+use parking_lot::Mutex;
 use plugin_interface::*;
 use plugin_manager::PluginManager;
 use rate_limit_actor::RateLimitActor;
 use retry_actor::RetryActor;
 use serde::Deserialize;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use token_usage_actor::TokenUsageActor;
 
 // ── App state ────────────────────────────────────────────────────────────────
@@ -84,6 +86,7 @@ struct AppState {
     token_usage_addr: Option<Addr<TokenUsageActor>>,
     retry_addr: Option<Addr<RetryActor>>,
     cancellation_addr: Option<Addr<CancellationActor>>,
+    chat_store_addr: Option<Addr<ChatStoreActor>>,
     chat_store: Option<Recipient<ChatStoreMsg>>,
     agent_loop_addr: Option<Addr<AgentLoopActor>>,
 }
@@ -149,7 +152,11 @@ async fn health(state: web::Data<AppState>) -> impl Responder {
         .map(|p| p.len())
         .unwrap_or(0);
     let agent_loops_total = match &state.agent_loop_addr {
-        Some(addr) => addr.send(ListAgentLoops).await.map(|v| v.len()).unwrap_or(0),
+        Some(addr) => addr
+            .send(ListAgentLoops)
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0),
         None => 0,
     };
     HttpResponse::Ok().json(build_health_json(
@@ -388,6 +395,67 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatSessionsQuery {
+    peer_id: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_chat_sessions(
+    state: web::Data<AppState>,
+    query: web::Query<ChatSessionsQuery>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    match store
+        .send(ListChatSessions {
+            peer_id: query.peer_id.clone(),
+            limit: query.limit.unwrap_or(100),
+        })
+        .await
+    {
+        Ok(sessions) => HttpResponse::Ok().json(sessions),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
+    }
+}
+
+#[derive(Deserialize)]
+struct RefreshChatSessionRequest {
+    peer_id: String,
+}
+
+async fn refresh_chat_session(
+    state: web::Data<AppState>,
+    body: web::Json<RefreshChatSessionRequest>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    let peer_id = body.peer_id.trim();
+    if peer_id.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "peer_id is required" }));
+    }
+
+    match store
+        .send(RefreshChatSession {
+            peer_id: peer_id.to_string(),
+        })
+        .await
+    {
+        Ok(Some(session)) => HttpResponse::Ok().json(session),
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "session not found" }))
+        }
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", error) })),
     }
 }
 
@@ -970,6 +1038,7 @@ fn main() -> std::io::Result<()> {
             token_usage_addr,
             retry_addr,
             cancellation_addr,
+            chat_store_addr: Some(store_addr.clone()),
             chat_store: Some(store_addr.clone().recipient()),
             agent_loop_addr,
         });
@@ -988,6 +1057,8 @@ fn main() -> std::io::Result<()> {
                 .route("/api/events", web::post().to(publish_event))
                 .route("/api/llm/chat", web::post().to(llm_chat))
                 .route("/api/chat", web::post().to(chat))
+                .route("/api/chat/sessions", web::get().to(list_chat_sessions))
+                .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))
                 .route("/api/tools", web::get().to(list_tools))
                 .route("/api/tools/call", web::post().to(tool_call))
                 .route("/api/agent-loop/start", web::post().to(start_agent_loop))

@@ -32,7 +32,8 @@ impl AsrTtsPlugin {
             .unwrap_or_else(|_| "https://api.openai.com/v1".into());
         let asr_model = std::env::var("ASR_MODEL").unwrap_or_else(|_| "whisper-1".into());
         let tts_api_key = std::env::var("TTS_API_KEY")
-            .or_else(|_| std::env::var("LLM_API_KEY")).unwrap_or_default();
+            .or_else(|_| std::env::var("LLM_API_KEY"))
+            .unwrap_or_default();
         let tts_base_url = std::env::var("TTS_BASE_URL")
             .or_else(|_| std::env::var("LLM_BASE_URL"))
             .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
@@ -49,8 +50,14 @@ impl AsrTtsPlugin {
                 author: "BN Team".into(),
                 min_host_version: "0.1.0".into(),
             },
-            asr_api_key, asr_base_url, asr_model,
-            tts_api_key, tts_base_url, tts_model, tts_voice, tts_voice_desc,
+            asr_api_key,
+            asr_base_url,
+            asr_model,
+            tts_api_key,
+            tts_base_url,
+            tts_model,
+            tts_voice,
+            tts_voice_desc,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -62,7 +69,9 @@ impl AsrTtsPlugin {
 }
 
 impl Plugin for AsrTtsPlugin {
-    fn info(&self) -> PluginInfo { self.info.clone() }
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         self.event_bus = Some(ctx.event_bus.clone());
@@ -98,17 +107,27 @@ impl Plugin for AsrTtsPlugin {
     }
 
     fn stop(&mut self) {
-        if let Some(ref l) = self.logger { l.info("stopped"); }
+        if let Some(ref l) = self.logger {
+            l.info("stopped");
+        }
     }
 
     fn on_event(&self, event: &Event) -> bool {
         match event.topic.as_str() {
             "webrtc_audio_received" | "audio_captured" => {
-                let source = if event.topic == "webrtc_audio_received" { "webrtc" } else { "local" };
+                let source = if event.topic == "webrtc_audio_received" {
+                    "webrtc"
+                } else {
+                    "local"
+                };
                 self.handle_audio_received(event, source);
             }
             "assistant.message" => {
-                let source = event.data.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                let source = event
+                    .data
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if source == "webrtc" || source == "local" {
                     self.handle_assistant_for_tts(event, source);
                 }
@@ -123,15 +142,19 @@ impl Plugin for AsrTtsPlugin {
 
 impl AsrTtsPlugin {
     fn handle_audio_received(&self, event: &Event, source: &str) {
-        let peer_id = event.data.get("peer_id")
-            .and_then(|v| v.as_str()).unwrap_or("unknown");
+        let peer_id = event
+            .data
+            .get("peer_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let audio_b64 = match event.data.get("data").and_then(|v| v.as_str()) {
             Some(d) => d.to_string(),
             None => return,
         };
 
         let audio_data = match base64_decode(&audio_b64) {
-            Ok(d) => d, Err(_) => return,
+            Ok(d) => d,
+            Err(_) => return,
         };
 
         let client = self.client.clone();
@@ -146,11 +169,26 @@ impl AsrTtsPlugin {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().expect("tokio");
+                .enable_all()
+                .build()
+                .expect("tokio");
             rt.block_on(async {
-                match do_asr(&client, &base_url, &model, &api_key, &audio_data, "audio/opus", &lang, &logger).await {
+                match do_asr(
+                    &client,
+                    &base_url,
+                    &model,
+                    &api_key,
+                    &audio_data,
+                    "audio/opus",
+                    &lang,
+                    &logger,
+                )
+                .await
+                {
                     Ok(text) => {
-                        if text.trim().is_empty() { return; }
+                        if text.trim().is_empty() {
+                            return;
+                        }
                         logger.info(format!("ASR [{}]: {}", peer, text));
                         eb.do_send(Event::new(
                             "user.message",
@@ -171,11 +209,18 @@ impl AsrTtsPlugin {
         // 单会话模式：使用 source 作为 peer 标识
         let peer_id = source.to_string();
         let text = match event.data.get("text").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(), None => return,
+            Some(t) => t.to_string(),
+            None => return,
         };
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         let logger = self.logger.clone().unwrap();
-        logger.info(format!("TTS [{}]: {}...", peer_id, &text[..text.len().min(60)]));
+        logger.info(format!(
+            "TTS [{}]: {}...",
+            peer_id,
+            &text[..text.len().min(60)]
+        ));
 
         let client = self.client.clone();
         let base_url = self.tts_base_url.clone();
@@ -189,9 +234,21 @@ impl AsrTtsPlugin {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().expect("tokio");
+                .enable_all()
+                .build()
+                .expect("tokio");
             rt.block_on(async {
-                match do_tts(&client, &base_url, &model, &api_key, &text, &voice, Some(&voice_desc)).await {
+                match do_tts(
+                    &client,
+                    &base_url,
+                    &model,
+                    &api_key,
+                    &text,
+                    &voice,
+                    Some(&voice_desc),
+                )
+                .await
+                {
                     Ok(audio_data) => {
                         logger.info(format!("TTS done [{}]: {} bytes", peer, audio_data.len()));
                         let topic = match source_owned.as_str() {
@@ -230,15 +287,25 @@ fn ogg_to_wav(ogg_data: &[u8], logger: &PluginLogger) -> Result<Vec<u8>, String>
         .spawn()
         .map_err(|e| format!("ffmpeg spawn: {}", e))?;
 
-    logger.info(format!("ffmpeg: writing {} bytes to stdin...", ogg_data.len()));
+    logger.info(format!(
+        "ffmpeg: writing {} bytes to stdin...",
+        ogg_data.len()
+    ));
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(ogg_data).map_err(|e| format!("write stdin: {}", e))?;
+        stdin
+            .write_all(ogg_data)
+            .map_err(|e| format!("write stdin: {}", e))?;
     }
     drop(child.stdin.take());
     logger.info("ffmpeg: stdin closed, waiting for output...");
 
-    let output = child.wait_with_output().map_err(|e| format!("ffmpeg wait: {}", e))?;
-    logger.info(format!("ffmpeg: done, output {} bytes", output.stdout.len()));
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("ffmpeg wait: {}", e))?;
+    logger.info(format!(
+        "ffmpeg: done, output {} bytes",
+        output.stdout.len()
+    ));
     if !output.status.success() {
         return Err(format!("ffmpeg exit: {}", output.status));
     }
@@ -248,8 +315,14 @@ fn ogg_to_wav(ogg_data: &[u8], logger: &PluginLogger) -> Result<Vec<u8>, String>
 // ─── ASR API ──────────────────────────────────────────────────────
 
 async fn do_asr(
-    client: &reqwest::Client, base_url: &str, model: &str, api_key: &str,
-    audio_data: &[u8], mime_type: &str, language: &str, logger: &PluginLogger,
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    audio_data: &[u8],
+    mime_type: &str,
+    language: &str,
+    logger: &PluginLogger,
 ) -> Result<String, String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
@@ -266,7 +339,11 @@ async fn do_asr(
         (audio_data.to_vec(), mime_type.to_string())
     };
 
-    logger.info(format!("sending to ASR ({}, {} bytes)...", final_mime, audio_bytes.len()));
+    logger.info(format!(
+        "sending to ASR ({}, {} bytes)...",
+        final_mime,
+        audio_bytes.len()
+    ));
     let audio_b64 = base64_encode(&audio_bytes);
     let data_url = format!("data:{};base64,{}", final_mime, audio_b64);
 
@@ -276,18 +353,28 @@ async fn do_asr(
         "asr_options": { "language": language },
     });
 
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .header("api-key", api_key)
-        .json(&body).send().await
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("ASR request failed: {}", e))?;
     let status = resp.status();
     let body_text = resp.text().await.map_err(|e| format!("read: {}", e))?;
-    logger.info(format!("ASR status={} body_len={}", status, body_text.len()));
-    if !status.is_success() { return Err(format!("ASR {}: {}", status, body_text)); }
+    logger.info(format!(
+        "ASR status={} body_len={}",
+        status,
+        body_text.len()
+    ));
+    if !status.is_success() {
+        return Err(format!("ASR {}: {}", status, body_text));
+    }
 
     serde_json::from_str::<serde_json::Value>(&body_text)
         .map_err(|e| format!("parse: {}", e))?
-        .get("choices").and_then(|c| c.get(0))
+        .get("choices")
+        .and_then(|c| c.get(0))
         .and_then(|c| c["message"]["content"].as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| format!("bad ASR response: {}", body_text))
@@ -296,8 +383,13 @@ async fn do_asr(
 // ─── TTS API ──────────────────────────────────────────────────────
 
 async fn do_tts(
-    client: &reqwest::Client, base_url: &str, model: &str, api_key: &str,
-    text: &str, voice: &str, voice_desc: Option<&str>,
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    text: &str,
+    voice: &str,
+    voice_desc: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let is_voicedesign = model.contains("voicedesign");
@@ -321,19 +413,34 @@ async fn do_tts(
         "audio": audio,
     });
 
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .header("api-key", api_key)
-        .json(&body).send().await
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("TTS request: {}", e))?;
     let status = resp.status();
     let resp_text = resp.text().await.map_err(|e| format!("read: {}", e))?;
-    if !status.is_success() { return Err(format!("TTS {}: {}", status, &resp_text[..resp_text.len().min(500)])); }
+    if !status.is_success() {
+        return Err(format!(
+            "TTS {}: {}",
+            status,
+            &resp_text[..resp_text.len().min(500)]
+        ));
+    }
 
     let audio_b64 = serde_json::from_str::<serde_json::Value>(&resp_text)
         .map_err(|e| format!("parse: {}", e))?
-        .get("choices").and_then(|c| c.get(0))
+        .get("choices")
+        .and_then(|c| c.get(0))
         .and_then(|c| c["message"]["audio"]["data"].as_str())
-        .ok_or_else(|| format!("bad TTS response: {}", &resp_text[..resp_text.len().min(300)]))?
+        .ok_or_else(|| {
+            format!(
+                "bad TTS response: {}",
+                &resp_text[..resp_text.len().min(300)]
+            )
+        })?
         .to_string();
 
     base64_decode(&audio_b64)
@@ -352,7 +459,8 @@ struct AsrTool {
 
 impl ToolExecutor for AsrTool {
     fn def(&self) -> &ToolDef {
-        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| ToolDef {
+        static DEF: std::sync::LazyLock<ToolDef> = std::sync::LazyLock::new(|| {
+            ToolDef {
             name: "asr_transcribe".into(),
             description: "Transcribe audio to text. Input: base64 audio + MIME type. Output: recognized text.".into(),
             internal: true,
@@ -364,6 +472,7 @@ impl ToolExecutor for AsrTool {
                 },
                 "required": ["audio_base64"]
             }),
+        }
         });
         &DEF
     }
@@ -371,12 +480,18 @@ impl ToolExecutor for AsrTool {
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
         self.logger.info("ASR execute called");
         let audio_b64 = match args.get("audio_base64").and_then(|v| v.as_str()) {
-            Some(s) => s, None => return ToolResult::err("missing: audio_base64"),
+            Some(s) => s,
+            None => return ToolResult::err("missing: audio_base64"),
         };
-        let mime = args.get("mime_type").and_then(|v| v.as_str()).unwrap_or("audio/ogg");
-        self.logger.info(format!("mime={} audio_b64_len={}", mime, audio_b64.len()));
+        let mime = args
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("audio/ogg");
+        self.logger
+            .info(format!("mime={} audio_b64_len={}", mime, audio_b64.len()));
         let audio = match base64_decode(audio_b64) {
-            Ok(d) => d, Err(e) => {
+            Ok(d) => d,
+            Err(e) => {
                 self.logger.error(format!("base64 decode failed: {}", e));
                 return ToolResult::err(&format!("base64: {}", e));
             }
@@ -392,9 +507,14 @@ impl ToolExecutor for AsrTool {
         let logger = self.logger.clone();
 
         match std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
             rt.block_on(async { do_asr(&c, &u, &m, &k, &audio, &mime_o, &lang, &logger).await })
-        }).join() {
+        })
+        .join()
+        {
             Ok(Ok(t)) => ToolResult::ok(&t),
             Ok(Err(e)) => ToolResult::err(&e),
             Err(_) => ToolResult::err("thread panic"),
@@ -432,9 +552,13 @@ impl ToolExecutor for TtsTool {
 
     fn execute(&self, args: &serde_json::Value) -> ToolResult {
         let text = match args.get("text").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(), None => return ToolResult::err("missing: text"),
+            Some(t) => t.to_string(),
+            None => return ToolResult::err("missing: text"),
         };
-        let custom_desc = args.get("voice_desc").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let custom_desc = args
+            .get("voice_desc")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
         let c = self.client.clone();
         let u = self.tts_base_url.clone();
@@ -444,9 +568,14 @@ impl ToolExecutor for TtsTool {
         let desc = custom_desc.unwrap_or(&self.tts_voice_desc).to_string();
 
         match std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
             rt.block_on(async { do_tts(&c, &u, &m, &k, &text, &v, Some(&desc)).await })
-        }).join() {
+        })
+        .join()
+        {
             Ok(Ok(audio)) => ToolResult::ok(&base64_encode(&audio)),
             Ok(Err(e)) => ToolResult::err(&e),
             Err(_) => ToolResult::err("thread panic"),
@@ -463,7 +592,8 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s)
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
         .map_err(|e| format!("base64: {}", e))
 }
 
@@ -471,7 +601,9 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
-pub extern "C" fn plugin_create() -> Box<dyn Plugin> { Box::new(AsrTtsPlugin::new()) }
+pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
+    Box::new(AsrTtsPlugin::new())
+}
 
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]

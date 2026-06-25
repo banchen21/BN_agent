@@ -39,8 +39,8 @@
 | **EventBus** | 全局事件总线，topic 匹配发布/订阅 |
 | **PluginManager** | 动态加载/卸载 `cdylib` 插件，广播事件 |
 | **PipelineActor** | 编排 LLM 工具调用循环：限流→重试→LLM→工具→回复 |
-| **AgentLoopActor** | 显式目标驱动的 observe→decide→act 循环，支持预算、状态查询和停止 |
-| **LlmActor** | OpenAI 兼容 API 封装，支持流式 SSE、多模态、SQLite 历史 |
+| **AgentLoopActor** | 显式目标驱动的 observe→decide→act 循环，支持预算、状态查询、停止和失败自我修正 |
+| **LlmActor** | OpenAI 兼容 API 封装，支持流式 SSE、多模态、SQLite 历史和长期摘要压缩；流式片段通过 `llm.chunk` 带 `request_id/source/peer_id` 发到 EventBus |
 | **RetryActor** | 指数退避重试 + 熔断器（Circuit Breaker） |
 | **TokenUsageActor** | Token 用量 SQLite 持久化及查询 |
 | **RateLimitActor** | 令牌桶频率限制 |
@@ -106,10 +106,14 @@ cargo run -p main-app
 | `LLM_API_KEY` | — | **必填** LLM API Key |
 | `LLM_MODEL` | `deepseek-chat` | LLM 模型名 |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API 端点 |
-| `LLM_MAX_HISTORY` | `15` | 历史对话轮数 |
+| `LLM_MAX_HISTORY` | `20` | 历史对话轮数 |
 | `CHAT_HISTORY_CLEAR_ON_START` | `false` | 启动时是否清空短期聊天历史，默认保留 |
 | `CHAT_HISTORY_MAX_PER_PEER` | `1000` | 每 peer 保留的历史记录上限，超出清理最旧，0=不限 |
 | `IMMEDIATE_CONTEXT_MSGS` | `200` | 即时上下文消息数 |
+| `LLM_LONG_SUMMARY_ENABLED` | `true` | 是否启用 LLM 级长期摘要压缩；旧对话会后台压缩后注入后续 system prompt |
+| `LLM_LONG_SUMMARY_KEEP_RECENT` | `200` | 长期压缩时保留的最近消息窗口，窗口内仍走即时上下文 |
+| `LLM_LONG_SUMMARY_BATCH_SIZE` | `80` | 每次后台压缩的旧消息批量上限 |
+| `LLM_LONG_SUMMARY_MAX_CHARS` | `4000` | 长期摘要正文最大字符数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
 | `TOOL_TIMEOUT_SECS` | `180` | 单个工具执行超时(秒)，0=禁用；超时返回错误且不阻塞主流程 |
 | `TOKEN_BUDGET_DAILY` | (无) | Token 预算·近 24h 上限；超限拒绝新请求，0/未设=无限 |
@@ -124,6 +128,10 @@ cargo run -p main-app
 | `LLM_THINKING` | `disabled` | DeepSeek 思考模式 |
 | `PROACTIVE_MODE` | `auto` | 主动追问模式 (auto/semi-auto) |
 | `PROACTIVE_LOOP_INTERVAL` | `15` | 主动追问轮询间隔(秒) |
+| `PROACTIVE_AGENT_LOOP_MODE` | `off` | 自主空闲触发 Agent Loop 模式：`off`/`mirror`/`replace` |
+| `PROACTIVE_AGENT_LOOP_GOAL` | 内置目标 | Agent Loop 目标模板，支持 `{source}`/`{chat_id}`/`{peer_id}`/`{idle_secs}` |
+| `PROACTIVE_AGENT_LOOP_MAX_STEPS` | `6` | proactive 启动 Agent Loop 时的最大步骤数 |
+| `PROACTIVE_AGENT_LOOP_MAX_TOOL_ROUNDS` | `3` | proactive 启动 Agent Loop 时每步最大工具调用轮数，`0`=禁用工具轮 |
 | `MEMORY_EXTRACT_EVERY` | `10` | 记忆提取触发消息数 |
 | `MEMORY_DB_PATH` | `data/memories.db` | 记忆数据库路径 |
 | `TOY_CONTROL_PORT` | `8090` | 跳蛋 Web 控制面板端口 |
@@ -158,6 +166,8 @@ cargo run -p main-app
 | POST | `/api/events` | 发布事件 |
 | POST | `/api/llm/chat` | 简单 LLM 调用 |
 | POST | `/api/chat` | 带工具+历史的完整对话 |
+| GET | `/api/chat/sessions` | 列出会话元数据；支持 `peer_id`、`limit` 查询参数 |
+| POST | `/api/chat/sessions/refresh` | 刷新指定 `peer_id` 的标题、摘要和计数 |
 | GET | `/api/tools` | 列出所有已注册工具 |
 | POST | `/api/tools/call` | 直接调用工具 |
 | POST | `/api/agent-loop/start` | 启动目标驱动 Agent Loop |

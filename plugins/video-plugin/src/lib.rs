@@ -3,8 +3,8 @@
 //! Registers tool: `video_analyze`
 
 use plugin_interface::*;
-use std::sync::{Arc, LazyLock, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// 最近媒体缓存（chat_id → (base64_data, mime_type)）
 static MEDIA_CACHE: LazyLock<Mutex<HashMap<i64, (String, String)>>> =
@@ -23,12 +23,12 @@ impl VideoPlugin {
     pub fn new() -> Self {
         let api_key = std::env::var("VIDEO_API_KEY")
             .or_else(|_| std::env::var("LLM_API_KEY"))
-            .or_else(|_| std::env::var("OPENAI_API_KEY")).unwrap_or_default();
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .unwrap_or_default();
         let base_url = std::env::var("VIDEO_BASE_URL")
             .or_else(|_| std::env::var("LLM_BASE_URL"))
             .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".into());
-        let model = std::env::var("VIDEO_MODEL")
-            .unwrap_or_else(|_| "mimo-v2.5".into());
+        let model = std::env::var("VIDEO_MODEL").unwrap_or_else(|_| "mimo-v2.5".into());
 
         Self {
             info: PluginInfo {
@@ -38,7 +38,9 @@ impl VideoPlugin {
                 author: "BN Team".into(),
                 min_host_version: "0.1.0".into(),
             },
-            api_key, base_url, model,
+            api_key,
+            base_url,
+            model,
             client: reqwest::Client::builder().build().unwrap_or_default(),
             event_bus: None,
         }
@@ -46,7 +48,9 @@ impl VideoPlugin {
 }
 
 impl Plugin for VideoPlugin {
-    fn info(&self) -> PluginInfo { self.info.clone() }
+    fn info(&self) -> PluginInfo {
+        self.info.clone()
+    }
 
     fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
         self.event_bus = Some(ctx.event_bus.clone());
@@ -70,8 +74,11 @@ impl Plugin for VideoPlugin {
         if event.topic == "user.message" {
             // 缓存 video_base64
             if let Some(b64) = event.data.get("video_base64").and_then(|v| v.as_str()) {
-                let mime = event.data.get("video_mime")
-                    .and_then(|v| v.as_str()).unwrap_or("video/mp4");
+                let mime = event
+                    .data
+                    .get("video_mime")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("video/mp4");
                 if let Some(chat_id) = event.data.get("chat_id").and_then(|v| v.as_i64()) {
                     if let Ok(mut cache) = MEDIA_CACHE.lock() {
                         cache.insert(chat_id, (b64.to_string(), mime.to_string()));
@@ -92,7 +99,9 @@ impl Plugin for VideoPlugin {
 
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
-pub extern "C" fn plugin_create() -> Box<dyn Plugin> { Box::new(VideoPlugin::new()) }
+pub extern "C" fn plugin_create() -> Box<dyn Plugin> {
+    Box::new(VideoPlugin::new())
+}
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn plugin_destroy(_p: Box<dyn Plugin>) {}
@@ -108,7 +117,8 @@ struct VideoAnalyzeTool {
 
 impl ToolExecutor for VideoAnalyzeTool {
     fn def(&self) -> &ToolDef {
-        static DEF: LazyLock<ToolDef> = LazyLock::new(|| ToolDef {
+        static DEF: LazyLock<ToolDef> = LazyLock::new(|| {
+            ToolDef {
             name: "video_analyze".into(),
             description: "分析视频内容并返回文字描述。可省略 video_base64，工具会自动使用该对话最近收到的视频。适合对视频进行深度帧分析、计时序动作等精细化理解。".into(),
             internal: false,
@@ -124,6 +134,7 @@ impl ToolExecutor for VideoAnalyzeTool {
                     "jailbreak_index": {"type": "integer", "description": "jailbreak 提示词索引（可选），需要配合 jailbreak_prompts.csv 使用"}
                 }
             }),
+        }
         });
         &DEF
     }
@@ -134,27 +145,54 @@ impl ToolExecutor for VideoAnalyzeTool {
             Some(s) => s.to_string(),
             None => {
                 let chat_id = args.get("chat_id").and_then(|v| v.as_i64());
-                match chat_id.and_then(|cid| MEDIA_CACHE.lock().ok().and_then(|c| c.get(&cid).cloned())) {
+                match chat_id
+                    .and_then(|cid| MEDIA_CACHE.lock().ok().and_then(|c| c.get(&cid).cloned()))
+                {
                     Some((b64, _)) => b64,
-                    None => return ToolResult::err("未找到视频数据。请先发送视频，或提供 video_base64 参数。"),
+                    None => {
+                        return ToolResult::err(
+                            "未找到视频数据。请先发送视频，或提供 video_base64 参数。",
+                        )
+                    }
                 }
             }
         };
-        let mime = args.get("mime_type").and_then(|v| v.as_str())
+        let mime = args
+            .get("mime_type")
+            .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| {
-                args.get("chat_id").and_then(|v| v.as_i64())
+                args.get("chat_id")
+                    .and_then(|v| v.as_i64())
                     .and_then(|cid| MEDIA_CACHE.lock().ok().and_then(|c| c.get(&cid).cloned()))
                     .map(|(_, m)| m)
             })
             .unwrap_or_else(|| "video/mp4".into());
         let fps = args.get("fps").and_then(|v| v.as_f64()).unwrap_or(2.0);
-        let resolution = args.get("media_resolution").and_then(|v| v.as_str()).unwrap_or("default");
-        let system_prompt = args.get("system_prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let user_prompt = args.get("user_prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let jailbreak_index = args.get("jailbreak_index").and_then(|v| v.as_u64()).map(|i| i as usize);
+        let resolution = args
+            .get("media_resolution")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let system_prompt = args
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let user_prompt = args
+            .get("user_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let jailbreak_index = args
+            .get("jailbreak_index")
+            .and_then(|v| v.as_u64())
+            .map(|i| i as usize);
 
-        eprintln!("[video-plugin:analyze] mime={} fps={} res={} b64_len={}", mime, fps, resolution, video_b64.len());
+        eprintln!(
+            "[video-plugin:analyze] mime={} fps={} res={} b64_len={}",
+            mime,
+            fps,
+            resolution,
+            video_b64.len()
+        );
 
         let c = self.client.clone();
         let u = self.base_url.clone();
@@ -168,11 +206,29 @@ impl ToolExecutor for VideoAnalyzeTool {
         let ji = jailbreak_index;
 
         match std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
             rt.block_on(async {
-                do_video_asr(&c, &u, &m, &k, &video_data, &mime_o, fps, &res_o, sp.as_deref(), up.as_deref(), ji).await
+                do_video_asr(
+                    &c,
+                    &u,
+                    &m,
+                    &k,
+                    &video_data,
+                    &mime_o,
+                    fps,
+                    &res_o,
+                    sp.as_deref(),
+                    up.as_deref(),
+                    ji,
+                )
+                .await
             })
-        }).join() {
+        })
+        .join()
+        {
             Ok(Ok(t)) => ToolResult::ok(&t),
             Ok(Err(e)) => ToolResult::err(&e),
             Err(_) => ToolResult::err("thread panic"),
@@ -202,14 +258,23 @@ fn load_jailbreak_prompts() -> Vec<String> {
 }
 
 async fn do_video_asr(
-    client: &reqwest::Client, base_url: &str, model: &str, api_key: &str,
-    video_b64: &str, mime_type: &str, fps: f64, resolution: &str,
-    system_prompt: Option<&str>, user_prompt: Option<&str>, jailbreak_index: Option<usize>,
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    video_b64: &str,
+    mime_type: &str,
+    fps: f64,
+    resolution: &str,
+    system_prompt: Option<&str>,
+    user_prompt: Option<&str>,
+    jailbreak_index: Option<usize>,
 ) -> Result<String, String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let data_url = format!("data:{};base64,{}", mime_type, video_b64);
 
-    let user_text = user_prompt.unwrap_or("请详细描述这个视频的内容，包括画面中的物体、人物、动作、场景和音频信息。");
+    let user_text = user_prompt
+        .unwrap_or("请详细描述这个视频的内容，包括画面中的物体、人物、动作、场景和音频信息。");
 
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
@@ -249,9 +314,12 @@ async fn do_video_asr(
     });
 
     eprintln!("[video-plugin:api] posting to {}", url);
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .header("api-key", api_key)
-        .json(&body).send().await
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("request: {}", e))?;
     let status = resp.status();
     let body_text = resp.text().await.map_err(|e| format!("read: {}", e))?;
@@ -261,7 +329,8 @@ async fn do_video_asr(
 
     serde_json::from_str::<serde_json::Value>(&body_text)
         .map_err(|e| format!("parse: {}", e))?
-        .get("choices").and_then(|c| c.get(0))
+        .get("choices")
+        .and_then(|c| c.get(0))
         .and_then(|c| c["message"]["content"].as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| format!("bad response: {}", body_text))

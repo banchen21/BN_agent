@@ -34,7 +34,7 @@ pub struct RecordToolCall {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RecordError {
-    pub category: String,  // e.g. "llm_api", "tool_exec", "rate_limit"
+    pub category: String, // e.g. "llm_api", "tool_exec", "rate_limit"
 }
 
 #[derive(Message)]
@@ -171,9 +171,18 @@ impl Handler<GetMetrics> for MetricsActor {
         lines.push("# HELP bn_agent_llm_calls_total Total LLM API calls".to_string());
         lines.push("# TYPE bn_agent_llm_calls_total counter".to_string());
         for (model, stats) in &self.model_stats {
-            lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\"}} {}", model, stats.call_count));
-            lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\",status=\"success\"}} {}", model, stats.successes));
-            lines.push(format!("bn_agent_llm_calls_total{{model=\"{}\",status=\"failure\"}} {}", model, stats.failures));
+            lines.push(format!(
+                "bn_agent_llm_calls_total{{model=\"{}\"}} {}",
+                model, stats.call_count
+            ));
+            lines.push(format!(
+                "bn_agent_llm_calls_total{{model=\"{}\",status=\"success\"}} {}",
+                model, stats.successes
+            ));
+            lines.push(format!(
+                "bn_agent_llm_calls_total{{model=\"{}\",status=\"failure\"}} {}",
+                model, stats.failures
+            ));
         }
 
         // LLM latency.
@@ -185,18 +194,33 @@ impl Handler<GetMetrics> for MetricsActor {
         lines.push("# HELP bn_agent_llm_latency_seconds LLM API call latency".to_string());
         lines.push("# TYPE bn_agent_llm_latency_seconds gauge".to_string());
         lines.push(format!("bn_agent_llm_latency_avg_seconds {}", avg_latency));
-        lines.push(format!("bn_agent_llm_latency_max_seconds {}", self.llm_latency_max));
-        lines.push(format!("bn_agent_llm_latency_count {}", self.llm_latency_count));
+        lines.push(format!(
+            "bn_agent_llm_latency_max_seconds {}",
+            self.llm_latency_max
+        ));
+        lines.push(format!(
+            "bn_agent_llm_latency_count {}",
+            self.llm_latency_count
+        ));
 
         // Tool calls.
         lines.push("# HELP bn_agent_tool_calls_total Tool calls by name".to_string());
         lines.push("# TYPE bn_agent_tool_calls_total counter".to_string());
         for (name, stats) in &self.tool_calls {
-            lines.push(format!("bn_agent_tool_calls_total{{tool=\"{}\",status=\"success\"}} {}", name, stats.successes));
-            lines.push(format!("bn_agent_tool_calls_total{{tool=\"{}\",status=\"failure\"}} {}", name, stats.failures));
+            lines.push(format!(
+                "bn_agent_tool_calls_total{{tool=\"{}\",status=\"success\"}} {}",
+                name, stats.successes
+            ));
+            lines.push(format!(
+                "bn_agent_tool_calls_total{{tool=\"{}\",status=\"failure\"}} {}",
+                name, stats.failures
+            ));
             if stats.total > 0 {
                 let avg_duration = stats.total_duration_ms as f64 / stats.total as f64;
-                lines.push(format!("bn_agent_tool_duration_ms{{tool=\"{}\"}} {}", name, avg_duration));
+                lines.push(format!(
+                    "bn_agent_tool_duration_ms{{tool=\"{}\"}} {}",
+                    name, avg_duration
+                ));
             }
         }
 
@@ -204,7 +228,10 @@ impl Handler<GetMetrics> for MetricsActor {
         lines.push("# HELP bn_agent_errors_total Errors by category".to_string());
         lines.push("# TYPE bn_agent_errors_total counter".to_string());
         for (cat, count) in &self.errors {
-            lines.push(format!("bn_agent_errors_total{{category=\"{}\"}} {}", cat, count));
+            lines.push(format!(
+                "bn_agent_errors_total{{category=\"{}\"}} {}",
+                cat, count
+            ));
         }
 
         MessageResult(lines.join("\n") + "\n")

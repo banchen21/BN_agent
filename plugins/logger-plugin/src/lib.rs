@@ -36,7 +36,10 @@ impl Plugin for LoggerPlugin {
     }
 
     fn stop(&mut self) {
-        log::info!("[logger-plugin] stopped (logged {} events)", self.event_count.get());
+        log::info!(
+            "[logger-plugin] stopped (logged {} events)",
+            self.event_count.get()
+        );
     }
 
     fn on_event(&self, event: &Event) -> bool {

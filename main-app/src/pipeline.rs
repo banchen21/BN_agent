@@ -13,9 +13,9 @@
 //! 9. Broadcast the assistant reply via `BroadcastEvent`.
 
 use actix::prelude::*;
+use parking_lot::Mutex;
 use plugin_interface::*;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use crate::chat_store::{AppendJsonMessage, ChatStoreActor};
 use crate::metrics_actor::MetricsActor;
@@ -126,6 +126,7 @@ async fn process_message(
             "⏳ 请求过于频繁，请稍后再试。",
             &source,
             &peer_id,
+            None,
             &event_bus,
         )
         .await;
@@ -152,6 +153,7 @@ async fn process_message(
                 ),
                 &source,
                 &peer_id,
+                None,
                 &event_bus,
             )
             .await;
@@ -173,8 +175,7 @@ async fn process_message(
     // 4. Collect tool definitions.
     let tools: Vec<serde_json::Value> = if allow_tools {
         let reg = tool_registry.lock();
-        reg
-            .all_defs()
+        reg.all_defs()
             .iter()
             .filter(|d| !d.internal)
             .map(|d| {
@@ -235,6 +236,7 @@ async fn process_message(
                 &format!("抱歉，出错了：{}", e),
                 &source,
                 &peer_id,
+                Some(&request_id),
                 &event_bus,
             )
             .await;
@@ -277,6 +279,7 @@ async fn process_message(
     let mut all_tool_results: Vec<String> = Vec::new();
     // 是否已通过 IM 插件工具直接发送了消息（避免 emit_reply 重复发送）
     let mut already_sent_via_im = false;
+    let mut current_request_id = request_id.clone();
 
     loop {
         if current_resp.tool_calls.is_empty() || tool_round >= max_tool_rounds {
@@ -352,7 +355,14 @@ async fn process_message(
             // 广播最终回复（仅当有文本且未通过 IM 工具直接发送时）
             if !current_resp.content.trim().is_empty() && !already_sent_via_im && !drop_final_reply
             {
-                emit_reply(&current_resp.content, &source, &peer_id, &event_bus).await;
+                emit_reply(
+                    &current_resp.content,
+                    &source,
+                    &peer_id,
+                    Some(&current_request_id),
+                    &event_bus,
+                )
+                .await;
             }
             // 如果已通过 IM 工具发送，发静默事件通知插件对话已完成
             if already_sent_via_im && !drop_final_reply {
@@ -482,6 +492,7 @@ async fn process_message(
 
         // 喂回 LLM（带上所有历史 tool_calls + results）。
         let req_start = std::time::Instant::now();
+        let next_request_id = format!("{}-t{}", request_id, tool_round + 1);
         let next = retry_addr
             .send(RetryChatRequest {
                 request: ChatRequest {
@@ -498,7 +509,7 @@ async fn process_message(
                     file_base64: None,
                     file_name: None,
                     stream: true,
-                    request_id: format!("{}-t{}", request_id, tool_round + 1),
+                    request_id: next_request_id.clone(),
                     source: source.clone(),
                     user_name: user_name.clone(),
                     max_tokens: None,
@@ -525,6 +536,7 @@ async fn process_message(
                     success: true,
                 });
                 current_resp = r;
+                current_request_id = next_request_id;
                 tool_round += 1;
             }
             Ok(Err(e)) => {
@@ -817,18 +829,24 @@ impl Handler<Event> for PipelineActor {
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-async fn emit_reply(text: &str, source: &str, peer_id: &str, event_bus: &Addr<EventBus>) {
+async fn emit_reply(
+    text: &str,
+    source: &str,
+    peer_id: &str,
+    request_id: Option<&str>,
+    event_bus: &Addr<EventBus>,
+) {
     let chat_id = chat_id_from_peer_id(peer_id, source);
-    let reply = Event::new(
-        "route.message",
-        serde_json::json!({
-            "text": text,
-            "source": source,
-            "peer_id": peer_id,
-            "chat_id": chat_id,
-        }),
-        "pipeline",
-    );
+    let mut payload = serde_json::json!({
+        "text": text,
+        "source": source,
+        "peer_id": peer_id,
+        "chat_id": chat_id,
+    });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = serde_json::json!(request_id);
+    }
+    let reply = Event::new("route.message", payload, "pipeline");
     event_bus.do_send(reply);
 }
 

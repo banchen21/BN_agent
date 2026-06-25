@@ -44,7 +44,10 @@ fn image_gen_output_dir() -> String {
 }
 
 fn join_path(dir: &str, filename: &str) -> String {
-    PathBuf::from(dir).join(filename).to_string_lossy().into_owned()
+    PathBuf::from(dir)
+        .join(filename)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ── 工作流模板 ──────────────────────────────────────────────────
@@ -155,14 +158,28 @@ struct GenerateImageArgs {
     nsfw: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
-fn default_negative() -> String { DEFAULT_NEGATIVE.to_string() }
-fn default_seed() -> u64 { DEFAULT_SEED }
-fn default_steps() -> u64 { DEFAULT_STEPS }
-fn default_cfg() -> f64 { DEFAULT_CFG }
-fn default_width() -> u64 { DEFAULT_WIDTH }
-fn default_height() -> u64 { DEFAULT_HEIGHT }
+fn default_negative() -> String {
+    DEFAULT_NEGATIVE.to_string()
+}
+fn default_seed() -> u64 {
+    DEFAULT_SEED
+}
+fn default_steps() -> u64 {
+    DEFAULT_STEPS
+}
+fn default_cfg() -> f64 {
+    DEFAULT_CFG
+}
+fn default_width() -> u64 {
+    DEFAULT_WIDTH
+}
+fn default_height() -> u64 {
+    DEFAULT_HEIGHT
+}
 
 // ── 共享状态 ────────────────────────────────────────────────────
 struct PluginState {
@@ -225,14 +242,21 @@ impl ImageGenPlugin {
         args: &GenerateImageArgs,
     ) -> Result<String, String> {
         let workflow = Self::build_workflow(
-            &args.prompt, &args.negative,
-            args.seed, args.steps, args.cfg,
-            args.width, args.height,
+            &args.prompt,
+            &args.negative,
+            args.seed,
+            args.steps,
+            args.cfg,
+            args.width,
+            args.height,
             args.nsfw,
         );
 
         let client_id = uuid::Uuid::new_v4().to_string();
-        let body = ComfyPrompt { prompt: workflow, client_id: client_id.clone() };
+        let body = ComfyPrompt {
+            prompt: workflow,
+            client_id: client_id.clone(),
+        };
 
         let queue_resp = client
             .post(format!("{}/prompt", comfy_url.trim_end_matches('/')))
@@ -248,7 +272,11 @@ impl ImageGenPlugin {
 
         for _ in 0..240 {
             let history = client
-                .get(format!("{}/history/{}", comfy_url.trim_end_matches('/'), prompt_id))
+                .get(format!(
+                    "{}/history/{}",
+                    comfy_url.trim_end_matches('/'),
+                    prompt_id
+                ))
                 .send()
                 .await
                 .map_err(|e| format!("查询历史失败: {}", e))?
@@ -276,7 +304,9 @@ impl ImageGenPlugin {
         Err("生成超时 (120s)".into())
     }
 
-    fn make_plugin_state(event_bus: Addr<EventBus>) -> Result<PluginState, Box<dyn std::error::Error>> {
+    fn make_plugin_state(
+        event_bus: Addr<EventBus>,
+    ) -> Result<PluginState, Box<dyn std::error::Error>> {
         Ok(PluginState {
             runtime: Runtime::new()?,
             client: Client::new(),
@@ -339,9 +369,11 @@ impl ToolExecutor for GenerateImageTool {
             None => return ToolResult::err("插件未初始化"),
         };
 
-        let filename = match state.runtime.block_on(
-            ImageGenPlugin::generate_image_inner(&state.client, &state.comfy_url, &gen_args)
-        ) {
+        let filename = match state.runtime.block_on(ImageGenPlugin::generate_image_inner(
+            &state.client,
+            &state.comfy_url,
+            &gen_args,
+        )) {
             Ok(f) => f,
             Err(e) => return ToolResult::err(&format!("生成失败: {}", e)),
         };
@@ -401,9 +433,9 @@ impl Plugin for ImageGenPlugin {
         ));
 
         if let Some(tool_registry) = &ctx.tool_registry {
-            let tool_state = Arc::new(Mutex::new(Some(
-                ImageGenPlugin::make_plugin_state(ctx.event_bus.clone())?
-            )));
+            let tool_state = Arc::new(Mutex::new(Some(ImageGenPlugin::make_plugin_state(
+                ctx.event_bus.clone(),
+            )?)));
 
             tool_registry
                 .lock()

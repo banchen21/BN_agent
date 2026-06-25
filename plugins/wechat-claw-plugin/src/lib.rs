@@ -349,6 +349,7 @@ pub struct WechatClawPlugin {
     running: Arc<AtomicBool>,
     login_thread: Option<JoinHandle<()>>,
     poll_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    streaming_text: Arc<Mutex<TextStreamState>>,
 }
 
 impl WechatClawPlugin {
@@ -362,8 +363,84 @@ impl WechatClawPlugin {
             running: Arc::new(AtomicBool::new(true)),
             login_thread: None,
             poll_thread: Arc::new(Mutex::new(None)),
+            streaming_text: Arc::new(Mutex::new(TextStreamState::default())),
         }
     }
+}
+
+fn im_stream_chunks_enabled() -> bool {
+    std::env::var("IM_STREAM_CHUNKS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "disabled")
+        })
+        .unwrap_or(true)
+}
+
+fn stream_request_id(event: &Event) -> Option<String> {
+    event
+        .data
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn wechat_chat_id_from_event(event: &Event, fallback: Option<String>) -> Option<String> {
+    event
+        .data
+        .get("chat_id")
+        .and_then(|v| v.as_str().map(String::from))
+        .or_else(|| {
+            event
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.strip_prefix("wechat:"))
+                .map(String::from)
+        })
+        .or(fallback)
+}
+
+fn send_wechat_stream_segments(
+    client: Arc<Mutex<Option<WeChatClient>>>,
+    chat_id: String,
+    segments: Vec<String>,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    let wechat = match client.lock().unwrap().clone() {
+        Some(c) => c,
+        None => return,
+    };
+    let ctx_token = wechat.get_context_token(&chat_id).unwrap_or_default();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("[wechat] stream runtime: {}", e);
+                return;
+            }
+        };
+        rt.block_on(async {
+            for (idx, segment) in segments.iter().enumerate() {
+                if let Err(e) = wechat.send_text(&chat_id, segment, &ctx_token).await {
+                    log::error!("[wechat] stream send failed: {}", e);
+                    if e.contains("-14") {
+                        WeChatClient::clear_saved();
+                        break;
+                    }
+                }
+                if idx + 1 < segments.len() {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        });
+    });
 }
 
 impl Plugin for WechatClawPlugin {
@@ -470,6 +547,58 @@ impl Plugin for WechatClawPlugin {
     }
 
     fn on_event(&self, event: &Event) -> bool {
+        if im_stream_chunks_enabled() && event.topic == "llm.chunk" {
+            let source = event
+                .data
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if source != "wechat" {
+                return true;
+            }
+            let Some(request_id) = stream_request_id(event) else {
+                return true;
+            };
+            let Some(content) = event.data.get("content").and_then(|v| v.as_str()) else {
+                return true;
+            };
+            let chat_id =
+                wechat_chat_id_from_event(event, self.last_chat_id.lock().unwrap().clone());
+            let Some(chat_id) = chat_id else {
+                return true;
+            };
+            let segments = self
+                .streaming_text
+                .lock()
+                .unwrap()
+                .push_chunk(&request_id, content);
+            send_wechat_stream_segments(self.client.clone(), chat_id, segments);
+            return true;
+        }
+
+        if im_stream_chunks_enabled() && event.topic == "llm.response" {
+            let source = event
+                .data
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if source != "wechat" {
+                return true;
+            }
+            let Some(request_id) = stream_request_id(event) else {
+                return true;
+            };
+            let chat_id =
+                wechat_chat_id_from_event(event, self.last_chat_id.lock().unwrap().clone());
+            let Some(chat_id) = chat_id else {
+                return true;
+            };
+            let segments = self.streaming_text.lock().unwrap().flush(&request_id);
+            send_wechat_stream_segments(self.client.clone(), chat_id.clone(), segments);
+            self.processing_users.lock().unwrap().remove(&chat_id);
+            return true;
+        }
+
         if event.topic == "assistant.message" {
             let source = event
                 .data
@@ -478,6 +607,22 @@ impl Plugin for WechatClawPlugin {
                 .unwrap_or("");
             if source != "wechat" {
                 return true;
+            }
+
+            if let Some(request_id) = stream_request_id(event) {
+                if self
+                    .streaming_text
+                    .lock()
+                    .unwrap()
+                    .take_streamed_request(&request_id)
+                {
+                    if let Some(chat_id) =
+                        wechat_chat_id_from_event(event, self.last_chat_id.lock().unwrap().clone())
+                    {
+                        self.processing_users.lock().unwrap().remove(&chat_id);
+                    }
+                    return true;
+                }
             }
 
             let text = match event.data.get("text").and_then(|v| v.as_str()) {

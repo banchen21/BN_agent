@@ -20,7 +20,7 @@ fn build_tools_system_prompt(tools: &[serde_json::Value]) -> String {
          你运行在一个工具编排引擎内。完成用户请求时，如果需要调用工具，\
          必须在回复末尾输出以下格式（纯 JSON 对象包裹在标签内）：\n\n\
          <tool_call>{\"name\":\"工具名\",\"arguments\":{\"参数名\":\"值\"}}</tool_call>\n\n\
-         系统会解析此标签并执行对应工具。如果不需要调用工具，正常回复即可。\n"
+         系统会解析此标签并执行对应工具。如果不需要调用工具，正常回复即可。\n",
     );
     for tool in tools {
         let func = &tool["function"];
@@ -48,9 +48,19 @@ fn parse_tool_calls(response: &str) -> (Vec<ToolCall>, String) {
         };
         let raw = &clean[start + "<tool_call>".len()..end - "</tool_call>".len()];
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-            let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-            let args = parsed.get("arguments").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
-            calls.push(ToolCall { id: format!("call_{}", calls.len()), name: name.to_string(), arguments: args });
+            let name = parsed
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+            let args = parsed
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            calls.push(ToolCall {
+                id: format!("call_{}", calls.len()),
+                name: name.to_string(),
+                arguments: args,
+            });
         }
         clean.replace_range(start..end, "");
     }
@@ -79,7 +89,9 @@ impl Handler<LlmRequest> for ClaudeBridgeActor {
 
     fn handle(&mut self, msg: LlmRequest, _ctx: &mut Self::Context) -> Self::Result {
         let path = self.claude_path.clone();
-        let prompt = msg.messages.iter()
+        let prompt = msg
+            .messages
+            .iter()
             .map(|m| match m.role.as_str() {
                 "system" => format!("[System]\n{}", m.content),
                 "user" => format!("User: {}", m.content),
@@ -91,7 +103,18 @@ impl Handler<LlmRequest> for ClaudeBridgeActor {
 
         Box::pin(async move {
             match call_claude(&path, &prompt, None, None).await {
-                Ok(text) => { let (tc, c) = parse_tool_calls(&text); Ok(LlmResponse { content: c, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, tool_calls: tc }) }
+                Ok(text) => {
+                    let (tc, c) = parse_tool_calls(&text);
+                    Ok(LlmResponse {
+                        content: c,
+                        model: "claude-cli".into(),
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        prompt_cache_hit_tokens: 0,
+                        prompt_cache_miss_tokens: 0,
+                        tool_calls: tc,
+                    })
+                }
                 Err(e) => Err(e),
             }
         })
@@ -129,7 +152,15 @@ impl Handler<ChatRequest> for ClaudeBridgeActor {
             match call_claude(&path, &prompt, session_id.as_deref(), None).await {
                 Ok(text) => {
                     let (tool_calls, content) = parse_tool_calls(&text);
-                    Ok(LlmResponse { content, model: "claude-cli".into(), prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, tool_calls })
+                    Ok(LlmResponse {
+                        content,
+                        model: "claude-cli".into(),
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        prompt_cache_hit_tokens: 0,
+                        prompt_cache_miss_tokens: 0,
+                        tool_calls,
+                    })
                 }
                 Err(e) => Err(e),
             }
@@ -140,12 +171,21 @@ impl Handler<ChatRequest> for ClaudeBridgeActor {
 // ── Claude CLI call ─────────────────────────────────────────────────────────
 
 fn check_claude_available(path: &str) -> bool {
-    std::process::Command::new(path).arg("--version")
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .status().map(|s| s.success()).unwrap_or(false)
+    std::process::Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
-async fn call_claude(path: &str, message: &str, session_id: Option<&str>, model: Option<&str>) -> Result<String, String> {
+async fn call_claude(
+    path: &str,
+    message: &str,
+    session_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new(path);
 
     // Claude sessions are stored per project (working directory).
@@ -159,29 +199,46 @@ async fn call_claude(path: &str, message: &str, session_id: Option<&str>, model:
         cmd.arg("--resume").arg(sid);
     }
 
-    cmd.arg("--output-format").arg("text")
+    cmd.arg("--output-format")
+        .arg("text")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    if let Some(m) = model { cmd.arg("--model").arg(m); }
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {}", e))?;
 
     // Write the message to stdin asynchronously, then close to signal EOF.
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(message.as_bytes()).await.map_err(|e| format!("stdin write: {}", e))?;
+        stdin
+            .write_all(message.as_bytes())
+            .await
+            .map_err(|e| format!("stdin write: {}", e))?;
         stdin.write_all(b"\n").await.ok();
         drop(stdin);
     }
 
-    let output = child.wait_with_output().await.map_err(|e| format!("wait failed: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("wait failed: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("exit {}: {}", output.status.code().unwrap_or(-1), stderr.trim()));
+        return Err(format!(
+            "exit {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() { Err("empty response".into()) } else { Ok(text) }
+    if text.is_empty() {
+        Err("empty response".into())
+    } else {
+        Ok(text)
+    }
 }
 
 pub fn probe_claude() -> (bool, String) {
