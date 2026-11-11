@@ -523,6 +523,65 @@ async fn chat_history(
     }
 }
 
+// ── Append chat history (call transcripts) ───────────────────────────────────
+
+#[derive(Deserialize)]
+struct AppendHistoryPayload {
+    #[serde(default)]
+    peer_id: Option<String>,
+    #[serde(default)]
+    messages: Vec<AppendHistoryMessage>,
+}
+
+#[derive(Deserialize)]
+struct AppendHistoryMessage {
+    role: String,
+    content: String,
+}
+
+/// `POST /api/chat/append`：把通话产生的对话（ASR 用户句 + 助手回复）
+/// 追加到指定 peer 的聊天历史，让后续文字聊天/通话延续同一上下文。
+async fn append_chat_history(
+    state: web::Data<AppState>,
+    body: web::Json<AppendHistoryPayload>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+    let mut appended = 0usize;
+    for message in &body.messages {
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
+        match store
+            .send(ChatStoreMsg::Append {
+                role: role.to_string(),
+                content: content.to_string(),
+                peer_id: Some(peer_id.clone()),
+            })
+            .await
+        {
+            Ok(_) => appended += 1,
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({ "error": format!("{}", e) }))
+            }
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "appended": appended,
+        "peer_id": peer_id,
+    }))
+}
+
 #[derive(Deserialize)]
 struct ChatSessionsQuery {
     peer_id: Option<String>,
@@ -1186,6 +1245,7 @@ fn main() -> std::io::Result<()> {
                 .route("/api/chat", web::post().to(chat))
                 .route("/api/chat/voice", web::post().to(voice_api::voice_chat))
                 .route("/api/chat/history", web::get().to(chat_history))
+                .route("/api/chat/append", web::post().to(append_chat_history))
                 .route("/api/chat/sessions", web::get().to(list_chat_sessions))
                 .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))
                 .route("/api/tools", web::get().to(list_tools))
