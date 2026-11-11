@@ -48,6 +48,7 @@ mod rate_limit_actor;
 mod retry_actor;
 mod token_usage_actor;
 mod tool_exec;
+mod voice_api;
 
 use actix::prelude::*;
 use actix_web::body::MessageBody;
@@ -328,7 +329,7 @@ struct ChatPayload {
 
 /// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
 /// 结果为空时回退 `web:default`（兼容旧版单会话请求）。
-fn normalize_peer_id(raw: &str) -> String {
+pub(crate) fn normalize_peer_id(raw: &str) -> String {
     let filtered: String = raw
         .trim()
         .chars()
@@ -342,16 +343,19 @@ fn normalize_peer_id(raw: &str) -> String {
     }
 }
 
-async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
-    let retry_addr = match &state.retry_addr {
-        Some(a) => a.clone(),
-        None => {
-            return HttpResponse::ServiceUnavailable()
-                .json(serde_json::json!({ "error": "LLM not configured" }))
-        }
-    };
-
-    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+/// 内核对一次聊天请求：刷新 peer 快照、按来源裁剪工具/上下文，走重试链路。
+/// 供 `/api/chat` 与 `/api/chat/voice` 共用。
+pub(crate) async fn run_chat(
+    state: &AppState,
+    message: &str,
+    peer_id: String,
+    user_name: String,
+    source: String,
+) -> Result<LlmResponse, (u16, String)> {
+    let retry_addr = state
+        .retry_addr
+        .clone()
+        .ok_or((503u16, "LLM not configured".to_string()))?;
 
     // Refresh peer-scoped snapshots.
     let _ = state
@@ -360,8 +364,9 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             peer_id: peer_id.clone(),
         })
         .await;
+    let is_android = source == "android";
     let mut contexts: Vec<String> = state.snapshots.lock().clone();
-    if body.source.as_deref() == Some("android") {
+    if is_android {
         // 聊天客户端不执行工具，也不应看到工具/系统指令语法。
         contexts.push(
             "【聊天客户端】请直接以自然语言回复用户；不要输出任何工具调用、XML/JSON 标签、\
@@ -372,7 +377,7 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
 
     // Android 客户端是纯聊天界面，不执行工具调用；暴露工具会让模型返回
     // 空文本 + tool_calls（例如 proactive_schedule_once），客户端只能标记失败。
-    let tools: Vec<serde_json::Value> = if body.source.as_deref() == Some("android") {
+    let tools: Vec<serde_json::Value> = if is_android {
         Vec::new()
     } else {
         let reg = state.tool_registry.lock();
@@ -390,7 +395,7 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
     match retry_addr
         .send(retry_actor::RetryChatRequest {
             request: ChatRequest {
-                message: body.message.clone(),
+                message: message.to_string(),
                 peer_id,
                 tools,
                 skip_store: false,
@@ -402,9 +407,9 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                 file_base64: None,
                 file_name: None,
                 stream: true,
-                request_id: request_id.clone(),
-                source: body.source.clone().unwrap_or_default(),
-                user_name: body.user_name.clone().unwrap_or_default(),
+                request_id,
+                source,
+                user_name,
                 max_tokens: None,
                 original_user_msg: None,
                 assistant_tool_calls: vec![],
@@ -425,11 +430,30 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                     prompt_cache_miss_tokens: resp.prompt_cache_miss_tokens,
                 });
             }
-            HttpResponse::Ok().json(resp)
+            Ok(resp)
         }
-        Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(Err(e)) => Err((502u16, e)),
+        Err(e) => Err((500u16, format!("{}", e))),
+    }
+}
+
+async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+    match run_chat(
+        &state,
+        &body.message,
+        peer_id,
+        body.user_name.clone().unwrap_or_default(),
+        body.source.clone().unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(resp) => HttpResponse::Ok().json(resp),
+        Err((code, message)) => HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(code)
+                .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+        )
+        .json(serde_json::json!({ "error": message })),
     }
 }
 
@@ -1128,6 +1152,7 @@ fn main() -> std::io::Result<()> {
         HttpServer::new(move || {
             actix_web::App::new()
                 .app_data(state.clone())
+                .app_data(web::JsonConfig::default().limit(20 * 1024 * 1024))
                 .wrap(actix_web::middleware::from_fn(api_key_middleware))
                 .route("/api/health", web::get().to(health))
                 .route("/api/plugins", web::get().to(list_plugins))
@@ -1138,6 +1163,7 @@ fn main() -> std::io::Result<()> {
                 .route("/api/events", web::post().to(publish_event))
                 .route("/api/llm/chat", web::post().to(llm_chat))
                 .route("/api/chat", web::post().to(chat))
+                .route("/api/chat/voice", web::post().to(voice_api::voice_chat))
                 .route("/api/chat/history", web::get().to(chat_history))
                 .route("/api/chat/sessions", web::get().to(list_chat_sessions))
                 .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))

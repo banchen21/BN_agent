@@ -45,6 +45,7 @@ class AppContainer(context: Context) {
         store = chatStore,
         settingsRepository = settingsRepository,
         agentClient = agentClient,
+        appContext = applicationContext,
     )
 
     /** 首装种子写入（首次启动生效，后续启动无操作）。 */

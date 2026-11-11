@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 语音消息真实录音（运行时申请，拒绝时 toast 降级） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 真实通话：麦克风已在上方，视频通话需要摄像头；免提切换需要音频设置权限 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
         android:name=".ShiYuApplication"

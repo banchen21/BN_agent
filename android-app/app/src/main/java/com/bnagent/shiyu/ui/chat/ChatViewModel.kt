@@ -206,7 +206,7 @@ class ChatViewModel(
         }
     }
 
-    /** 录音发送：时长取真实录制秒数（至少 1 秒），落本地并插入语音消息。 */
+    /** 录音发送：上传后端走 ASR → LLM → TTS，返回可播放的语音回复。 */
     fun stopRecordingAndSend() {
         val file = finishRecording()
         if (file == null) {
@@ -215,17 +215,18 @@ class ChatViewModel(
         }
         val seconds = max(1, lastRecordedSeconds)
         viewModelScope.launch {
-            runCatching {
-                repository.sendAttachment(
-                    conversationId,
-                    Message.Voice(
-                        id = UUID.randomUUID().toString(),
-                        sender = MessageSender.ME,
-                        durationSeconds = seconds,
-                        filePath = file.path,
-                    ),
-                )
-            }.onFailure { _events.tryEmit("语音发送失败，请稍后重试") }
+            pendingSends++
+            typing = true
+            try {
+                repository.sendVoice(conversationId, file, seconds)
+            } catch (e: AgentException) {
+                _events.tryEmit(e.userMessage)
+            } catch (e: Exception) {
+                _events.tryEmit(e.message?.takeIf { it.isNotBlank() } ?: "语音发送失败，请稍后重试")
+            } finally {
+                pendingSends = (pendingSends - 1).coerceAtLeast(0)
+                typing = pendingSends > 0
+            }
         }
     }
 

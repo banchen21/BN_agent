@@ -92,6 +92,99 @@ class AgentClient(
         )
     }
 
+    /**
+     * 语音消息：上传录音，后端走本地 ASR → LLM → 本地 TTS。
+     * 返回转写文本、文字回复，以及可选的回语音频（WAV）。
+     */
+    suspend fun voiceChat(
+        settings: ServerSettings,
+        peerId: String,
+        audio: ByteArray,
+        mime: String,
+        userName: String,
+    ): VoiceChatReply {
+        val payload = VoiceChatRequestDto(
+            audioBase64 = java.util.Base64.getEncoder().encodeToString(audio),
+            mime = mime,
+            peerId = peerId,
+            userName = userName,
+            source = SOURCE,
+        )
+        val request = buildRequest(
+            settings = settings,
+            path = PATH_VOICE,
+            body = json.encodeToString(VoiceChatRequestDto.serializer(), payload)
+                .toRequestBody(JSON_MEDIA_TYPE),
+        )
+        val body = execute(request, timeoutSeconds = 240)
+        val dto = try {
+            json.decodeFromString(VoiceChatResponseDto.serializer(), body)
+        } catch (e: SerializationException) {
+            throw AgentException.InvalidResponse("/api/chat/voice 响应解析失败：${e.message}", e)
+        }
+        val reply = dto.reply.trim()
+        if (reply.isEmpty()) {
+            throw AgentException.InvalidResponse("/api/chat/voice 返回了空回复")
+        }
+        val audioBytes = dto.audioBase64.takeIf { it.isNotBlank() }?.let {
+            runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull()
+        }
+        return VoiceChatReply(
+            transcript = dto.transcript.trim(),
+            reply = reply,
+            audio = audioBytes,
+            durationSeconds = dto.durationSeconds.coerceAtLeast(1),
+            ttsError = dto.ttsError,
+        )
+    }
+
+    /** 创建 LiveKit 房间并获取参与方 token（后端派发 yueyue agent）。 */
+    suspend fun startCall(
+        settings: ServerSettings,
+        userId: String,
+        mediaType: String,
+    ): CallSession {
+        val payload = CallStartRequestDto(userID = userId, mediaType = mediaType)
+        val request = buildRequest(
+            settings = settings,
+            path = PATH_CALL_START,
+            body = json.encodeToString(CallStartRequestDto.serializer(), payload)
+                .toRequestBody(JSON_MEDIA_TYPE),
+        )
+        val body = execute(request, timeoutSeconds = 30)
+        val dto = try {
+            json.decodeFromString(CallStartResponseDto.serializer(), body)
+        } catch (e: SerializationException) {
+            throw AgentException.InvalidResponse("/api/call/start 响应解析失败：${e.message}", e)
+        }
+        if (dto.token.isBlank() || dto.room.isBlank()) {
+            throw AgentException.InvalidResponse("/api/call/start 缺少 token/room")
+        }
+        return CallSession(
+            url = dto.url,
+            urlLocal = dto.urlLocal,
+            token = dto.token,
+            room = dto.room,
+            identity = dto.identity,
+            mediaType = dto.mediaType,
+            expiresInSecs = dto.expiresInSecs,
+        )
+    }
+
+    /** 挂断后删除房间；失败不阻断本地挂断流程。 */
+    suspend fun endCall(settings: ServerSettings, room: String) {
+        val payload = json.encodeToString(
+            CallEndRequestDto.serializer(),
+            CallEndRequestDto(room = room),
+        )
+        val request = buildRequest(
+            settings = settings,
+            path = PATH_CALL_END,
+            body = payload.toRequestBody(JSON_MEDIA_TYPE),
+        )
+        runCatching { execute(request, timeoutSeconds = 15) }
+    }
+
     // ─── 内部实现 ─────────────────────────────────────────────────────
 
     private fun buildRequest(
@@ -127,9 +220,11 @@ class AgentClient(
             .build()
     }
 
-    private suspend fun execute(request: Request): String =
+    private suspend fun execute(request: Request, timeoutSeconds: Long = 60): String =
         suspendCancellableCoroutine { cont ->
             val call = httpClient.newCall(request)
+            // OkHttp 客户端默认 60s 整体超时；语音链路（ASR+TTS）需要更长。
+            call.timeout().timeout(timeoutSeconds, TimeUnit.SECONDS)
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -181,7 +276,10 @@ class AgentClient(
 
         private const val SOURCE = "android"
         private const val PATH_CHAT = "/api/chat"
+        private const val PATH_VOICE = "/api/chat/voice"
         private const val PATH_HEALTH = "/api/health"
+        private const val PATH_CALL_START = "/api/call/start"
+        private const val PATH_CALL_END = "/api/call/end"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
@@ -193,6 +291,57 @@ data class ChatReply(
     val promptTokens: Long,
     val completionTokens: Long,
 )
+
+/** 语音消息后端结果：转写 + 文字回复 + 可选回语音频（WAV）。 */
+data class VoiceChatReply(
+    val transcript: String,
+    val reply: String,
+    val audio: ByteArray?,
+    val durationSeconds: Int,
+    val ttsError: String? = null,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is VoiceChatReply) return false
+        return transcript == other.transcript &&
+            reply == other.reply &&
+            durationSeconds == other.durationSeconds &&
+            ttsError == other.ttsError &&
+            (audio?.contentEquals(other.audio) ?: (other.audio == null))
+    }
+
+    override fun hashCode(): Int {
+        var result = transcript.hashCode()
+        result = 31 * result + reply.hashCode()
+        result = 31 * result + (audio?.contentHashCode() ?: 0)
+        result = 31 * result + durationSeconds
+        result = 31 * result + (ttsError?.hashCode() ?: 0)
+        return result
+    }
+}
+
+/** LiveKit 通话会话（/api/call/start 返回）。 */
+data class CallSession(
+    val url: String,
+    val urlLocal: String,
+    val token: String,
+    val room: String,
+    val identity: String,
+    val mediaType: String,
+    val expiresInSecs: Long,
+) {
+    /**
+     * 本机 LAN 联调用的信令地址：服务端返回 wss://host:7443（Caddy 自签证书），
+     * Android 端走明文 ws://host:7880，避免自签证书信任问题。
+     */
+    val localWsUrl: String
+        get() {
+            val raw = url.ifBlank { urlLocal }
+            return raw
+                .replaceFirst("wss://", "ws://")
+                .replaceFirst(":7443", ":7880")
+        }
+}
 
 /** 健康检查结果。 */
 data class HealthInfo(
@@ -233,4 +382,46 @@ internal data class HealthResponseDto(
     val status: String = "",
     val version: String? = null,
     @SerialName("uptime_secs") val uptimeSecs: Long? = null,
+)
+
+@Serializable
+internal data class VoiceChatRequestDto(
+    @SerialName("audio_base64") val audioBase64: String,
+    val mime: String,
+    @SerialName("peer_id") val peerId: String,
+    @SerialName("user_name") val userName: String,
+    val source: String,
+)
+
+@Serializable
+internal data class VoiceChatResponseDto(
+    val transcript: String = "",
+    val reply: String = "",
+    @SerialName("audio_base64") val audioBase64: String = "",
+    @SerialName("audio_mime") val audioMime: String = "audio/wav",
+    @SerialName("duration_secs") val durationSeconds: Int = 1,
+    @SerialName("tts_error") val ttsError: String? = null,
+)
+
+@Serializable
+internal data class CallStartRequestDto(
+    // 后端字段名就是 userID（大写 ID）
+    @SerialName("userID") val userID: String,
+    val mediaType: String,
+)
+
+@Serializable
+internal data class CallStartResponseDto(
+    val url: String = "",
+    @SerialName("urlLocal") val urlLocal: String = "",
+    val token: String = "",
+    val room: String = "",
+    val identity: String = "",
+    val mediaType: String = "audio",
+    @SerialName("expiresInSecs") val expiresInSecs: Long = 0,
+)
+
+@Serializable
+internal data class CallEndRequestDto(
+    val room: String,
 )

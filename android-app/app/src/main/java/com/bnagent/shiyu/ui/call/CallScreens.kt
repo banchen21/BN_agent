@@ -1,6 +1,10 @@
 package com.bnagent.shiyu.ui.call
 
+import android.Manifest
+import android.app.Application
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -28,7 +32,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,10 +45,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -52,6 +61,9 @@ import com.bnagent.shiyu.ui.components.LocalToast
 import com.bnagent.shiyu.ui.components.ShiYuIcons
 import com.bnagent.shiyu.ui.theme.ShiYuCallColors
 import com.bnagent.shiyu.ui.theme.ShiYuType
+import io.livekit.android.renderer.SurfaceViewRenderer
+import io.livekit.android.room.Room
+import io.livekit.android.room.track.VideoTrack
 
 /**
  * 语音通话（设计规格 4.7）：呼叫波纹、接通计时、静音 / 免提、挂断。
@@ -64,8 +76,9 @@ fun VoiceCallScreen(
     onEndToChat: () -> Unit,
 ) {
     val container = LocalAppContainer.current
+    val app = LocalContext.current.applicationContext as Application
     val viewModel: CallViewModel = viewModel(
-        factory = CallViewModel.factory(container.conversationRepository, conversationId),
+        factory = CallViewModel.factory(app, container.conversationRepository, conversationId, video = false),
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val conversation by viewModel.conversation.collectAsStateWithLifecycle()
@@ -83,6 +96,26 @@ fun VoiceCallScreen(
         onEndToChat()
     }
     BackHandler(onBack = endCall)
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants.values.all { it }) {
+            viewModel.connect()
+        } else {
+            toast?.show("需要麦克风权限才能通话")
+            endCall()
+        }
+    }
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+    }
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { toast?.show(it) }
+    }
+    LaunchedEffect(state.error) {
+        state.error?.let { toast?.show("通话连接失败：$it") }
+    }
 
     Box(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
         Column(
@@ -123,7 +156,11 @@ fun VoiceCallScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = if (state.connected) formatCallDuration(state.elapsedSeconds) else "正在呼叫…",
+                    text = when {
+                        state.error != null -> "连接失败"
+                        state.connected -> formatCallDuration(state.elapsedSeconds)
+                        else -> "正在呼叫…"
+                    },
                     color = ShiYuCallColors.status,
                     style = ShiYuType.callStatus.copy(fontFeatureSettings = "tnum"),
                 )
@@ -300,12 +337,15 @@ fun VideoCallScreen(
     onEndToChat: () -> Unit,
 ) {
     val container = LocalAppContainer.current
+    val app = LocalContext.current.applicationContext as Application
     val viewModel: CallViewModel = viewModel(
-        factory = CallViewModel.factory(container.conversationRepository, conversationId),
+        factory = CallViewModel.factory(app, container.conversationRepository, conversationId, video = true),
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val conversation by viewModel.conversation.collectAsStateWithLifecycle()
     val me by viewModel.me.collectAsStateWithLifecycle()
+    val localVideo by viewModel.localVideoTrack.collectAsStateWithLifecycle()
+    val remoteVideo by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
     val toast = LocalToast.current
 
     val endCall: () -> Unit = {
@@ -325,6 +365,28 @@ fun VideoCallScreen(
     }
     BackHandler(onBack = endCall)
 
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants.values.all { it }) {
+            viewModel.connect()
+        } else {
+            toast?.show("需要麦克风与摄像头权限才能视频通话")
+            endCall()
+        }
+    }
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(
+            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
+        )
+    }
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { toast?.show(it) }
+    }
+    LaunchedEffect(state.error) {
+        state.error?.let { toast?.show("通话连接失败：$it") }
+    }
+
     Box(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
         // 远端画面：对方头像 cover，`object-position center 30%` 近似顶部对齐
         val remote = conversation?.let { StockMedia.drawableFor(it.avatar) }
@@ -334,6 +396,15 @@ fun VideoCallScreen(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.TopCenter,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // 对端发布视频时覆盖在头像上（悦悦只发音频，通常为空）。
+        remoteVideo?.let { track ->
+            LiveKitVideo(
+                room = viewModel.room,
+                track = track,
+                mirrored = false,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -359,7 +430,11 @@ fun VideoCallScreen(
                     lineHeight = 23.sp,
                 )
                 Text(
-                    text = if (state.connected) formatCallDuration(state.elapsedSeconds) else "正在呼叫…",
+                    text = when {
+                        state.error != null -> "连接失败"
+                        state.connected -> formatCallDuration(state.elapsedSeconds)
+                        else -> "正在呼叫…"
+                    },
                     modifier = Modifier.padding(top = 2.dp),
                     color = VideoStatusColor,
                     style = ShiYuType.callStatus.copy(
@@ -404,7 +479,15 @@ fun VideoCallScreen(
                 .border(1.dp, LocalWindowStroke, localWindowShape),
         ) {
             val local = StockMedia.drawableFor(me.avatar)
-            if (local != null) {
+            val localTrack = localVideo
+            if (localTrack != null) {
+                LiveKitVideo(
+                    room = viewModel.room,
+                    track = localTrack,
+                    mirrored = state.cameraFlipped,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (local != null) {
                 AsyncImage(
                     model = local,
                     contentDescription = "本地画面",
@@ -506,6 +589,30 @@ private fun HangupButton(
             modifier = Modifier.size(iconSize),
         )
     }
+}
+
+/** LiveKit 视频轨渲染（本地预览 / 远端画面共用）。 */
+@Composable
+private fun LiveKitVideo(
+    room: Room,
+    track: VideoTrack,
+    mirrored: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val renderer = remember { SurfaceViewRenderer(context) }
+    DisposableEffect(room, renderer) {
+        runCatching { room.initVideoRenderer(renderer) }
+        onDispose { runCatching { renderer.release() } }
+    }
+    DisposableEffect(track, renderer) {
+        runCatching { track.addRenderer(renderer) }
+        onDispose { runCatching { track.removeRenderer(renderer) } }
+    }
+    AndroidView(
+        factory = { renderer },
+        modifier = modifier.graphicsLayer { scaleX = if (mirrored) -1f else 1f },
+    )
 }
 
 /** 通话页固定配色（不随主题变化）。 */

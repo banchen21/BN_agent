@@ -10,6 +10,7 @@ datastore = "1.1.7"
 okhttp = "4.12.0"
 serializationJson = "1.8.1"
 coil = "2.7.0"
+livekit = "2.30.0"
 materialIconsExtended = "1.7.8"
 materialIconsCore = "1.7.8"
 junit = "4.13.2"
@@ -42,6 +43,7 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serializationJson" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+livekit-android = { group = "io.livekit", name = "livekit-android", version.ref = "livekit" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }

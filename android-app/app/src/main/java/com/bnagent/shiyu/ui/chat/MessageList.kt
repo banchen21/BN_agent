@@ -415,38 +415,54 @@ private fun VoiceBubble(
     val shape = ShiYuTheme.bubbleShape(isMine = isMine, tail = true)
     val ink = if (isMine) colors.bubbleOutInk else colors.bubbleInInk
     val interaction = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .widthIn(min = 156.dp)
-            .clip(shape)
-            .background(if (isMine) colors.bubbleOut else colors.bubbleIn)
-            .then(if (isMine) Modifier else Modifier.border(1.dp, colors.line, shape))
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                onClick = { onVoiceClick(message) },
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    Column(
+        horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Icon(
-            imageVector = ShiYuIcons.Play,
-            contentDescription = if (playing) "停止播放" else "播放语音",
-            tint = ink.copy(alpha = if (playing) 0.7f else 1f),
-            modifier = Modifier.size(15.dp),
-        )
-        VoiceWaveform(playing = playing, color = ink)
-        Text(
-            text = message.durationLabel,
-            color = ink,
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.SemiBold,
-            lineHeight = 16.sp,
-            maxLines = 1,
-            softWrap = false,
-            modifier = Modifier.padding(start = 2.dp),
-        )
+        Row(
+            modifier = Modifier
+                .widthIn(min = 156.dp)
+                .clip(shape)
+                .background(if (isMine) colors.bubbleOut else colors.bubbleIn)
+                .then(if (isMine) Modifier else Modifier.border(1.dp, colors.line, shape))
+                .clickable(
+                    interactionSource = interaction,
+                    indication = null,
+                    onClick = { onVoiceClick(message) },
+                )
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            Icon(
+                imageVector = ShiYuIcons.Play,
+                contentDescription = if (playing) "停止播放" else "播放语音",
+                tint = ink.copy(alpha = if (playing) 0.7f else 1f),
+                modifier = Modifier.size(15.dp),
+            )
+            VoiceWaveform(playing = playing, color = ink)
+            Text(
+                text = message.durationLabel,
+                color = ink,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                lineHeight = 16.sp,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.padding(start = 2.dp),
+            )
+        }
+        // 真实语音消息：气泡下方显示 ASR / TTS 转写（种子演示语音没有转写）。
+        val transcript = message.transcript?.takeIf { it.isNotBlank() }
+        if (transcript != null) {
+            Text(
+                text = transcript,
+                color = colors.chatMeta,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(horizontal = 6.dp),
+            )
+        }
     }
 }
 

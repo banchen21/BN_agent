@@ -17,6 +17,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // LiveKit Android SDK 的部分依赖来自 JitPack
+        maven { url = uri("https://jitpack.io") }
     }
 }
 

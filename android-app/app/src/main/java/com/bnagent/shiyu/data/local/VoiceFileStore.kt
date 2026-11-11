@@ -20,6 +20,14 @@ object VoiceFileStore {
         return File(voiceDir(context), "voice_${safeId}_${System.currentTimeMillis()}.m4a")
     }
 
+    /** 保存后端 TTS 返回的 WAV（Agent 语音回复）。 */
+    fun saveAgentReply(context: Context, conversationId: String, bytes: ByteArray): File {
+        val safeId = conversationId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val file = File(voiceDir(context), "reply_${safeId}_${System.currentTimeMillis()}.wav")
+        file.writeBytes(bytes)
+        return file
+    }
+
     /** 文件是否还存在且非空（UI 播放前可校验）。 */
     fun isPlayable(message: com.bnagent.shiyu.domain.model.Message.Voice): Boolean {
         val path = message.filePath ?: return false
