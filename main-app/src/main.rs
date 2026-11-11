@@ -169,6 +169,26 @@ async fn health(state: web::Data<AppState>) -> impl Responder {
     ))
 }
 
+// ── Agents ───────────────────────────────────────────────────────────────────
+
+/// 可对话的 Agent 列表（Android 通讯录的真实数据源）。
+///
+/// 目前只有本地 LiveKit 通话 Agent「悦悦」；后续多 Agent/多人时在这里扩展。
+async fn list_agents() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "agents": [{
+            "id": "yueyue",
+            "name": "齐悦",
+            "handle": "yueyue",
+            "role": "AI Agent · 语音 / 视频",
+            "sign": "叫我悦悦就行。",
+            "avatar": "agent_yueyue",
+            "online": true,
+            "kind": "agent"
+        }]
+    }))
+}
+
 // ── Plugin handlers ──────────────────────────────────────────────────────────
 
 async fn list_plugins(state: web::Data<AppState>) -> impl Responder {
@@ -1155,6 +1175,7 @@ fn main() -> std::io::Result<()> {
                 .app_data(web::JsonConfig::default().limit(20 * 1024 * 1024))
                 .wrap(actix_web::middleware::from_fn(api_key_middleware))
                 .route("/api/health", web::get().to(health))
+                .route("/api/agents", web::get().to(list_agents))
                 .route("/api/plugins", web::get().to(list_plugins))
                 .route("/api/plugins/load", web::post().to(load_plugin))
                 .route("/api/plugins/unload/{name}", web::post().to(unload_plugin))

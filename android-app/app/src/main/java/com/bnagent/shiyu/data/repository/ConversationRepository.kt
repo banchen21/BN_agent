@@ -6,6 +6,7 @@ import com.bnagent.shiyu.data.local.ChatStore
 import com.bnagent.shiyu.data.local.VoiceFileStore
 import com.bnagent.shiyu.data.remote.AgentClient
 import com.bnagent.shiyu.data.remote.AgentException
+import com.bnagent.shiyu.data.remote.CallHistoryMessage
 import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.domain.model.Contact
 import com.bnagent.shiyu.domain.model.Conversation
@@ -82,6 +83,85 @@ class ConversationRepository(
                 },
             )
         }
+    }
+
+    /**
+     * 从后端 `GET /api/agents` 同步真实可对话 Agent：
+     * - 已有会话保留消息与排序，只更新资料；
+     * - 新 Agent 追加会话；
+     * - 不在列表里的旧占位会话（含消息）删除。
+     *
+     * @return true 表示同步成功；网络失败时保留本地现状。
+     */
+    suspend fun syncAgents(): Boolean {
+        val server = settingsRepository.serverSettings.first()
+        val agents = runCatching { agentClient.agents(server) }.getOrNull().orEmpty()
+        if (agents.isEmpty()) return false
+        store.update { state ->
+            val existing = state.conversations.associateBy { it.id }
+            var seq = state.orderSeq
+            val conversations = agents.map { agent ->
+                val old = existing[agent.id]
+                if (old != null) {
+                    old.copy(
+                        name = agent.name,
+                        handle = agent.handle,
+                        role = agent.role,
+                        sign = agent.sign,
+                        avatar = agent.avatar,
+                        online = agent.online,
+                    )
+                } else {
+                    seq += 1
+                    Conversation(
+                        id = agent.id,
+                        name = agent.name,
+                        handle = agent.handle,
+                        role = agent.role,
+                        sign = agent.sign,
+                        avatar = agent.avatar,
+                        online = agent.online,
+                        timeLabel = "",
+                        order = seq,
+                        preview = Conversation.EMPTY_PREVIEW,
+                    )
+                }
+            }
+            val ids = agents.map { it.id }.toSet()
+            state.copy(
+                orderSeq = seq,
+                conversations = conversations,
+                messages = state.messages.filterKeys { it in ids },
+            )
+        }
+        return true
+    }
+
+    /** 编辑本人资料（昵称 / 签名 / 头像资源名）。 */
+    suspend fun updateProfile(name: String, signature: String, avatar: String) {
+        store.update { state ->
+            state.copy(
+                profile = state.profile.copy(
+                    name = name.trim().ifBlank { state.profile.name },
+                    signature = signature.trim(),
+                    avatar = avatar,
+                ),
+            )
+        }
+    }
+
+    /** 本地语音缓存占用（字节）。 */
+    fun cacheSizeBytes(): Long =
+        VoiceFileStore.voiceDir(appContext).listFiles()?.sumOf { it.length() } ?: 0L
+
+    /** 清理本地语音缓存；返回释放的字节数。 */
+    fun clearCache(): Long {
+        var freed = 0L
+        VoiceFileStore.voiceDir(appContext).listFiles()?.forEach { file ->
+            freed += file.length()
+            file.delete()
+        }
+        return freed
     }
 
     /**
@@ -216,10 +296,35 @@ class ConversationRepository(
         store.update { it.appendOutgoing(conversationId, timed, time) }
     }
 
-    /** 创建 LiveKit 通话房间并取 token（mediaType = audio / video）。 */
-    suspend fun startCall(mediaType: String): CallSession {
+    /** 创建 LiveKit 通话房间并取 token；把当前会话的近期聊天记录一起带给 Agent。 */
+    suspend fun startCall(conversationId: String, mediaType: String): CallSession {
         val server = settingsRepository.serverSettings.first()
-        return agentClient.startCall(server, userId = "android", mediaType = mediaType)
+        val history = store.state.first().messages[conversationId].orEmpty()
+            .mapNotNull { message ->
+                when (message) {
+                    is Message.Text -> CallHistoryMessage(
+                        role = if (message.sender == MessageSender.ME) "user" else "assistant",
+                        content = message.content,
+                    )
+                    is Message.Voice -> message.transcript
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let {
+                            CallHistoryMessage(
+                                role = if (message.sender == MessageSender.ME) "user" else "assistant",
+                                content = it,
+                            )
+                        }
+                    else -> null
+                }
+            }
+            .takeLast(16)
+        return agentClient.startCall(
+            settings = server,
+            userId = "android",
+            mediaType = mediaType,
+            peerId = AgentClient.peerIdFor(conversationId),
+            history = history,
+        )
     }
 
     /** 挂断后通知后端删除房间；失败不阻断本地流程。 */

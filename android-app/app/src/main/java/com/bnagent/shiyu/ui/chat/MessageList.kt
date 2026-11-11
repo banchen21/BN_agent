@@ -39,6 +39,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -115,10 +117,19 @@ internal fun MessageList(
     onImageClick: (Message.Image) -> Unit,
     onVoiceClick: (Message.Voice) -> Unit,
     onDownloadClick: () -> Unit,
+    onAtBottomChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     var didInitialScroll by remember { mutableStateOf(false) }
+
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            lastVisible >= info.totalItemsCount - 1
+        }.distinctUntilChanged().collect(onAtBottomChange)
+    }
 
     LaunchedEffect(messages.size, typing) {
         val target = messages.size - 1 + if (typing) 1 else 0

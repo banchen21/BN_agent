@@ -48,10 +48,11 @@ class AppContainer(context: Context) {
         appContext = applicationContext,
     )
 
-    /** 首装种子写入（首次启动生效，后续启动无操作）。 */
+    /** 首装种子写入（首次启动生效），随后同步后端真实 Agent 列表。 */
     fun initialize() {
         applicationScope.launch {
             chatStore.ensureSeeded()
+            conversationRepository.syncAgents()
         }
     }
 }

@@ -14,8 +14,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -35,19 +39,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -64,6 +73,7 @@ import com.bnagent.shiyu.ui.theme.ShiYuType
 import io.livekit.android.renderer.SurfaceViewRenderer
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.VideoTrack
+import kotlin.math.roundToInt
 
 /**
  * 语音通话（设计规格 4.7）：呼叫波纹、接通计时、静音 / 免提、挂断。
@@ -82,6 +92,7 @@ fun VoiceCallScreen(
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val conversation by viewModel.conversation.collectAsStateWithLifecycle()
+    val localVideo by viewModel.localVideoTrack.collectAsStateWithLifecycle()
     val toast = LocalToast.current
 
     val endCall: () -> Unit = {
@@ -182,7 +193,34 @@ fun VoiceCallScreen(
                     active = state.speakerOn,
                     onClick = viewModel::toggleSpeaker,
                 )
+                VoiceControl(
+                    icon = ShiYuIcons.Video,
+                    label = if (state.cameraEnabled) "关摄像头" else "摄像头",
+                    active = state.cameraEnabled,
+                    onClick = viewModel::toggleCamera,
+                )
                 HangupButton(size = 68.dp, iconSize = 28.dp, onClick = endCall)
+            }
+        }
+        // 语音通话中开启摄像头后显示本地预览（Agent 同时能收到视频帧）。
+        val localTrack = localVideo
+        if (state.cameraEnabled) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 88.dp, end = 16.dp)
+                    .size(width = 96.dp, height = 132.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(ShiYuCallColors.videoLocalBg),
+            ) {
+                if (localTrack != null) {
+                    LiveKitVideo(
+                        room = viewModel.room,
+                        track = localTrack,
+                        mirrored = true,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
     }
@@ -387,27 +425,59 @@ fun VideoCallScreen(
         state.error?.let { toast?.show("通话连接失败：$it") }
     }
 
+    var localLarge by remember { mutableStateOf(false) }
+    var pipOffset by remember { mutableStateOf(Offset.Zero) }
+    val remoteDrawable = conversation?.let { StockMedia.drawableFor(it.avatar) }
+    val meDrawable = StockMedia.drawableFor(me.avatar)
+
     Box(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
-        // 远端画面：对方头像 cover，`object-position center 30%` 近似顶部对齐
-        val remote = conversation?.let { StockMedia.drawableFor(it.avatar) }
-        if (remote != null) {
-            AsyncImage(
-                model = remote,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.TopCenter,
-                modifier = Modifier.fillMaxSize(),
-            )
+        // 大屏：默认远端（悦悦自拍 / 远端视频），点击后与本地画面互换。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { localLarge = !localLarge },
+        ) {
+            if (localLarge) {
+                val localTrack = localVideo
+                if (localTrack != null) {
+                    LiveKitVideo(
+                        room = viewModel.room,
+                        track = localTrack,
+                        mirrored = state.cameraFlipped,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (meDrawable != null) {
+                    AsyncImage(
+                        model = meDrawable,
+                        contentDescription = "本地画面",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            } else {
+                val remoteTrack = remoteVideo
+                if (remoteTrack != null) {
+                    LiveKitVideo(
+                        room = viewModel.room,
+                        track = remoteTrack,
+                        mirrored = false,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (remoteDrawable != null) {
+                    AsyncImage(
+                        model = remoteDrawable,
+                        contentDescription = "对方画面",
+                        contentScale = ContentScale.Crop,
+                        alignment = Alignment.TopCenter,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
         }
-        // 对端发布视频时覆盖在头像上（悦悦只发音频，通常为空）。
-        remoteVideo?.let { track ->
-            LiveKitVideo(
-                room = viewModel.room,
-                track = track,
-                mirrored = false,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
+
         // 渐晕层
         Box(Modifier.fillMaxSize().background(VideoScrim))
 
@@ -461,41 +531,54 @@ fun VideoCallScreen(
             }
         }
 
-        // 本地小窗：96×132，top 74 / right 16，翻转时镜像
-        val localWindowShape = RoundedCornerShape(18.dp)
-        Box(
+        // 小窗：默认本地画面；点击小窗即可交换大小屏；可拖动。
+        val smallIsLocal = !localLarge
+        DraggablePip(
+            offset = pipOffset,
+            onDrag = { pipOffset += it },
+            onClick = { localLarge = !localLarge },
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(top = 74.dp, end = 16.dp)
-                .size(width = 96.dp, height = 132.dp)
-                .shadow(
-                    elevation = 14.dp,
-                    shape = localWindowShape,
-                    ambientColor = Color.Black,
-                    spotColor = Color.Black,
-                )
-                .clip(localWindowShape)
-                .background(ShiYuCallColors.videoLocalBg)
-                .border(1.dp, LocalWindowStroke, localWindowShape),
+                .size(width = 96.dp, height = 132.dp),
         ) {
-            val local = StockMedia.drawableFor(me.avatar)
-            val localTrack = localVideo
-            if (localTrack != null) {
-                LiveKitVideo(
-                    room = viewModel.room,
-                    track = localTrack,
-                    mirrored = state.cameraFlipped,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else if (local != null) {
-                AsyncImage(
-                    model = local,
-                    contentDescription = "本地画面",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { scaleX = if (state.cameraFlipped) -1f else 1f },
-                )
+            if (smallIsLocal) {
+                val localTrack = localVideo
+                if (localTrack != null) {
+                    LiveKitVideo(
+                        room = viewModel.room,
+                        track = localTrack,
+                        mirrored = state.cameraFlipped,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (meDrawable != null) {
+                    AsyncImage(
+                        model = meDrawable,
+                        contentDescription = "本地画面",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { scaleX = if (state.cameraFlipped) -1f else 1f },
+                    )
+                }
+            } else {
+                val remoteTrack = remoteVideo
+                if (remoteTrack != null) {
+                    LiveKitVideo(
+                        room = viewModel.room,
+                        track = remoteTrack,
+                        mirrored = false,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (remoteDrawable != null) {
+                    AsyncImage(
+                        model = remoteDrawable,
+                        contentDescription = "对方画面",
+                        contentScale = ContentScale.Crop,
+                        alignment = Alignment.TopCenter,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
 
@@ -589,6 +672,43 @@ private fun HangupButton(
             modifier = Modifier.size(iconSize),
         )
     }
+}
+
+/** 可拖动 + 点击交换大小屏的小窗。 */
+@Composable
+private fun DraggablePip(
+    offset: Offset,
+    onDrag: (Offset) -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(18.dp)
+    Box(
+        modifier = modifier
+            .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
+            .shadow(
+                elevation = 14.dp,
+                shape = shape,
+                ambientColor = Color.Black,
+                spotColor = Color.Black,
+            )
+            .clip(shape)
+            .background(ShiYuCallColors.videoLocalBg)
+            .border(1.dp, LocalWindowStroke, shape)
+            .pointerInput(Unit) {
+                detectDragGestures { change, drag ->
+                    change.consume()
+                    onDrag(drag)
+                }
+            }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
+        content = content,
+    )
 }
 
 /** LiveKit 视频轨渲染（本地预览 / 远端画面共用）。 */
