@@ -165,7 +165,8 @@ cargo run -p main-app
 | POST | `/api/plugins/scan` | 扫描目录自动加载 |
 | POST | `/api/events` | 发布事件 |
 | POST | `/api/llm/chat` | 简单 LLM 调用 |
-| POST | `/api/chat` | 带工具+历史的完整对话 |
+| POST | `/api/chat` | 带工具+历史的完整对话；body: `message`（必填）与可选的 `peer_id`、`user_name`、`source`（`peer_id` 归一化后默认 `web:default`） |
+| GET | `/api/chat/history` | 按 `peer_id` 拉取历史，返回 JSON 数组（元素含 `role`/`content`/`peer_id`）；`limit` 默认 50、上限 500；省略 `peer_id` 时同 `/api/chat` 回退 `web:default` |
 | GET | `/api/chat/sessions` | 列出会话元数据；支持 `peer_id`、`limit` 查询参数 |
 | POST | `/api/chat/sessions/refresh` | 刷新指定 `peer_id` 的标题、摘要和计数 |
 | GET | `/api/tools` | 列出所有已注册工具 |
@@ -259,6 +260,14 @@ parameters:
 ```
 
 每个 `.md` 文件注册为 `skill__{name}` 工具，LLM 调用时返回正文（支持 `{{param}}` 模板替换）。
+
+## Android 客户端（拾语）
+
+`android-app/` 是「拾语」Android 16 原生客户端（Kotlin + Jetpack Compose + Material 3），
+通过 `POST /api/chat` 的多会话契约（`peer_id = android:<convId>`）连接本仓库的后端。
+
+- 构建 / 安装、服务器与 API Key 配置、adb reverse 联调、架构与功能清单：见 [`android-app/README.md`](android-app/README.md)
+- UI 设计依据：[`android-app/docs/design-spec.md`](android-app/docs/design-spec.md)
 
 ## 项目结构
 

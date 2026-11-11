@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 仅用于启动窗口背景，应用内颜色统一由 ShiYuTheme 提供 -->
+    <color name="shiyu_window_bg">#F2F4F5</color>
+    <color name="shiyu_launcher_bg">#C93B24</color>
+</resources>

@@ -396,7 +396,7 @@ pub struct FetchChatHistory {
 }
 
 /// A single chat history record returned from the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatHistoryRecord {
     pub role: String,
     pub content: String,

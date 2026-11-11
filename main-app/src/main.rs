@@ -13,6 +13,7 @@
 //! | POST   | `/api/events`                | Publish an event to the bus      |
 //! | POST   | `/api/llm/chat`              | Simple LLM chat                  |
 //! | POST   | `/api/chat`                  | Full chat with tools + history   |
+//! | GET    | `/api/chat/history`          | Per-peer chat history            |
 //! | GET    | `/api/chat/sessions`         | List per-peer chat sessions      |
 //! | POST   | `/api/chat/sessions/refresh` | Refresh one session summary      |
 //! | GET    | `/api/tools`                 | List registered tools            |
@@ -317,6 +318,28 @@ async fn llm_chat(state: web::Data<AppState>, body: web::Json<LlmChatRequest>) -
 #[derive(Deserialize)]
 struct ChatPayload {
     message: String,
+    /// 多会话标识（如 `android:<device_id>`）；省略时回退 `web:default`。
+    peer_id: Option<String>,
+    /// 用户显示名，透传给 LLM。
+    user_name: Option<String>,
+    /// 消息来源渠道（如 `android`、`web`）。
+    source: Option<String>,
+}
+
+/// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
+/// 结果为空时回退 `web:default`（兼容旧版单会话请求）。
+fn normalize_peer_id(raw: &str) -> String {
+    let filtered: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        .take(128)
+        .collect();
+    if filtered.is_empty() {
+        "web:default".to_string()
+    } else {
+        filtered
+    }
 }
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
@@ -328,7 +351,7 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         }
     };
 
-    let peer_id = "web:default".to_string();
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
 
     // Refresh peer-scoped snapshots.
     let _ = state
@@ -368,8 +391,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                 file_name: None,
                 stream: true,
                 request_id: request_id.clone(),
-                source: String::new(),
-                user_name: String::new(),
+                source: body.source.clone().unwrap_or_default(),
+                user_name: body.user_name.clone().unwrap_or_default(),
                 max_tokens: None,
                 original_user_msg: None,
                 assistant_tool_calls: vec![],
@@ -393,6 +416,52 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             HttpResponse::Ok().json(resp)
         }
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ── Chat history (per peer) ──────────────────────────────────────────────────
+
+const CHAT_HISTORY_DEFAULT_LIMIT: usize = 50;
+const CHAT_HISTORY_MAX_LIMIT: usize = 500;
+
+/// 历史条数：缺省 50，clamp 到 `[1, 500]`。
+fn clamp_history_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(CHAT_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, CHAT_HISTORY_MAX_LIMIT)
+}
+
+#[derive(Deserialize)]
+struct ChatHistoryQuery {
+    peer_id: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /api/chat/history?peer_id=<id>&limit=<n>`
+///
+/// 返回按时间正序的 JSON 数组：`[{"role","content","peer_id"}, ...]`。
+/// `peer_id` 经 `normalize_peer_id` 归一化（省略/非法时回退 `web:default`）。
+/// 注意：`FetchChatHistory` 目前只取 role/content/peer_id 三列，故响应不含 created_at。
+async fn chat_history(
+    state: web::Data<AppState>,
+    query: web::Query<ChatHistoryQuery>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    let peer_id = normalize_peer_id(query.peer_id.as_deref().unwrap_or(""));
+    let limit = clamp_history_limit(query.limit);
+    match store
+        .send(FetchChatHistory {
+            limit,
+            peer_id: Some(peer_id),
+        })
+        .await
+    {
+        Ok(records) => HttpResponse::Ok().json(records),
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -1057,6 +1126,7 @@ fn main() -> std::io::Result<()> {
                 .route("/api/events", web::post().to(publish_event))
                 .route("/api/llm/chat", web::post().to(llm_chat))
                 .route("/api/chat", web::post().to(chat))
+                .route("/api/chat/history", web::get().to(chat_history))
                 .route("/api/chat/sessions", web::get().to(list_chat_sessions))
                 .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))
                 .route("/api/tools", web::get().to(list_tools))
@@ -1085,7 +1155,7 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_health_json, check_api_key};
+    use super::{build_health_json, check_api_key, clamp_history_limit, normalize_peer_id};
 
     #[test]
     fn empty_expected_allows_all() {
@@ -1123,5 +1193,43 @@ mod tests {
         assert_eq!(v["uptime_secs"], 42);
         assert_eq!(v["plugins_loaded"], 5);
         assert_eq!(v["agent_loops_total"], 2);
+    }
+
+    #[test]
+    fn normalize_peer_id_falls_back_to_default() {
+        assert_eq!(normalize_peer_id(""), "web:default");
+        assert_eq!(normalize_peer_id("   "), "web:default");
+        assert_eq!(normalize_peer_id("用户张三"), "web:default");
+        assert_eq!(normalize_peer_id("!!!/???"), "web:default");
+    }
+
+    #[test]
+    fn normalize_peer_id_trims_and_keeps_allowed_chars() {
+        assert_eq!(
+            normalize_peer_id("  android:device-1_2.3  "),
+            "android:device-1_2.3"
+        );
+        assert_eq!(normalize_peer_id("a b\tc\nd"), "abcd");
+        assert_eq!(normalize_peer_id("tg:123@456"), "tg:123456");
+    }
+
+    #[test]
+    fn normalize_peer_id_truncates_to_128_chars() {
+        let raw = "a".repeat(200);
+        let out = normalize_peer_id(&raw);
+        assert_eq!(out.len(), 128);
+        assert_eq!(out, "a".repeat(128));
+        // 128 字符以内保持原样。
+        let exact = "b".repeat(128);
+        assert_eq!(normalize_peer_id(&exact), exact);
+    }
+
+    #[test]
+    fn history_limit_defaults_and_caps() {
+        assert_eq!(clamp_history_limit(None), 50);
+        assert_eq!(clamp_history_limit(Some(10)), 10);
+        assert_eq!(clamp_history_limit(Some(0)), 1);
+        assert_eq!(clamp_history_limit(Some(500)), 500);
+        assert_eq!(clamp_history_limit(Some(10_000)), 500);
     }
 }
