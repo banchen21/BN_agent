@@ -73,6 +73,8 @@ cargo run -p main-app
 
 - Base URL：默认 `http://192.168.0.101:18080`（可在 `ServerSettings.DEFAULT_BASE_URL` 或 App 内修改）。
 - API Key：可选。填写后请求同时携带 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。
+- debug 包预置：在 `android-app/local.properties`（不入库）写 `shiyu.apiKey=<key>`，
+  构建时会注入 `BuildConfig.DEFAULT_API_KEY`，首次安装即带鉴权；release 包恒为空。
 - 「测试连接」调用 `GET /api/health`，显示 `连接成功 · v<version>` / 401 / 超时 / 不可达等状态。
 
 ### 3. adb reverse（手机不在同一网段时的备选）
