@@ -102,8 +102,10 @@ sealed interface Message {
         override val id: String,
         override val sender: MessageSender,
         val durationSeconds: Int,
-        /** 真实录音文件路径（应用私有目录）；种子演示语音为 null。 */
+        /** 真实录音 / 回语音频文件路径（应用私有目录）；种子演示语音为 null。 */
         val filePath: String? = null,
+        /** 语音转写文本（我方为 ASR 结果，对方为 TTS 原文）；种子/纯演示语音为 null。 */
+        val transcript: String? = null,
         override val time: String? = null,
         override val status: MessageStatus? = null,
         override val who: String? = null,

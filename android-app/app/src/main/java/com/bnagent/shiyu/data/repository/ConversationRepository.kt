@@ -1,9 +1,12 @@
 package com.bnagent.shiyu.data.repository
 
+import android.content.Context
 import com.bnagent.shiyu.data.local.ChatState
 import com.bnagent.shiyu.data.local.ChatStore
+import com.bnagent.shiyu.data.local.VoiceFileStore
 import com.bnagent.shiyu.data.remote.AgentClient
 import com.bnagent.shiyu.data.remote.AgentException
+import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.domain.model.Contact
 import com.bnagent.shiyu.domain.model.Conversation
 import com.bnagent.shiyu.domain.model.Message
@@ -39,6 +42,7 @@ class ConversationRepository(
     private val store: ChatStore,
     private val settingsRepository: SettingsRepository,
     private val agentClient: AgentClient,
+    private val appContext: Context,
     private val now: () -> LocalTime = { LocalTime.now() },
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
@@ -129,6 +133,76 @@ class ConversationRepository(
     }
 
     /**
+     * 发送语音消息：本地上传录音 → 后端 ASR → LLM → TTS。
+     * 成功追加一条可播放的 Agent 语音回复（含转写），失败保留我方消息并置「发送失败」。
+     */
+    suspend fun sendVoice(
+        conversationId: String,
+        audioFile: java.io.File,
+        durationSeconds: Int,
+    ): Message {
+        val snapshot = store.state.first()
+        if (snapshot.conversation(conversationId) == null) {
+            throw IllegalArgumentException("会话不存在：$conversationId")
+        }
+        val server = settingsRepository.serverSettings.first()
+        val sentTime = now().format(TIME_FORMAT)
+        val mine = Message.Voice(
+            id = newId(),
+            sender = MessageSender.ME,
+            durationSeconds = durationSeconds,
+            filePath = audioFile.absolutePath,
+            time = sentTime,
+            status = MessageStatus.SENT,
+        )
+        store.update { it.appendOutgoing(conversationId, mine, sentTime) }
+
+        val reply = try {
+            agentClient.voiceChat(
+                settings = server,
+                peerId = AgentClient.peerIdFor(conversationId),
+                audio = audioFile.readBytes(),
+                mime = "audio/mp4",
+                userName = snapshot.profile.name,
+            )
+        } catch (error: AgentException) {
+            store.update { it.markMessageFailed(conversationId, mine.id) }
+            throw error
+        } catch (error: Exception) {
+            store.update { it.markMessageFailed(conversationId, mine.id) }
+            throw error
+        }
+
+        // 把我方语音气泡补上 ASR 转写。
+        store.update { it.setVoiceTranscript(conversationId, mine.id, reply.transcript) }
+
+        val replyTime = now().format(TIME_FORMAT)
+        val replyAudio = reply.audio?.let {
+            runCatching { VoiceFileStore.saveAgentReply(appContext, conversationId, it) }.getOrNull()
+        }
+        val replyMessage: Message = if (replyAudio != null) {
+            Message.Voice(
+                id = newId(),
+                sender = MessageSender.THEM,
+                durationSeconds = reply.durationSeconds,
+                filePath = replyAudio.absolutePath,
+                transcript = reply.reply,
+                time = replyTime,
+            )
+        } else {
+            // TTS 不可用时至少保留文字回复，不让消息丢失。
+            Message.Text(
+                id = newId(),
+                sender = MessageSender.THEM,
+                content = reply.reply,
+                time = replyTime,
+            )
+        }
+        store.update { it.appendAgentReply(conversationId, replyMessage, replyTime) }
+        return replyMessage
+    }
+
+    /**
      * 发送附件（图片 / 文件 / 语音）。附件只落本地，不触发后端请求；
      * 调用方负责构造 [Message.Image] / [Message.File] / [Message.Voice]（sender = ME）。
      */
@@ -142,8 +216,21 @@ class ConversationRepository(
         store.update { it.appendOutgoing(conversationId, timed, time) }
     }
 
-    /** 清空单个会话记录（设计规格 5.8）：消息清空、预览回到「还没有消息」。 */
-    suspend fun clearMessages(conversationId: String) {
+    /** 创建 LiveKit 通话房间并取 token（mediaType = audio / video）。 */
+    suspend fun startCall(mediaType: String): CallSession {
+        val server = settingsRepository.serverSettings.first()
+        return agentClient.startCall(server, userId = "android", mediaType = mediaType)
+    }
+
+    /** 挂断后通知后端删除房间；失败不阻断本地流程。 */
+    suspend fun endCall(room: String) {
+        if (room.isBlank()) return
+        runCatching {
+            agentClient.endCall(settingsRepository.serverSettings.first(), room)
+        }
+    }
+
+    /** 清空单个会话记录（设计规格 5.8）：消息清空、预览回到「还没有消息」。 */    suspend fun clearMessages(conversationId: String) {
         store.update { state ->
             if (state.conversation(conversationId) == null) return@update state
             state.copy(
@@ -227,6 +314,24 @@ private fun ChatState.markMessageFailed(conversationId: String, messageId: Strin
     val list = messages[conversationId] ?: return this
     val updated = list.map { message ->
         if (message.id == messageId) message.withStatus(MessageStatus.FAILED) else message
+    }
+    return copy(messages = messages + (conversationId to updated))
+}
+
+/** 语音消息成功后补写 ASR 转写（只改指定消息，不动预览）。 */
+private fun ChatState.setVoiceTranscript(
+    conversationId: String,
+    messageId: String,
+    transcript: String,
+): ChatState {
+    if (transcript.isBlank()) return this
+    val list = messages[conversationId] ?: return this
+    val updated = list.map { message ->
+        if (message is Message.Voice && message.id == messageId) {
+            message.copy(transcript = transcript)
+        } else {
+            message
+        }
     }
     return copy(messages = messages + (conversationId to updated))
 }

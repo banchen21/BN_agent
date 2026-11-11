@@ -88,6 +88,7 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.coil.compose)
+    implementation(libs.livekit.android)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

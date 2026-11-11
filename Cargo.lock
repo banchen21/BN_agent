@@ -2725,6 +2725,7 @@ dependencies = [
  "actix",
  "actix-rt",
  "actix-web",
+ "base64 0.22.1",
  "chrono",
  "csv",
  "dotenvy",

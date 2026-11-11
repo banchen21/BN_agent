@@ -166,6 +166,7 @@ cargo run -p main-app
 | POST | `/api/events` | 发布事件 |
 | POST | `/api/llm/chat` | 简单 LLM 调用 |
 | POST | `/api/chat` | 带工具+历史的完整对话；body: `message`（必填）与可选的 `peer_id`、`user_name`、`source`（`peer_id` 归一化后默认 `web:default`） |
+| POST | `/api/chat/voice` | 语音消息：body `audio_base64`/`mime`（可选 `peer_id`/`user_name`/`source`）；ffmpeg 转 wav → 本地 yueyue ASR → 聊天 → 本地 GSV-TTS；返回 `transcript`/`reply`/`audio_base64`(WAV)/`duration_secs` |
 | GET | `/api/chat/history` | 按 `peer_id` 拉取历史，返回 JSON 数组（元素含 `role`/`content`/`peer_id`）；`limit` 默认 50、上限 500；省略 `peer_id` 时同 `/api/chat` 回退 `web:default` |
 | GET | `/api/chat/sessions` | 列出会话元数据；支持 `peer_id`、`limit` 查询参数 |
 | POST | `/api/chat/sessions/refresh` | 刷新指定 `peer_id` 的标题、摘要和计数 |

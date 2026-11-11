@@ -14,8 +14,9 @@
   tabbar 未读总数（不含静音会话，>99 显示 `99+`）。
 - **聊天**：文本走真实后端（乐观插入 → 等待期间「正在输入」→ 回复 / 失败标记「发送失败」+ toast）；
   图片走系统 Photo Picker，支持全屏查看器；文件（演示文件池，下载按钮提示「演示环境，暂不下载」）；
-  语音为真实录音（MediaRecorder，运行时申请 `RECORD_AUDIO`，拒绝时 toast 降级）与真实播放（MediaPlayer）；
-  群聊显示发送者名；含日期分隔、已读/已送达状态、清空聊天确认弹窗；聊天内可进个人资料 / 气泡与主题 / 通话。
+  语音为真实录音（MediaRecorder）→ 上传 `POST /api/chat/voice`（后端本地 SenseVoice ASR → LLM → 本地 GSV-TTS），
+  返回转写文本与可播放的语音回复（MediaPlayer）；群聊显示发送者名；含日期分隔、已读/已送达状态、
+  清空聊天确认弹窗；聊天内可进个人资料 / 气泡与主题 / 通话。
 - **通讯录 / 个人资料**：分组列表、在线状态、搜索、资料卡、发消息 / 语音 / 视频入口。
 - **我**：资料卡、气泡与主题入口（主题摘要实时联动，如「珊瑚 · 中圆角」）、深色模式开关、
   聊天通知开关（本地演示）、关于拾语 sheet、服务器设置入口。
@@ -23,7 +24,9 @@
   3 档聊天字号（16/17/19sp）、3 种聊天背景（冷白/雾灰/深墨，含点阵）、实时预览、应用内深色开关；
   修改即时全局生效并持久化（DataStore）。
 - **服务器设置**：Base URL、API Key（可空，密码态）、测试连接（`GET /api/health`）、保存。
-- **通话**：语音 / 视频通话页为本地模拟（2.4s 接通、计时、静音/免提/翻转本地状态、挂断 toast 并固定回到该会话聊天页）。
+- **通话（真实 LiveKit）**：`POST /api/call/start` 建房取 token，App 连接 `ws://<PC>:7880` 加入房间，
+  后端派发 yueyue agent；麦克风/摄像头为真实 WebRTC 轨，远端音频自动播放；静音 / 免提 / 摄像头翻转 /
+  挂断均为真实操作，挂断后 `POST /api/call/end` 删除房间。视频通话会发布摄像头，Agent 的 vision 工具可看到画面。
 
 ## 环境要求
 
@@ -155,7 +158,7 @@ app/src/main/java/com/bnagent/shiyu/
     ├── chats/ chat/             # 消息列表与聊天（ViewModel + Compose）
     ├── contacts/ profile/ me/   # 通讯录 / 资料 / 我
     ├── settings/                # 气泡与主题、服务器设置
-    └── call/                    # 语音 / 视频通话（模拟）
+    └── call/                    # LiveKit 语音 / 视频通话
 ```
 
 - **UI**：单 Activity + Compose Navigation；tabbar 只在 `chats / contacts / me` 显示；通话页强制深色 chrome。
@@ -168,10 +171,11 @@ app/src/main/java/com/bnagent/shiyu/
 
 ## 已知限制
 
-- **后端旧实例**：18080 当前进程为多会话改造前的二进制，需重启 / 重部署（见上文第 5 节）。
-- **LLM Key**：`LLM_API_KEY` 失效会导致 `/api/chat` 502；需更换 key 并重启后端。
+- **通话依赖本机 LiveKit**：7880/tcp 信令、7881/tcp 与 7882-7892/udp 媒体、call-agent 8081；
+  LAN 联调使用 `ws://<PC>:7880`（绕过 Caddy 自签证书），生产环境应改为 wss + 可信证书。
+- **语音消息依赖本机 yueyue 8877**：`/api/asr`（SenseVoice）+ `/api/tts`（GSV-TTS），后端用 ffmpeg 把 m4a 转 16k wav。
+- **LLM Key**：`LLM_API_KEY` 失效会导致 `/api/chat` 与语音回复 502；需更换 key 并重启后端。
 - **群聊回复无 sender 名**：后端只返回文本内容，群聊自动回复不携带发送者，UI 展示为对方消息。
-- **通话为本地模拟**：无真实信令 / 音频，只还原设计稿的呼叫、计时与控件状态。
 - **文件下载为演示**：点击下载仅 toast「演示环境，暂不下载」。
 - **已读状态口径**：仅当会话最后一条是「我方」消息时显示状态（design-spec 6.3 的歧义项），
   后端回复到达后先前气泡的「已读」会隐藏，待产品确认。
