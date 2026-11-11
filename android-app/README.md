@@ -1,0 +1,177 @@
+# 拾语 · Android 客户端
+
+「拾语」是 BN_agent 的 Android 原生 IM 客户端（Kotlin + Jetpack Compose + Material 3），
+通过 BN_agent 的多会话 HTTP 接口收发消息。
+
+- 包名 / applicationId：`com.bnagent.shiyu`
+- 版本：`2.4.0`（versionCode `20400`）
+- minSdk 26 / compileSdk 36 / targetSdk 36（Android 16，edge-to-edge）
+- UI 唯一依据：[`docs/design-spec.md`](docs/design-spec.md)（设计稿 412×915，1 CSS px ≈ 1 dp）
+
+## 功能一览
+
+- **消息列表**：5 个首装会话（置顶 / 群聊 / 静音 / 未读 / 时间 / 预览），搜索（名字+预览），新聊天 sheet，
+  tabbar 未读总数（不含静音会话，>99 显示 `99+`）。
+- **聊天**：文本走真实后端（乐观插入 → 等待期间「正在输入」→ 回复 / 失败标记「发送失败」+ toast）；
+  图片走系统 Photo Picker，支持全屏查看器；文件（演示文件池，下载按钮提示「演示环境，暂不下载」）；
+  语音为真实录音（MediaRecorder，运行时申请 `RECORD_AUDIO`，拒绝时 toast 降级）与真实播放（MediaPlayer）；
+  群聊显示发送者名；含日期分隔、已读/已送达状态、清空聊天确认弹窗；聊天内可进个人资料 / 气泡与主题 / 通话。
+- **通讯录 / 个人资料**：分组列表、在线状态、搜索、资料卡、发消息 / 语音 / 视频入口。
+- **我**：资料卡、气泡与主题入口（主题摘要实时联动，如「珊瑚 · 中圆角」）、深色模式开关、
+  聊天通知开关（本地演示）、关于拾语 sheet、服务器设置入口。
+- **气泡与主题**：5 套气泡色（珊瑚/松绿/靛蓝/石墨/芥黄）、3 档圆角（10/18/26dp + 尾角 6dp）、
+  3 档聊天字号（16/17/19sp）、3 种聊天背景（冷白/雾灰/深墨，含点阵）、实时预览、应用内深色开关；
+  修改即时全局生效并持久化（DataStore）。
+- **服务器设置**：Base URL、API Key（可空，密码态）、测试连接（`GET /api/health`）、保存。
+- **通话**：语音 / 视频通话页为本地模拟（2.4s 接通、计时、静音/免提/翻转本地状态、挂断 toast 并固定回到该会话聊天页）。
+
+## 环境要求
+
+| 项 | 要求 |
+|---|---|
+| JDK | **JDK 17**（AGP/Gradle 要求）。Windows `PATH` 上的 `java` 可能是 8，务必设置 `JAVA_HOME=C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot` 后用 `gradlew.bat` 构建。 |
+| Android SDK | `platforms;android-36`、`build-tools;36.0.0`；SDK 路径写在 `local.properties` 的 `sdk.dir`（该文件不入库）。 |
+| Gradle | 工程自带 Gradle wrapper 8.11.1；`distributionUrl` 指向腾讯云镜像（当前网络直连 `services.gradle.org` 会超时，海外环境可改回官方源）。无需本机预装 Gradle。 |
+| 网络 | 首次构建需联网下载 AGP / Kotlin / Compose / OkHttp 等依赖。 |
+
+## 构建、安装与检查
+
+```bash
+cd E:\BN_agent\android-app
+
+# 1) 编译 Debug APK
+gradlew.bat :app:assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk（约 20 MB）
+
+# 2) 单元测试（29 个用例：种子数据 / 错误解析 / peer_id / 主题序列化）
+gradlew.bat :app:testDebugUnitTest
+
+# 3) Lint（当前 0 error / 6 warning）
+gradlew.bat :app:lintDebug
+
+# 4) 安装并启动（设备已授权 USB/无线调试）
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.bnagent.shiyu/.MainActivity
+```
+
+## 服务器与联调
+
+### 1. 启动后端
+
+在仓库根目录启动 BN_agent（HTTP 默认端口 18080，本机 `.env` 里 `HTTP_BIND=0.0.0.0:18080`）：
+
+```bash
+cargo run -p main-app
+```
+
+- `API_KEY` 未设置时后端不鉴权；本机实际 key 在 `.secrets/api_key.txt`（勿提交 / 勿打印到日志）。
+- 手机与 PC 需在同一局域网；PC 本机地址为 `192.168.0.101`。
+
+### 2. App 内配置
+
+进入 **我 → 服务器**：
+
+- Base URL：默认 `http://192.168.0.101:18080`（可在 `ServerSettings.DEFAULT_BASE_URL` 或 App 内修改）。
+- API Key：可选。填写后请求同时携带 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。
+- 「测试连接」调用 `GET /api/health`，显示 `连接成功 · v<version>` / 401 / 超时 / 不可达等状态。
+
+### 3. adb reverse（手机不在同一网段时的备选）
+
+```bash
+# 设备 127.0.0.1:8080 → PC 127.0.0.1:18080
+adb reverse tcp:8080 tcp:18080
+# 然后在 App 服务器设置里填 http://127.0.0.1:8080
+
+# 或者直接同端口映射，填 http://127.0.0.1:18080（T7 验收即此方式）
+adb reverse tcp:18080 tcp:18080
+
+# 清理
+adb reverse --remove-all
+```
+
+### 4. 接口契约（多会话）
+
+- `POST /api/chat`，body：`{ "message": "...", "peer_id": "android:<convId>", "user_name": "苏雨", "source": "android" }`；
+  返回 `{ content, model, prompt_tokens, completion_tokens, ... }`。
+- 每个会话固定 `peer_id = android:<会话 id>`（如 `android:lin`），后端据此维护**每会话独立的 agent 上下文**。
+- `GET /api/health`：健康检查（免鉴权）。
+- `GET /api/chat/history?peer_id=...`：按会话拉取历史（源码已实现；见下方旧实例说明）。
+- 客户端超时：连接 15s，读写与整体调用 60s；错误统一映射为中文 toast。
+
+### 5. ⚠ 当前 18080 运行的是改动前旧二进制
+
+本机 18080 进程启动于后端多会话改造之前（`main.rs` 17:24 才修改），因此：
+
+- `GET /api/chat/history` 返回 404，`peer_id` 新契约未在运行实例上生效；
+- **源码已实现并通过** `cargo check --workspace --all-targets` 与 `cargo test -p main-app`（111 个测试）；
+- 需要重启（`cargo run -p main-app`）或重新部署后，Android 端才能用上新的历史 / 多会话能力。
+
+### 6. LLM Key 与错误表现
+
+- 后端 `main-app/.env` 的 `LLM_API_KEY` 失效时，`POST /api/chat` 返回 **502**，App 会把服务端错误文案以 toast 展示，我方消息标记「发送失败」。
+- 更换 `LLM_API_KEY` 后重启后端即可；API Key（HTTP 鉴权）与 LLM Key 是两个不同的配置。
+
+### 7. 明文 HTTP 说明
+
+`AndroidManifest.xml` 中 `android:usesCleartextTraffic="true"` 仅用于本地局域网 HTTP 联调（否则 Android 9+ 会直接拒绝明文请求）。
+生产环境应改用 HTTPS，或使用 `network-security-config` 限定明文域名。
+
+## 已验证环境与验收证据
+
+| 设备 | 系统 | 结果 |
+|---|---|---|
+| `192.168.0.100:5555` | Xiaomi Android 16（SDK 36） | T7 全量验收：构建 / 单测 / lint / 冷启动 / 逐页截图 / adb reverse 联调 |
+| `192.168.0.103:5555` | Android 14 | 安装与启动冒烟 |
+
+- 截图证据（74 张，本机构建产物，不入库）：`android-app/build/verification/`
+- T7 结论：`assembleDebug` PASS、`testDebugUnitTest` 29/29 PASS、`lintDebug` 0 error / 6 warning、
+  冷启动全程无 FATAL / ANR、`adb reverse` + 后端三态（200 / 401 / 不可达）联调 PASS。
+- 注意：验收期间在设备上留下的测试消息（hello-verify、toast-test、1:15 语音等）不是首装种子数据；
+  卸载重装可恢复设计稿种子。
+
+## 架构说明
+
+```
+app/src/main/java/com/bnagent/shiyu/
+├── MainActivity.kt              # 单 Activity；注入主题控制器与 AppContainer
+├── ShiYuApplication.kt          # 创建进程内唯一 AppContainer，首装种子写入
+├── data/
+│   ├── AppContainer.kt          # 手写 DI：Store / Repository / AgentClient
+│   ├── ShiYuJson.kt             # kotlinx.serialization Json 配置
+│   ├── StockMedia.kt            # 内置素材与发送池映射
+│   ├── local/                   # DataStore：ChatStore / SettingsStore / VoiceFileStore
+│   ├── remote/                  # OkHttp AgentClient + AgentException（中文错误文案）
+│   ├── repository/              # ConversationRepository / SettingsRepository
+│   └── seed/SeedData.kt         # 首装种子（仅首次启动写入）
+├── domain/model/                # Conversation / Message / Contact / UserProfile / ServerSettings
+└── ui/
+    ├── AppRoot.kt               # 根部：NavHost + tabbar 显隐 + Toast 宿主 + 系统栏 chrome
+    ├── theme/                   # ShiYuTheme：颜色 / 字号 / 圆角 / 背景 / 深色 / 持久化
+    ├── components/              # Avatar / AppBar / TabBar / Badge / Switch / SegmentedControl / Sheet / Toast / Icons
+    ├── navigation/              # ShiYuRoutes + NavHost（chats、chat/{id}、contacts、profile/{id}、me、
+    │                            #   settings/theme、settings/server、call/voice|video/{id}）
+    ├── chats/ chat/             # 消息列表与聊天（ViewModel + Compose）
+    ├── contacts/ profile/ me/   # 通讯录 / 资料 / 我
+    ├── settings/                # 气泡与主题、服务器设置
+    └── call/                    # 语音 / 视频通话（模拟）
+```
+
+- **UI**：单 Activity + Compose Navigation；tabbar 只在 `chats / contacts / me` 显示；通话页强制深色 chrome。
+- **状态**：`ConversationRepository` 为唯一写入口，UI 通过 Flow 只读；会话与消息以 JSON 存在 DataStore Preferences
+  （`shiyu_chat`），应用设置存 `shiyu_settings`，主题存 `shiyu_theme`。
+- **网络**：OkHttp + kotlinx.serialization；`peer_id` 在 `AgentClient.peerIdFor()` 统一生成。
+- **主题**：设计令牌集中在 `ui/theme/Color.kt` / `Type.kt`，`ShiYuTheme.colors / dimens / settings` 下发；
+  深色为应用内手动开关（不跟随系统）。
+- **媒体**：Coil 加载头像与图片（`res/drawable-nodpi`）、Photo Picker 选图、MediaRecorder/MediaPlayer 录放音。
+
+## 已知限制
+
+- **后端旧实例**：18080 当前进程为多会话改造前的二进制，需重启 / 重部署（见上文第 5 节）。
+- **LLM Key**：`LLM_API_KEY` 失效会导致 `/api/chat` 502；需更换 key 并重启后端。
+- **群聊回复无 sender 名**：后端只返回文本内容，群聊自动回复不携带发送者，UI 展示为对方消息。
+- **通话为本地模拟**：无真实信令 / 音频，只还原设计稿的呼叫、计时与控件状态。
+- **文件下载为演示**：点击下载仅 toast「演示环境，暂不下载」。
+- **已读状态口径**：仅当会话最后一条是「我方」消息时显示状态（design-spec 6.3 的歧义项），
+  后端回复到达后先前气泡的「已读」会隐藏，待产品确认。
+- **Release 未验收**：release 构建未开启混淆 / 签名，当前只交付 debug 验收包。
+- Toast 已加 IME padding；极端键盘/悬浮窗场景仍可能被系统浮层遮挡。
