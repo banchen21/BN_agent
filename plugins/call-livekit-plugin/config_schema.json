@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "title": "LiveKit 通话",
+  "description": "WebRTC 全双工语音/视频通话：建房、签发 token、dispatch agent_name=yueyue。",
+  "fields": {
+    "livekit_url": {
+      "type": "string",
+      "default": "wss://192.168.0.101:7443",
+      "description": "浏览器/手机使用的 LiveKit WebSocket 地址（Caddy 7443 终止 TLS，反代 7880）"
+    },
+    "livekit_url_local": {
+      "type": "string",
+      "default": "wss://127.0.0.1:7443",
+      "description": "本机浏览器使用的 LiveKit WebSocket 地址"
+    },
+    "api_url": {
+      "type": "string",
+      "default": "http://127.0.0.1:7880",
+      "description": "服务端调用 LiveKit Twirp API 的地址（http/https）"
+    },
+    "api_key": {
+      "type": "string",
+      "default": "",
+      "secret": true,
+      "description": "LiveKit API Key（需与 livekit.yaml keys 一致）"
+    },
+    "api_secret": {
+      "type": "string",
+      "default": "",
+      "secret": true,
+      "description": "LiveKit API Secret（需与 livekit.yaml keys 一致）"
+    },
+    "api_ca_cert": {
+      "type": "string",
+      "default": "",
+      "description": "api_url 为 https 时用于校验的 CA 证书路径（本机默认 deploy/livekit/tls/ca.crt，留空用系统根证书）"
+    },
+    "agent_name": {
+      "type": "select",
+      "default": "yueyue",
+      "options": ["yueyue"],
+      "description": "通话开始时 dispatch 的 agent 名称"
+    },
+    "room_prefix": {
+      "type": "string",
+      "default": "ai-call-",
+      "description": "房间名前缀，最终房间名：<前缀><userID>-<毫秒时间戳>"
+    },
+    "default_media_type": {
+      "type": "select",
+      "default": "audio",
+      "options": ["audio", "video"],
+      "description": "请求未指定 mediaType 时的默认模式"
+    },
+    "ice_servers": {
+      "type": "list",
+      "default": [],
+      "description": "额外 ICE server URL 列表（STUN/TURN，如 stun:stun.l.google.com:19302）"
+    },
+    "turn_username": {
+      "type": "string",
+      "default": "",
+      "description": "TURN 用户名（仅对 turn:/turns: 地址生效，可留空）"
+    },
+    "turn_password": {
+      "type": "string",
+      "default": "",
+      "secret": true,
+      "description": "TURN 密码（仅对 turn:/turns: 地址生效，可留空）"
+    },
+    "empty_timeout_secs": {
+      "type": "int",
+      "default": 300,
+      "min": 10,
+      "max": 86400,
+      "description": "房间无人后自动关闭的秒数"
+    },
+    "token_ttl_secs": {
+      "type": "int",
+      "default": 3600,
+      "min": 60,
+      "max": 86400,
+      "description": "参与方 token 有效期（秒）"
+    }
+  }
+}

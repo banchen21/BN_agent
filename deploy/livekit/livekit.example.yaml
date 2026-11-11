@@ -1,0 +1,46 @@
+# BN_agent 独立 LiveKit server 配置模板（单节点，本地局域网）
+#
+# 用法：复制为 livekit.yaml，填入 keys 后启动。
+#   copy livekit.example.yaml livekit.yaml
+# livekit.yaml 已被 .gitignore 忽略，真实 key/secret 不要提交。
+# keys 必须与 data/plugin_configs/call-livekit-plugin.json 的 api_key/api_secret 一致。
+#
+# 端口规划：
+#   7880/tcp        HTTP + WebSocket 信令
+#   7881/tcp        WebRTC over TCP（UDP 不通时回退）
+#   7882-7892/udp   WebRTC 媒体
+#
+# node_ip 必须是本机在局域网中的地址（当前机器：192.168.0.101）。
+# 换机器/换网段时改这里，并同步改 data/plugin_configs/call-livekit-plugin.json
+# 里的 livekit_url / livekit_url_local / api_url。
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+# 注意：LiveKit 7880 本身不提供 TLS；浏览器的 wss 由同目录 Caddy 在 7443 终止 TLS
+# 后反代到这里的 ws://127.0.0.1:7880（见 Caddyfile / start.ps1）。
+
+logging:
+  level: info
+  pion_level: warn
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 7882
+  port_range_end: 7892
+  use_external_ip: false
+  node_ip: "192.168.0.101"
+
+room:
+  auto_create: true
+  # 秒（uint32），不是 duration 字符串
+  empty_timeout: 300
+  departure_timeout: 20
+
+keys:
+  # 改成自己的 key/secret（至少 32 字节随机值），并与 call-livekit-plugin 配置保持一致。
+  APIBnCall73: "CHANGE_ME"
+
+turn:
+  # 局域网直连不需要 TURN；需要公网/NAT 穿透时再启用并配置域名。
+  enabled: false

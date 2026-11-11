@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 pub use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+pub mod config;
+pub use config::{ConfigField, ConfigFieldType, PluginConfigSchema, SECRET_MASK};
 // 跨 cdylib 共享的锁统一使用 parking_lot::Mutex（panic 时不会中毒，避免级联崩溃）。
 // re-export 给插件，保证 FFI 边界两侧的锁类型完全一致。
 pub use parking_lot::{self, Mutex, RwLock};
@@ -396,7 +399,7 @@ pub struct FetchChatHistory {
 }
 
 /// A single chat history record returned from the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatHistoryRecord {
     pub role: String,
     pub content: String,
@@ -621,6 +624,9 @@ pub struct PluginContext {
     pub logger: PluginLogger,
     /// Chat history store — unified read/write access (Append + FetchRecent).
     pub chat_store: Option<Recipient<ChatStoreMsg>>,
+    /// 已合并默认值的插件配置（来自 `data/plugin_configs/<plugin>.json`）。
+    /// 无 schema 的插件拿到的是原样透传的已存储对象（可能为空）。
+    pub config: serde_json::Value,
 }
 
 impl PluginContext {
@@ -637,6 +643,7 @@ impl PluginContext {
             tool_registry: Some(Arc::new(Mutex::new(ToolRegistry::new()))),
             logger: PluginLogger::new(event_bus, plugin_name.to_string()),
             chat_store: None,
+            config: serde_json::json!({}),
         }
     }
 }
@@ -692,6 +699,15 @@ pub trait Plugin: Send {
 
     /// Return an HTTP API handler, if this plugin exposes endpoints.
     fn api_handler(&self) -> Option<&dyn PluginApi> {
+        None
+    }
+
+    /// 声明插件配置 schema（`None` 表示不可通过 WebUI 配置）。
+    ///
+    /// 宿主在 `start()` 之前读取 `data/plugin_configs/<plugin-name>.json`，
+    /// 按 schema 补齐默认值后通过 [`PluginContext::config`] 注入。
+    /// 保存配置后宿主会自动重载插件，因此 `start()` 中重新读取即可生效。
+    fn config_schema(&self) -> Option<PluginConfigSchema> {
         None
     }
 }

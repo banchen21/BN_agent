@@ -1,0 +1,6 @@
+livekit-agents==1.8.11
+livekit-plugins-silero==1.8.11
+livekit-api==1.2.2
+httpx==0.28.1
+pillow>=10.0
+numpy>=1.26

@@ -8,7 +8,9 @@ description = "Main application — plugin manager with actix-web HTTP API"
 plugin-interface = { path = "../plugin-interface" }
 actix = "0.13"
 actix-rt = "2.9"
-actix-web = "4"
+actix-web = { version = "4", features = ["rustls-0_23"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
 dotenvy = "0.15"
 libloading = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }

@@ -145,12 +145,30 @@ impl LlmConfig {
         })
     }
 
-    fn load_persona() -> Option<String> {
-        let path = std::path::PathBuf::from("persona.md");
-        match std::fs::read_to_string(&path) {
+    /// 人设文件路径：`PERSONA_PATH`（非空）优先，默认 `persona.md`。
+    fn persona_path() -> std::path::PathBuf {
+        std::env::var("PERSONA_PATH")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("persona.md"))
+    }
+
+    fn load_persona_from(path: &std::path::Path) -> Option<String> {
+        match std::fs::read_to_string(path) {
             Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-            _ => None,
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                log::warn!("[LlmActor] failed to read persona {}: {}", path.display(), e);
+                None
+            }
         }
+    }
+
+    fn load_persona() -> Option<String> {
+        Self::load_persona_from(&Self::persona_path())
     }
 
     fn load_jailbreak_prompts() -> Vec<String> {
@@ -755,6 +773,124 @@ impl Handler<JailbreakCount> for LlmActor {
 
 // ── Streaming LLM call ──────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, Default)]
+struct PartialStreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StreamToolCallAccumulator {
+    calls: std::collections::BTreeMap<usize, PartialStreamToolCall>,
+}
+
+impl StreamToolCallAccumulator {
+    fn push_delta(&mut self, delta: &serde_json::Value) {
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for (array_position, tool_call) in tool_calls.iter().enumerate() {
+                self.push_tool_call_delta(array_position, tool_call);
+            }
+        }
+
+        if let Some(function_call) = delta.get("function_call") {
+            self.push_legacy_function_call_delta(function_call);
+        }
+    }
+
+    fn finish(self) -> Vec<ToolCall> {
+        self.calls
+            .into_iter()
+            .filter_map(|(index, partial)| {
+                if partial.name.trim().is_empty() && partial.arguments.trim().is_empty() {
+                    return None;
+                }
+                let arguments = parse_stream_tool_arguments(&partial.arguments);
+                Some(ToolCall {
+                    id: if partial.id.trim().is_empty() {
+                        format!("call_stream_{}", index)
+                    } else {
+                        partial.id
+                    },
+                    name: partial.name,
+                    arguments,
+                })
+            })
+            .collect()
+    }
+
+    fn push_tool_call_delta(&mut self, array_position: usize, tool_call: &serde_json::Value) {
+        let index = self.resolve_tool_call_index(array_position, tool_call);
+        let partial = self.calls.entry(index).or_default();
+
+        if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
+            if !id.is_empty() && partial.id.is_empty() {
+                partial.id = id.to_string();
+            }
+        }
+        if let Some(name) = tool_call
+            .get("function")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+        {
+            partial.name.push_str(name);
+        }
+        if let Some(arguments) =
+            stream_arguments_fragment(tool_call.get("function").and_then(|v| v.get("arguments")))
+        {
+            partial.arguments.push_str(&arguments);
+        }
+    }
+
+    fn push_legacy_function_call_delta(&mut self, function_call: &serde_json::Value) {
+        let partial = self.calls.entry(0).or_default();
+        if let Some(name) = function_call.get("name").and_then(|v| v.as_str()) {
+            partial.name.push_str(name);
+        }
+        if let Some(arguments) = stream_arguments_fragment(function_call.get("arguments")) {
+            partial.arguments.push_str(&arguments);
+        }
+    }
+
+    fn resolve_tool_call_index(
+        &self,
+        array_position: usize,
+        tool_call: &serde_json::Value,
+    ) -> usize {
+        if let Some(index) = tool_call.get("index").and_then(|v| v.as_u64()) {
+            return index as usize;
+        }
+
+        if let Some(id) = tool_call.get("id").and_then(|v| v.as_str()) {
+            if let Some((index, _)) = self.calls.iter().find(|(_, partial)| partial.id == id) {
+                return *index;
+            }
+        }
+
+        array_position
+    }
+}
+
+fn stream_arguments_fragment(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(arguments) = value.as_str() {
+        Some(arguments.to_string())
+    } else if value.is_null() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_stream_tool_arguments(arguments: &str) -> serde_json::Value {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(trimmed).unwrap_or(serde_json::Value::Null)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct StreamEventMeta {
     request_id: String,
@@ -821,19 +957,12 @@ async fn stream_llm(
 
     let mut full_content = String::new();
     let mut model_name = String::new();
-    let mut collected_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut tool_call_accumulator = StreamToolCallAccumulator::default();
     let mut prompt_tokens: u32 = 0;
     let mut completion_tokens: u32 = 0;
     let mut chunk_count = 0u64;
     let mut prompt_cache_hit_tokens: u32 = 0;
     let mut prompt_cache_miss_tokens: u32 = 0;
-
-    struct PartialToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    }
-    let mut partial_tool: Option<PartialToolCall> = None;
 
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
@@ -912,33 +1041,7 @@ async fn stream_llm(
                 event_bus.do_send(Event::new("llm.chunk", payload, "llm-actor"));
             }
 
-            if let Some(tc) = delta.get("tool_calls") {
-                if let Some(tc_arr) = tc.as_array() {
-                    for tc_item in tc_arr {
-                        if let Some(id) = tc_item["id"].as_str() {
-                            if !id.is_empty() {
-                                partial_tool = Some(PartialToolCall {
-                                    id: id.to_string(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                });
-                            }
-                        }
-                        if let Some(name) = tc_item["function"]["name"].as_str() {
-                            if !name.is_empty() {
-                                if let Some(ref mut pt) = partial_tool {
-                                    pt.name.push_str(name);
-                                }
-                            }
-                        }
-                        if let Some(args) = tc_item["function"]["arguments"].as_str() {
-                            if let Some(ref mut pt) = partial_tool {
-                                pt.arguments.push_str(args);
-                            }
-                        }
-                    }
-                }
-            }
+            tool_call_accumulator.push_delta(delta);
 
             if model_name.is_empty() {
                 if let Some(m) = data["model"].as_str() {
@@ -948,14 +1051,7 @@ async fn stream_llm(
         }
     }
 
-    if let Some(pt) = partial_tool.take() {
-        let arguments = serde_json::from_str(&pt.arguments).unwrap_or(serde_json::Value::Null);
-        collected_tool_calls.push(ToolCall {
-            id: pt.id,
-            name: pt.name,
-            arguments,
-        });
-    }
+    let collected_tool_calls = tool_call_accumulator.finish();
 
     let result = LlmResponse {
         content: full_content.clone(),
@@ -973,6 +1069,7 @@ async fn stream_llm(
     payload["prompt_tokens"] = serde_json::json!(prompt_tokens);
     payload["completion_tokens"] = serde_json::json!(completion_tokens);
     payload["chunk_count"] = serde_json::json!(chunk_count);
+    payload["tool_calls_count"] = serde_json::json!(result.tool_calls.len());
     payload["streamed"] = serde_json::json!(true);
     event_bus.do_send(Event::new("llm.response", payload, "llm-actor"));
     Ok(result)
@@ -1476,6 +1573,225 @@ fn truncate_preview(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn test_config(base_url: String) -> LlmConfig {
+        LlmConfig {
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            base_url,
+            system_prompt: "test persona".into(),
+            max_history_turns: 20,
+            max_tokens: 1024,
+            thinking: false,
+            long_summary_enabled: false,
+            long_summary_keep_recent: 200,
+            long_summary_batch_size: 80,
+            long_summary_max_chars: 4000,
+            temperature: 0.8,
+            jailbreak_prompts: vec![],
+            jailbreak_default_index: Some(0),
+            image_model: "image-model".into(),
+            image_base_url: "http://127.0.0.1/image".into(),
+            image_api_key: "image-key".into(),
+            video_model: "video-model".into(),
+            video_base_url: "http://127.0.0.1/video".into(),
+            video_api_key: "video-key".into(),
+        }
+    }
+
+    fn request_complete(data: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(data);
+        let Some(header_end) = text.find("\r\n\r\n") else {
+            return false;
+        };
+        let headers = &text[..header_end];
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        match content_length {
+            Some(len) => data.len() >= header_end + 4 + len,
+            None => true,
+        }
+    }
+
+    fn start_mock_chat_server(response_body: String) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server addr");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let mut data = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        data.extend_from_slice(&buf[..n]);
+                        if request_complete(&data) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let request = String::from_utf8_lossy(&data).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write mock response");
+            tx.send(request).expect("send captured request");
+        });
+        (format!("http://{}", addr), rx)
+    }
+
+    #[actix_rt::test]
+    async fn llm_request_handler_posts_body_and_parses_response() {
+        let response_body = serde_json::json!({
+            "model": "mock-model",
+            "choices": [{"message": {"content": "pong"}}],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "prompt_cache_hit_tokens": 1,
+                "prompt_cache_miss_tokens": 2
+            }
+        })
+        .to_string();
+        let (base_url, captured) = start_mock_chat_server(response_body);
+        let store = ChatStoreActor::open(":memory:").unwrap().start();
+        let actor = LlmActor::new(
+            test_config(format!("{}/v1", base_url)),
+            EventBus::new().start(),
+            store,
+        )
+        .start();
+
+        let response = actor
+            .send(LlmRequest {
+                messages: vec![ChatMessage::user("ping")],
+                model: None,
+                temperature: Some(0.4),
+                max_tokens: Some(123),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(response.content, "pong");
+        assert_eq!(response.model, "mock-model");
+        assert_eq!(response.prompt_tokens, 3);
+        assert_eq!(response.completion_tokens, 4);
+        assert_eq!(response.prompt_cache_hit_tokens, 1);
+        assert_eq!(response.prompt_cache_miss_tokens, 2);
+
+        let raw_request = captured
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured request");
+        assert!(raw_request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(raw_request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-key"));
+        let body = raw_request.split("\r\n\r\n").nth(1).expect("request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("json body");
+        assert_eq!(body["model"], "test-model");
+        let temperature = body["temperature"].as_f64().expect("temperature");
+        assert!((temperature - 0.4).abs() < 0.000_001);
+        assert_eq!(body["max_tokens"], 123);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "ping");
+    }
+
+    #[test]
+    fn stream_tool_accumulator_merges_interleaved_indexed_chunks() {
+        let mut accumulator = StreamToolCallAccumulator::default();
+
+        accumulator.push_delta(&serde_json::json!({
+            "tool_calls": [
+                {"index": 0, "id": "call_weather", "function": {"name": "get_weather", "arguments": "{\"city\""}},
+                {"index": 1, "id": "call_calc", "function": {"name": "calculate", "arguments": "{\"x\""}}
+            ]
+        }));
+        accumulator.push_delta(&serde_json::json!({
+            "tool_calls": [
+                {"index": 1, "function": {"arguments": ":1"}},
+                {"index": 0, "function": {"arguments": ":\"beijing\""}}
+            ]
+        }));
+        accumulator.push_delta(&serde_json::json!({
+            "tool_calls": [
+                {"index": 0, "function": {"arguments": "}"}},
+                {"index": 1, "function": {"arguments": "}"}}
+            ]
+        }));
+
+        let tool_calls = accumulator.finish();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call_weather");
+        assert_eq!(tool_calls[0].name, "get_weather");
+        assert_eq!(tool_calls[0].arguments["city"], "beijing");
+        assert_eq!(tool_calls[1].id, "call_calc");
+        assert_eq!(tool_calls[1].name, "calculate");
+        assert_eq!(tool_calls[1].arguments["x"], 1);
+    }
+
+    #[test]
+    fn stream_tool_accumulator_uses_id_when_index_is_missing() {
+        let mut accumulator = StreamToolCallAccumulator::default();
+
+        accumulator.push_delta(&serde_json::json!({
+            "tool_calls": [
+                {"id": "call_first", "function": {"name": "first", "arguments": "{\"a\""}},
+                {"id": "call_second", "function": {"name": "second", "arguments": "{\"b\""}}
+            ]
+        }));
+        accumulator.push_delta(&serde_json::json!({
+            "tool_calls": [
+                {"id": "call_second", "function": {"arguments": ":2}"}},
+                {"id": "call_first", "function": {"arguments": ":1}"}}
+            ]
+        }));
+
+        let tool_calls = accumulator.finish();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call_first");
+        assert_eq!(tool_calls[0].arguments["a"], 1);
+        assert_eq!(tool_calls[1].id, "call_second");
+        assert_eq!(tool_calls[1].arguments["b"], 2);
+    }
+
+    #[test]
+    fn stream_tool_accumulator_supports_legacy_function_call_chunks() {
+        let mut accumulator = StreamToolCallAccumulator::default();
+
+        accumulator.push_delta(&serde_json::json!({
+            "function_call": {"name": "legacy_search", "arguments": "{\"query\""}
+        }));
+        accumulator.push_delta(&serde_json::json!({
+            "function_call": {"arguments": ":\"rust\"}"}
+        }));
+
+        let tool_calls = accumulator.finish();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_stream_0");
+        assert_eq!(tool_calls[0].name, "legacy_search");
+        assert_eq!(tool_calls[0].arguments["query"], "rust");
+    }
 
     #[test]
     fn long_summary_context_skips_empty_summary() {
@@ -1520,5 +1836,46 @@ mod tests {
         let summary = normalize_long_summary("```markdown\nabcdef\n```", 5);
 
         assert_eq!(summary, "ab...");
+    }
+
+    #[test]
+    fn load_persona_from_reads_and_trims_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "bn-agent-persona-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("persona.md");
+
+        std::fs::write(&path, "  你是小悦悦  \n").unwrap();
+        assert_eq!(
+            LlmConfig::load_persona_from(&path).as_deref(),
+            Some("你是小悦悦")
+        );
+
+        std::fs::write(&path, "   \n").unwrap();
+        assert!(LlmConfig::load_persona_from(&path).is_none());
+
+        let missing = dir.join("missing.md");
+        assert!(LlmConfig::load_persona_from(&missing).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persona_path_defaults_when_env_unset_or_empty() {
+        // 仅测试纯解析逻辑：env 不存在/空白时回退到 persona.md。
+        let parse = |raw: Option<&str>| {
+            raw.map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("persona.md"))
+        };
+        assert_eq!(parse(None), std::path::PathBuf::from("persona.md"));
+        assert_eq!(parse(Some("  ")), std::path::PathBuf::from("persona.md"));
+        assert_eq!(
+            parse(Some("E:/BN_agent/data/yueyue/persona.md")),
+            std::path::PathBuf::from("E:/BN_agent/data/yueyue/persona.md")
+        );
     }
 }

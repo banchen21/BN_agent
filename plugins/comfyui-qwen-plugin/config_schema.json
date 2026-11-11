@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "title": "ComfyUI Qwen 生图",
+  "description": "本地 ComfyUI 图片生成与参考图编辑参数",
+  "fields": {
+    "server_url": {
+      "type": "string",
+      "default": "http://127.0.0.1:8188",
+      "description": "ComfyUI API 服务器地址",
+      "secret": false,
+      "placeholder": "http://127.0.0.1:8188"
+    },
+    "timeout_secs": {
+      "type": "int",
+      "default": 900,
+      "min": 10,
+      "max": 3600,
+      "description": "单次出图等待超时（秒）；本机低显存编辑较慢，建议不低于 900",
+      "secret": false
+    },
+    "workflow_file": {
+      "type": "string",
+      "default": "",
+      "description": "自定义 ComfyUI API 工作流文件名；留空使用内置工作流。相对路径按插件 workflows 目录、data/plugin_data/comfyui-qwen-plugin/workflows 或当前目录解析",
+      "secret": false
+    },
+    "default_width": {
+      "type": "int",
+      "default": 1024,
+      "min": 64,
+      "max": 4096,
+      "description": "默认输出宽度（像素），最终按 32 对齐并受 2048×2048 像素上限约束",
+      "secret": false
+    },
+    "default_height": {
+      "type": "int",
+      "default": 1024,
+      "min": 64,
+      "max": 4096,
+      "description": "默认输出高度（像素），最终按 32 对齐并受 2048×2048 像素上限约束",
+      "secret": false
+    },
+    "default_steps": {
+      "type": "int",
+      "default": 25,
+      "min": 1,
+      "max": 150,
+      "description": "默认采样步数；仅在工作流 KSampler 节点通过 _meta.hub 绑定 steps 时生效",
+      "secret": false
+    },
+    "default_cfg": {
+      "type": "float",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 30.0,
+      "description": "默认 CFG；仅在工作流 KSampler 节点通过 _meta.hub 绑定 cfg 时生效",
+      "secret": false
+    },
+    "default_negative": {
+      "type": "text",
+      "default": "",
+      "description": "默认负面提示词；留空表示不使用负面提示词",
+      "secret": false,
+      "placeholder": "留空即可"
+    },
+    "output_dir": {
+      "type": "string",
+      "default": "",
+      "description": "生成图片保存目录；留空使用 IMAGE_GEN_OUTPUT_DIR 环境变量或 ./temp_images",
+      "secret": false
+    },
+    "publish_event": {
+      "type": "bool",
+      "default": true,
+      "description": "生成完成后是否发布 image.gen.complete 事件（供 IM / WebUI 订阅）",
+      "secret": false
+    }
+  }
+}

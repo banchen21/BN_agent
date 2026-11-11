@@ -16,6 +16,14 @@ Token 用量    ██████████ 完成
 结构化观测    ██████████ 完成（Prometheus 指标）
 ```
 
+### 最新进展（2026-11-12）
+
+- [x] **语音/视频通话落地** — LiveKit 原生部署（7880/7881/7882-7892，Caddy 7443 wss）+ `call-livekit-plugin`（建房/token/dispatch）+ `call-agent` Python sidecar（全双工语音、短附和 duck、真插话取消、摄像头帧订阅、`look_at_user` 截图理解）
+- [x] **插件配置 WebUI** — schema v1 + `GET/PUT /api/plugin-config` + `/ui/config`；保存后校验插件运行态与工具注册，失败回滚配置/恢复旧实例并返回 500
+- [x] **Qwen 生图插件** — `comfyui-qwen-plugin`：Qwen-Image 2.1 文生图 + 1–16 参考图编辑，内置 25 步基模与 8 步 LoRA 工作流
+- [x] **OpenIM 方案删除 / yueyue 数据迁移** — 旧 OpenIM+LiveKit 容器与端口全部移除，可复用代码归档 `call-agent/reference-openim/`；人设/记忆迁入 `data/yueyue/`（`PERSONA_PATH` / `MEMORY_DB_PATH`）
+- [x] **插件 reload 健壮性** — Windows 下失败 cdylib 不再立即 FreeLibrary（规避 0xC0000005）；`start()` 初始化失败必须返回 Err
+
 ### 最新进展（2026-06-22）
 
 - [x] **P0 健壮性收口** — parking_lot 迁移（消除跨 cdylib 共享锁中毒级联）、熔断状态持久化、Agent Loop 状态持久化三项 P0 全部落地
@@ -30,7 +38,10 @@ Token 用量    ██████████ 完成
 - [x] **会话管理 MVP** — `chat_sessions` 元数据表按 peer 自动维护 title/recent summary/message_count/时间戳，新增 `/api/chat/sessions` 查询与刷新接口
 - [x] **Agent Loop 失败自我修正 MVP** — 步骤快照新增 `correction`，失败 observation 会触发修正提示：要求更新 plan、说明替代路径并避免原样重复失败工具调用
 - [x] **LLM 级长期摘要压缩 MVP** — `chat_sessions` 新增长期滚动摘要字段；LLM 回复后后台压缩即时窗口外的旧消息，并把摘要注入后续 system prompt
-- [ ] **下一阶段重点** — PipelineActor / LlmActor handler 级测试补强
+- [x] **PipelineActor / LlmActor handler 级测试补强** — Pipeline 通过 mock actor 注入验证用户消息主路径；LlmRequest handler 通过本地 HTTP mock 验证 OpenAI body 与响应解析
+- [x] **ASR 调用链整体超时** — 新增 `ASR_TIMEOUT_SECS`，覆盖 ffmpeg 转码、ASR API 请求与响应读取；ffmpeg 超时会 kill 子进程并回收管道线程
+- [x] **流式工具调用参数解析兼容非标准分块** — 流式 tool_calls 改为按 index/id/数组位置累积，支持多工具交错分块、缺失 index 的 id 匹配与旧式 function_call 分块
+- [ ] **下一阶段重点** — 速率限制提升（IP 级限流 + Redis 分布式预留）
 
 ---
 
@@ -49,7 +60,7 @@ Token 用量    ██████████ 完成
 - [x] **可配置 max_tokens** — LLM_MAX_TOKENS 环境变量（默认 384000）
 - [x] **工具调用稳定性** — tool_choice:auto + system prompt 工具感知提示，解决 persona 覆盖工具意识
 
-### 插件（19/19）
+### 插件（21/21）
 
 - [x] **hello-plugin** — 演示
 - [x] **logger-plugin** — 日志
@@ -70,6 +81,8 @@ Token 用量    ██████████ 完成
 - [x] **proactive-plugin** — 主动消息推送（工具驱动调度 + 到期回调 LLM 实时生成）
 - [x] **memory-plugin** — 长期记忆提取（Engram 风格双时态 + 时间分桶）
 - [x] **toy-control-plugin** — 跳蛋远程控制 + 内置 Web 面板
+- [x] **comfyui-qwen-plugin** — Qwen-Image 2.1 文生图 + 参考图编辑（ComfyUI）
+- [x] **call-livekit-plugin** — LiveKit 通话后端（建房 / token / agent dispatch）
 
 ---
 
@@ -109,7 +122,7 @@ Token 用量    ██████████ 完成
 
 ### 测试类
 
-- [x] **单元测试** — 核心纯逻辑 + AgentLoopActor handler 级（mock 依赖注入）+ MessageRouter 路由解析 + 工具超时 + token 预算 + loop 清理 / 修正提示 / 长期摘要压缩等 ～91 个 main-app 测试全绿；PipelineActor / LlmActor handler 级待补
+- [x] **单元测试** — 核心纯逻辑 + AgentLoopActor / PipelineActor / LlmActor handler 级（mock 依赖注入）+ MessageRouter 路由解析 + 工具超时 + token 预算 + loop 清理 / 修正提示 / 长期摘要压缩 / 流式 tool_call 分块等 ～96 个 main-app 测试全绿
 - [x] **集成测试** — mock LLM 驱动 Agent Loop 端到端（observe→decide→act 跑完整 loop 至 Completed）
 - [x] **插件测试框架** — `PluginContext::for_test` 提供最小可注入上下文（plugin-interface）
 
@@ -129,7 +142,7 @@ Token 用量    ██████████ 完成
 ### P1 — 测试体系（质量保障，详见上方「测试类」）
 
 - [x] Agent Loop 单测：纯逻辑（决策/状态/格式化/持久化）+ actor 级（clamp/默认值、停止请求终止、get/list、空 goal 拒绝）
-- [x] `ToolRegistry` 注册-调用链单测（plugin-interface）；PipelineActor / LlmActor actor 级单测待补
+- [x] `ToolRegistry` 注册-调用链单测（plugin-interface）；PipelineActor / LlmActor handler 级主路径测试已补
 - [x] 集成测试：mock LLM 驱动 AgentLoopActor 端到端跑完整 loop（`loop_completes_with_mock_llm`）
 - [x] 插件测试框架：`PluginContext::for_test`（plugin-interface）+ 示例插件工具注册测试
 - [x] CI 门禁：`.github/workflows/ci.yml`（windows runner）build + test 硬门禁；clippy 信息性（待历史 warning 清零后升级 `-D warnings`）
@@ -138,8 +151,8 @@ Token 用量    ██████████ 完成
 
 - [x] 工具调用 per-tool 超时控制（`TOOL_TIMEOUT_SECS`，spawn_blocking + timeout，不阻塞 arbiter）
 - [ ] 微信图片/语音真实环境端到端联调验证
-- [ ] ASR 调用链整体超时（ffmpeg 管道 + API）
-- [ ] 流式工具调用参数解析兼容非标准分块
+- [x] ASR 调用链整体超时（ffmpeg 管道 + API）
+- [x] 流式工具调用参数解析兼容非标准分块
 
 ---
 
@@ -172,9 +185,9 @@ Token 用量    ██████████ 完成
 
 ## 已知问题
 
-- **流式工具调用** — 部分模型在流式模式下分 chunk 发送 function call 参数，非标准实现可能解析异常
-- **ASR 偶发超时** — ffmpeg 管道 + API 调用链缺乏整体超时控制
 - **ComfyUI 依赖外部启动** — 生图需要独立运行 ComfyUI 服务
+- **8GB 显存参考图上限 4 张** — RTX 4070 Laptop 在 512²/8 步 LoRA 下，4 张参考图正常（实测 329s），8 张会触发 GPU TDR（`nvlddmkm` 153 / Display 4101），ComfyUI 崩溃且需整机重启恢复；插件保留 1–16 张能力，显存 ≥12GB 再放开
+- **ComfyUI 8188 崩溃后需重启整机** — TDR 后新进程加载 `QwenImage21TEModel_` 会持续 access violation（0xC0000005），进程重启/watchdog 无效，只有整机重启能恢复
 
 ## 已解决的问题
 
@@ -198,6 +211,8 @@ Token 用量    ██████████ 完成
 - **锁中毒级联 panic 风险** — 满屏 `std::sync::Mutex` + `.lock().unwrap()`，单线程 panic 会毒化锁级联崩溃。解决方案：plugin-interface `pub use parking_lot::{Mutex, RwLock}` 统一跨 cdylib 共享锁；main-app 全量迁移；插件共享 `ctx.tool_registry` 访问改 `.lock()`；插件私有 std 锁（局部不级联）与 `token_usage_actor` 优雅降级保留
 - **熔断 / Agent Loop 状态重启丢失** — 二者原先仅存内存。解决方案：分别持久化到 `data/circuit_breaker.db` 与 `data/agent_loops.db`，启动恢复；熔断冷却已过的 open 恢复为 half-open；Agent Loop 残留 running/stopping 标记为中断（interrupted by process restart）
 - **同步工具阻塞 / 无超时** — 工具 `execute()` 同步执行会阻塞 actix arbiter 线程，且卡死的工具无限挂起。解决方案：新增 `tool_exec::execute_with_timeout`，经 `spawn_blocking` 移到 blocking 池执行（工具已设计为线程无关、内部自建 runtime）+ `TOOL_TIMEOUT_SECS` 超时（默认 180s，0 禁用）；pipeline 与 agent loop 工具执行均接入
+- **ASR 偶发超时** — ffmpeg 管道 + API 调用链缺乏整体超时控制。解决方案：新增 `ASR_TIMEOUT_SECS`（默认 60s，0 禁用）作为 ASR 整体 deadline；ffmpeg 转码超时会 kill 子进程并回收 stdin/stdout 线程，ASR API 发送和响应读取共享剩余时间
+- **流式工具调用分块解析异常** — 部分模型在流式模式下把 function call 参数拆成非标准分块，甚至多工具交错发送或缺失 index。解决方案：`stream_llm` 使用 `StreamToolCallAccumulator` 按 index/id/数组位置合并分块，并兼容旧式 `function_call`；新增 3 个单测覆盖交错多工具、缺失 index 与 legacy 分块
 
 ---
 

@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1a">
+<title>悦悦通话 · BN Agent</title>
+<style>
+  :root {
+    --bg: #070a12;
+    --bg-soft: #0e1422;
+    --card: rgba(20, 28, 46, 0.78);
+    --card-border: rgba(120, 150, 210, 0.16);
+    --text: #e9eefb;
+    --muted: #8a97b3;
+    --accent: #6ea8fe;
+    --accent-2: #9b7bff;
+    --ok: #38d39f;
+    --warn: #ffb454;
+    --danger: #ff5d6c;
+    --radius: 22px;
+    --shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(1200px 700px at 12% -10%, rgba(110, 168, 254, 0.20), transparent 60%),
+      radial-gradient(900px 600px at 110% 105%, rgba(155, 123, 255, 0.18), transparent 55%),
+      linear-gradient(160deg, #070a12 0%, #0a1020 55%, #070a12 100%);
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  .app {
+    width: min(980px, 100%);
+    margin: 0 auto;
+    padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+  }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 12px;
+    background: linear-gradient(140deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center;
+    box-shadow: 0 6px 20px rgba(110, 168, 254, 0.35);
+  }
+  .brand-mark svg { width: 19px; height: 19px; }
+  .brand small { display: block; color: var(--muted); font-weight: 500; font-size: 11px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--card-border);
+    color: var(--muted); font-size: 12px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.connected { color: var(--ok); border-color: rgba(56, 211, 159, 0.35); }
+  .pill.connected .dot { background: var(--ok); box-shadow: 0 0 12px var(--ok); }
+  .pill.connecting { color: var(--warn); border-color: rgba(255, 180, 84, 0.35); }
+  .pill.connecting .dot { background: var(--warn); animation: blink 1.1s infinite; }
+  .pill.error { color: var(--danger); border-color: rgba(255, 93, 108, 0.35); }
+  .pill.error .dot { background: var(--danger); }
+  @keyframes blink { 50% { opacity: 0.25; } }
+
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .hidden { display: none !important; }
+
+  /* ── 呼叫前 ── */
+  #setup {
+    margin: auto;
+    width: min(520px, 100%);
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 30px 26px 26px;
+    backdrop-filter: blur(18px);
+  }
+  #setup h1 {
+    margin: 0 0 8px;
+    font-size: clamp(26px, 5vw, 34px);
+    letter-spacing: -0.5px;
+    background: linear-gradient(120deg, #fff, #b7c8ff 55%, #cbb6ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  #setup .sub { margin: 0 0 24px; color: var(--muted); line-height: 1.65; font-size: 14px; }
+  .field { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+  .field label { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .field input {
+    width: 100%; padding: 14px 16px; font-size: 16px;
+    color: var(--text); background: rgba(7, 10, 18, 0.65);
+    border: 1px solid var(--card-border); border-radius: 14px;
+    outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .field input:focus { border-color: rgba(110, 168, 254, 0.65); box-shadow: 0 0 0 4px rgba(110, 168, 254, 0.12); }
+  .segmented {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    padding: 5px; background: rgba(7, 10, 18, 0.55);
+    border: 1px solid var(--card-border); border-radius: 16px;
+  }
+  .segmented button {
+    appearance: none; border: 0; cursor: pointer;
+    padding: 12px 10px; border-radius: 12px;
+    background: transparent; color: var(--muted);
+    font-size: 14px; font-weight: 700; font-family: inherit;
+    transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+  }
+  .segmented button.active {
+    color: #fff;
+    background: linear-gradient(140deg, rgba(110, 168, 254, 0.95), rgba(155, 123, 255, 0.95));
+    box-shadow: 0 8px 24px rgba(110, 168, 254, 0.28);
+  }
+  .call-btn {
+    width: 100%; margin-top: 8px; padding: 16px;
+    border: 0; border-radius: 16px; cursor: pointer;
+    font-family: inherit; font-size: 17px; font-weight: 800; color: #fff;
+    background: linear-gradient(135deg, #4f8ef7, #8a5bff);
+    box-shadow: 0 16px 40px rgba(94, 124, 255, 0.35);
+    transition: transform 0.15s, opacity 0.2s;
+  }
+  .call-btn:active { transform: scale(0.98); }
+  .call-btn:disabled { opacity: 0.55; cursor: wait; }
+  .tips { margin-top: 18px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .notice {
+    margin: 0 0 18px; padding: 13px 15px; border-radius: 14px;
+    background: rgba(255, 180, 84, 0.10);
+    border: 1px solid rgba(255, 180, 84, 0.35);
+    color: #ffd9a3; font-size: 13px; line-height: 1.65;
+  }
+  .notice a { color: #ffd9a3; font-weight: 700; }
+  .notice .row { margin-top: 8px; display: flex; gap: 14px; flex-wrap: wrap; }
+  details.advanced { margin-top: 14px; border-top: 1px dashed var(--card-border); padding-top: 12px; }
+  details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted); outline: none; }
+  details.advanced .field { margin: 12px 0 0; }
+  details.advanced .field input { padding: 11px 13px; font-size: 14px; }
+  .check { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); margin-top: 12px; }
+  .check input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+  /* ── 通话中 ── */
+  #call { flex: 1; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .stage {
+    position: relative; flex: 1; min-height: 260px;
+    border-radius: var(--radius); overflow: hidden;
+    background:
+      radial-gradient(700px 420px at 50% 20%, rgba(110, 168, 254, 0.16), transparent 65%),
+      linear-gradient(160deg, #0d1424, #0a0e19);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--shadow);
+    display: grid; place-items: center;
+  }
+  #remoteVideo {
+    width: 100%; height: 100%; object-fit: cover;
+    position: absolute; inset: 0; background: #000;
+  }
+  .avatar-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; z-index: 1; }
+  .avatar {
+    width: clamp(110px, 26vw, 150px); height: clamp(110px, 26vw, 150px);
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #b7c8ff, #6e8ff2 45%, #6d4bd8 100%);
+    display: grid; place-items: center;
+    font-size: clamp(38px, 9vw, 54px); font-weight: 800; color: #fff;
+    box-shadow: 0 0 0 10px rgba(110, 168, 254, 0.08), 0 0 60px rgba(110, 168, 254, 0.35);
+    animation: breathe 3.2s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 10px rgba(110,168,254,0.08), 0 0 50px rgba(110,168,254,0.28); }
+    50% { transform: scale(1.03); box-shadow: 0 0 0 16px rgba(110,168,254,0.05), 0 0 80px rgba(110,168,254,0.45); }
+  }
+  .avatar-name { font-size: 15px; color: var(--muted); font-weight: 600; letter-spacing: 1px; }
+  .local-preview {
+    position: absolute; right: 14px; bottom: 14px; z-index: 2;
+    width: clamp(96px, 22vw, 170px); aspect-ratio: 3 / 4;
+    border-radius: 14px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: #111827; box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+  }
+  .local-preview video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .local-preview.off video { display: none; }
+  .local-preview .off-label {
+    position: absolute; inset: 0; display: none; place-items: center;
+    color: var(--muted); font-size: 12px; font-weight: 700;
+  }
+  .local-preview.off .off-label { display: grid; }
+  .remote-audio { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+  .agent-banner {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 3; padding: 8px 14px; border-radius: 999px;
+    background: rgba(10, 14, 25, 0.78); border: 1px solid var(--card-border);
+    color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap;
+    backdrop-filter: blur(10px);
+  }
+  .agent-banner.joined { color: var(--ok); border-color: rgba(56, 211, 159, 0.4); }
+  .agent-banner.warn { color: var(--warn); border-color: rgba(255, 180, 84, 0.35); white-space: normal; max-width: 90%; text-align: center; }
+
+  .call-meta {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 0 4px; font-size: 12px; color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .call-meta .room { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: 0.8; word-break: break-all; }
+
+  .controls {
+    display: flex; align-items: center; justify-content: center; gap: 18px;
+    padding: 8px 0 2px;
+  }
+  .ctl {
+    width: 58px; height: 58px; border-radius: 50%;
+    border: 1px solid var(--card-border); cursor: pointer;
+    background: rgba(255,255,255,0.06); color: var(--text);
+    display: grid; place-items: center;
+    transition: background 0.2s, transform 0.15s, border-color 0.2s;
+  }
+  .ctl svg { width: 24px; height: 24px; }
+  .ctl:active { transform: scale(0.94); }
+  .ctl.off { background: rgba(255, 93, 108, 0.16); border-color: rgba(255, 93, 108, 0.4); color: var(--danger); }
+  .ctl.hangup {
+    width: 66px; height: 66px;
+    background: linear-gradient(140deg, #ff6b78, #e63946);
+    border-color: transparent; color: #fff;
+    box-shadow: 0 14px 34px rgba(230, 57, 70, 0.4);
+  }
+  .toast-wrap {
+    position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom));
+    transform: translateX(-50%); z-index: 50;
+    display: flex; flex-direction: column; gap: 8px; width: min(92vw, 460px);
+    pointer-events: none;
+  }
+  .toast {
+    padding: 12px 16px; border-radius: 14px; font-size: 13px; line-height: 1.5;
+    background: rgba(18, 25, 40, 0.94); border: 1px solid var(--card-border);
+    color: var(--text); box-shadow: 0 14px 40px rgba(0,0,0,0.4);
+    animation: toast-in 0.22s ease-out;
+  }
+  .toast.error { border-color: rgba(255, 93, 108, 0.45); color: #ffd7da; }
+  .toast.ok { border-color: rgba(56, 211, 159, 0.45); color: #c9ffe9; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  footer { text-align: center; color: rgba(138, 151, 179, 0.55); font-size: 11px; padding-top: 4px; }
+
+  @media (min-width: 760px) {
+    #call { display: grid; grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: 1fr auto; }
+    .stage { grid-row: 1 / span 2; }
+    .call-meta { align-self: end; flex-direction: column; align-items: stretch; }
+    .controls { align-self: start; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.34 1.78.66 2.62a2 2 0 0 1-.45 2.11L8 9.77a16 16 0 0 0 6 6l1.32-1.32a2 2 0 0 1 2.11-.45c.84.32 1.72.54 2.62.66A2 2 0 0 1 22 16.92z"/>
+        </svg>
+      </span>
+      <span>悦悦通话<small>BN Agent · LiveKit</small></span>
+    </div>
+    <span id="statusPill" class="pill"><span class="dot"></span><span id="statusText">待呼叫</span></span>
+  </header>
+
+  <main>
+    <!-- 呼叫前 -->
+    <section id="setup">
+      <h1>和悦悦通话</h1>
+      <p class="sub">全双工语音 / 视频通话。手机与电脑浏览器都可直接使用，音视频经局域网 LiveKit 实时传输。</p>
+
+      <div id="secureNotice" class="notice hidden">
+        当前通过 HTTP 打开，浏览器会禁用麦克风/摄像头（安全上下文限制）。请先在手机上安装本地 CA 证书，再改用 HTTPS 页面。
+        <div class="row">
+          <a id="httpsLink" href="#">打开 HTTPS 页面</a>
+          <a id="caLink" href="#">下载 CA 证书（ca.crt）</a>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="userID">你的用户 ID</label>
+        <input id="userID" type="text" maxlength="128" autocomplete="off"
+               placeholder="例如 alice / 手机 / 客厅平板" />
+      </div>
+
+      <div class="field">
+        <label for="apiKey">API Key（服务端启用了 API_KEY 时必填）</label>
+        <input id="apiKey" type="password" autocomplete="off"
+               placeholder="填入 E:\\BN_agent\\.secrets\\api_key.txt 中的 key" />
+      </div>
+
+      <div class="field">
+        <label>通话类型</label>
+        <div class="segmented" id="mediaSegmented">
+          <button type="button" data-media="audio" class="active">语音通话</button>
+          <button type="button" data-media="video">视频通话</button>
+        </div>
+      </div>
+
+      <button id="callBtn" class="call-btn" type="button">开始呼叫</button>
+
+      <details class="advanced">
+        <summary>高级设置（可选）</summary>
+        <label class="check">
+          <input id="preferLocal" type="checkbox" />
+          <span>页面在本机打开时优先使用 127.0.0.1 地址</span>
+        </label>
+      </details>
+
+      <p class="tips">
+        首次点击会请求麦克风（视频通话还会请求摄像头）权限。<br />
+        手机请确保与本机处于同一局域网，并允许浏览器访问麦克风/摄像头。<br />
+        API Key 只保存在本机浏览器 localStorage，也可用
+        <code>?key=...</code> 参数带入一次。
+      </p>
+    </section>
+
+    <!-- 通话中 -->
+    <section id="call" class="hidden">
+      <div class="stage">
+        <video id="remoteVideo" class="hidden" autoplay playsinline></video>
+        <div id="avatarWrap" class="avatar-wrap">
+          <div class="avatar">悦</div>
+          <div class="avatar-name">YUEYUE</div>
+        </div>
+        <div id="agentBanner" class="agent-banner">正在呼叫悦悦…</div>
+        <div id="localPreview" class="local-preview off">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <div class="off-label">摄像头已关闭</div>
+        </div>
+        <div id="audioSink" class="remote-audio"></div>
+      </div>
+
+      <div class="call-meta">
+        <span id="timer">00:00</span>
+        <span class="room" id="roomLabel"></span>
+        <span id="mediaLabel"></span>
+      </div>
+
+      <div class="controls">
+        <button id="micBtn" class="ctl" type="button" title="静音" aria-label="静音">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <button id="cameraBtn" class="ctl off" type="button" title="打开摄像头" aria-label="打开摄像头">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+        </button>
+        <button id="hangupBtn" class="ctl hangup" type="button" title="挂断" aria-label="挂断">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/>
+            <line x1="23" y1="1" x2="1" y2="23"/>
+          </svg>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <footer>BN Agent · 局域网 LiveKit · 通话内容仅在本机与悦悦之间传输</footer>
+</div>
+
+<div id="toastWrap" class="toast-wrap"></div>
+
+<script src="/call/assets/livekit-client.umd.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var LK = null;
+  var state = {
+    room: null,
+    roomName: "",
+    identity: "",
+    mediaType: "audio",
+    calling: false,
+    ending: false,
+    micEnabled: true,
+    camEnabled: false,
+    agentJoined: false,
+    startedAt: 0,
+    timerHandle: null
+  };
+
+  var CDN_URL = "https://unpkg.com/livekit-client@2.23.0/dist/livekit-client.umd.js";
+  var LOCAL_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"];
+
+  function toast(message, kind, ms) {
+    var wrap = $("toastWrap");
+    var el = document.createElement("div");
+    el.className = "toast" + (kind ? " " + kind : "");
+    el.textContent = message;
+    wrap.appendChild(el);
+    setTimeout(function () {
+      el.style.opacity = "0";
+      el.style.transition = "opacity .25s";
+      setTimeout(function () { el.remove(); }, 260);
+    }, ms || 4200);
+  }
+
+  function setStatus(text, cls) {
+    $("statusText").textContent = text;
+    $("statusPill").className = "pill" + (cls ? " " + cls : "");
+  }
+
+  function setAgentBanner(text, cls) {
+    var el = $("agentBanner");
+    el.textContent = text;
+    el.className = "agent-banner" + (cls ? " " + cls : "");
+  }
+
+  function savedApiKey() {
+    try { return localStorage.getItem("bn_call_api_key") || ""; } catch (e) { return ""; }
+  }
+  function saveApiKey(value) {
+    try { localStorage.setItem("bn_call_api_key", value || ""); } catch (e) {}
+  }
+
+  function loadLivekitClient() {
+    if (window.LivekitClient) { LK = window.LivekitClient; return Promise.resolve(LK); }
+    return new Promise(function (resolve, reject) {
+      var script = document.createElement("script");
+      script.src = CDN_URL;
+      script.onload = function () {
+        if (window.LivekitClient) { LK = window.LivekitClient; resolve(LK); }
+        else reject(new Error("livekit-client 加载后未注册全局对象"));
+      };
+      script.onerror = function () { reject(new Error("livekit-client 加载失败（本地与 CDN 均不可用）")); };
+      document.head.appendChild(script);
+    });
+  }
+
+  function apiHeaders() {
+    var headers = { "Content-Type": "application/json" };
+    var key = ($("apiKey").value || "").trim();
+    if (key) headers["X-API-Key"] = key;
+    return headers;
+  }
+
+  function callApi(path, payload, keepalive) {
+    return fetch("/api/call/" + path, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify(payload || {}),
+      keepalive: !!keepalive
+    }).then(function (res) {
+      return res.json().catch(function () { return { error: "服务端响应不是 JSON（HTTP " + res.status + "）" }; })
+        .then(function (data) {
+          if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+          return data;
+        });
+    });
+  }
+
+  function pickUrl(data) {
+    var preferLocal = $("preferLocal").checked;
+    var isLocalPage = LOCAL_HOSTS.indexOf(location.hostname) >= 0;
+    if (preferLocal || isLocalPage) return data.urlLocal || data.url;
+    return data.url;
+  }
+
+  function isAgent(participant) {
+    if (!participant) return false;
+    try {
+      if (LK && LK.ParticipantKind && participant.kind === LK.ParticipantKind.AGENT) return true;
+    } catch (e) {}
+    var identity = (participant.identity || "").toLowerCase();
+    if (identity.indexOf("agent") === 0) return true;
+    if (/(^|[-_])agent([-_]|$)/.test(identity)) return true;
+    var attrs = participant.attributes || {};
+    if (attrs["lk.agentName"] || attrs["agentName"]) return true;
+    return false;
+  }
+
+  function updateAgentFromRoom() {
+    if (!state.room) return;
+    var joined = false;
+    state.room.remoteParticipants.forEach(function (p) { if (isAgent(p)) joined = true; });
+    if (joined && !state.agentJoined) markAgentJoined();
+  }
+
+  function markAgentJoined() {
+    state.agentJoined = true;
+    setAgentBanner("悦悦已入会", "joined");
+    toast("悦悦已加入通话", "ok");
+  }
+
+  function attachRemoteTrack(track, participant) {
+    if (!track) return;
+    if (track.kind === "audio") {
+      var el = track.attach();
+      el.autoplay = true;
+      el.setAttribute("playsinline", "");
+      $("audioSink").appendChild(el);
+      return;
+    }
+    if (track.kind === "video") {
+      var video = $("remoteVideo");
+      track.attach(video);
+      video.classList.remove("hidden");
+      $("avatarWrap").classList.add("hidden");
+    }
+  }
+
+  function detachRemoteTrack(track) {
+    if (!track) return;
+    try {
+      var els = track.detach();
+      els.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+    } catch (e) {}
+    if (track.kind === "video") {
+      $("remoteVideo").classList.add("hidden");
+      $("avatarWrap").classList.remove("hidden");
+    }
+  }
+
+  function attachLocalVideo(track) {
+    if (!track) return;
+    track.attach($("localVideo"));
+    $("localPreview").classList.remove("off");
+  }
+
+  function clearLocalVideo() {
+    $("localVideo").srcObject = null;
+    $("localPreview").classList.add("off");
+  }
+
+  function startTimer() {
+    stopTimer();
+    state.startedAt = Date.now();
+    var tick = function () {
+      var secs = Math.max(0, Math.floor((Date.now() - state.startedAt) / 1000));
+      var mm = String(Math.floor(secs / 60)).padStart(2, "0");
+      var ss = String(secs % 60).padStart(2, "0");
+      $("timer").textContent = mm + ":" + ss;
+    };
+    tick();
+    state.timerHandle = setInterval(tick, 1000);
+  }
+  function stopTimer() {
+    if (state.timerHandle) { clearInterval(state.timerHandle); state.timerHandle = null; }
+  }
+
+  function wireRoom(room) {
+    var E = LK.RoomEvent;
+
+    room.on(E.Connected, function () {
+      setStatus("已连接", "connected");
+      startTimer();
+      updateAgentFromRoom();
+    });
+
+    room.on(E.ConnectionStateChanged, function (connectionState) {
+      var map = {
+        connecting: ["连接中…", "connecting"],
+        connected: ["已连接", "connected"],
+        reconnecting: ["重连中…", "connecting"],
+        signalReconnecting: ["信号重连中…", "connecting"],
+        disconnected: ["已断开", "error"]
+      };
+      var item = map[connectionState] || [String(connectionState), "connecting"];
+      setStatus(item[0], item[1]);
+    });
+
+    room.on(E.Disconnected, function (reason) {
+      stopTimer();
+      if (!state.ending && state.calling) {
+        setStatus("已断开", "error");
+        toast("连接已断开：" + (reason || "unknown"), "error");
+        cleanupCall(false);
+      }
+    });
+
+    room.on(E.ParticipantConnected, function (participant) {
+      if (isAgent(participant)) markAgentJoined();
+    });
+
+    room.on(E.ParticipantDisconnected, function (participant) {
+      if (isAgent(participant)) {
+        state.agentJoined = false;
+        setAgentBanner("悦悦已离开通话");
+        toast("悦悦已离开通话");
+      }
+    });
+
+    room.on(E.TrackSubscribed, function (track, publication, participant) {
+      attachRemoteTrack(track, participant);
+      if (isAgent(participant) && !state.agentJoined) markAgentJoined();
+    });
+
+    room.on(E.TrackUnsubscribed, function (track) { detachRemoteTrack(track); });
+
+    room.on(E.LocalTrackPublished, function (publication) {
+      if (publication.source === LK.Track.Source.Camera && publication.videoTrack) {
+        attachLocalVideo(publication.videoTrack);
+      }
+    });
+
+    room.on(E.LocalTrackUnpublished, function (publication) {
+      if (publication.source === LK.Track.Source.Camera) clearLocalVideo();
+    });
+
+    room.on(E.TrackMuted, function (publication, participant) {
+      if (participant && participant.local && publication.source === LK.Track.Source.Camera) {
+        $("localPreview").classList.add("off");
+      }
+    });
+    room.on(E.TrackUnmuted, function (publication, participant) {
+      if (participant && participant.local && publication.source === LK.Track.Source.Camera && publication.videoTrack) {
+        attachLocalVideo(publication.videoTrack);
+      }
+    });
+  }
+
+  function updateMicButton() {
+    var btn = $("micBtn");
+    btn.classList.toggle("off", !state.micEnabled);
+    btn.title = state.micEnabled ? "静音" : "取消静音";
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  function updateCameraButton() {
+    var btn = $("cameraBtn");
+    btn.classList.toggle("off", !state.camEnabled);
+    btn.title = state.camEnabled ? "关闭摄像头" : "打开摄像头";
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  function showCallUI(data) {
+    $("setup").classList.add("hidden");
+    $("call").classList.remove("hidden");
+    $("roomLabel").textContent = data.room || "";
+    $("mediaLabel").textContent = state.mediaType === "video" ? "视频通话" : "语音通话";
+    state.agentJoined = false;
+    setAgentBanner("正在呼叫悦悦…");
+    setStatus("连接中…", "connecting");
+    $("timer").textContent = "00:00";
+    $("remoteVideo").classList.add("hidden");
+    $("avatarWrap").classList.remove("hidden");
+    $("localPreview").classList.add("off");
+    updateMicButton();
+    updateCameraButton();
+    if (data.agent && data.agent.warning) {
+      setAgentBanner("通话已建立，但 agent 未就绪：" + data.agent.warning, "warn");
+    }
+  }
+
+  function resetSetupUI() {
+    $("setup").classList.remove("hidden");
+    $("call").classList.add("hidden");
+    setStatus("待呼叫");
+    stopTimer();
+    $("timer").textContent = "00:00";
+    $("roomLabel").textContent = "";
+    clearLocalVideo();
+    $("audioSink").innerHTML = "";
+    $("remoteVideo").classList.add("hidden");
+    $("avatarWrap").classList.remove("hidden");
+    setAgentBanner("正在呼叫悦悦…");
+  }
+
+  function cleanupCall(backToSetup) {
+    state.calling = false;
+    state.ending = false;
+    state.room = null;
+    state.roomName = "";
+    state.agentJoined = false;
+    stopTimer();
+    if (backToSetup !== false) resetSetupUI();
+  }
+
+  async function startCall() {
+    if (state.calling) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast("当前页面无法访问麦克风/摄像头：请改用 HTTPS 页面（https://" + location.hostname + ":18443/call）或 localhost 打开", "error", 9000);
+      return;
+    }
+    var userID = ($("userID").value || "").trim();
+    if (!userID) {
+      toast("请先填写用户 ID", "error");
+      $("userID").focus();
+      return;
+    }
+    saveApiKey($("apiKey").value);
+
+    var btn = $("callBtn");
+    btn.disabled = true;
+    btn.textContent = "呼叫中…";
+    setStatus("请求房间…", "connecting");
+
+    try {
+      await loadLivekitClient();
+      var data = await callApi("start", { userID: userID, mediaType: state.mediaType });
+      state.roomName = data.room;
+      state.identity = data.identity;
+
+      var room = new LK.Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      state.room = room;
+      wireRoom(room);
+      showCallUI(data);
+
+      var iceServers = Array.isArray(data.iceServers) && data.iceServers.length ? data.iceServers : undefined;
+      var url = pickUrl(data);
+      await room.connect(url, data.token, { autoSubscribe: true, rtcConfig: iceServers ? { iceServers: iceServers } : undefined });
+
+      state.calling = true;
+      state.micEnabled = true;
+      await room.localParticipant.setMicrophoneEnabled(true);
+
+      if (state.mediaType === "video") {
+        await room.localParticipant.setCameraEnabled(true);
+        state.camEnabled = true;
+      }
+      updateMicButton();
+      updateCameraButton();
+      updateAgentFromRoom();
+      setStatus("已连接", "connected");
+    } catch (err) {
+      console.error("[call] start failed", err);
+      var message = String(err && err.message ? err.message : err);
+      if (/401|unauthorized|api key/i.test(message)) {
+        toast("鉴权失败：请在 API Key 输入框填写 E:\\BN_agent\\.secrets\\api_key.txt 中的 key 后重试", "error", 8000);
+        $("apiKey").focus();
+      } else {
+        toast("呼叫失败：" + message, "error", 7000);
+      }
+      setStatus("呼叫失败", "error");
+      try { if (state.room) await state.room.disconnect(); } catch (e) {}
+      if (state.roomName) callApi("end", { room: state.roomName }, true).catch(function () {});
+      cleanupCall(true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "开始呼叫";
+    }
+  }
+
+  async function endCall() {
+    if (state.ending) return;
+    var room = state.room;
+    var roomName = state.roomName;
+    state.ending = true;
+    setStatus("正在挂断…", "connecting");
+    try { if (room) await room.disconnect(); } catch (e) {}
+    if (roomName) {
+      try { await callApi("end", { room: roomName }); } catch (e) { console.warn("[call] end room failed", e); }
+    }
+    cleanupCall(true);
+    toast("通话已结束");
+  }
+
+  async function toggleMic() {
+    if (!state.room || !state.calling) return;
+    try {
+      state.micEnabled = !state.micEnabled;
+      await state.room.localParticipant.setMicrophoneEnabled(state.micEnabled);
+      updateMicButton();
+    } catch (e) {
+      state.micEnabled = !state.micEnabled;
+      toast("切换麦克风失败：" + e.message, "error");
+    }
+  }
+
+  async function toggleCamera() {
+    if (!state.room || !state.calling) return;
+    try {
+      state.camEnabled = !state.camEnabled;
+      await state.room.localParticipant.setCameraEnabled(state.camEnabled);
+      updateCameraButton();
+      if (!state.camEnabled) clearLocalVideo();
+    } catch (e) {
+      state.camEnabled = !state.camEnabled;
+      toast("切换摄像头失败：" + e.message, "error");
+      updateCameraButton();
+    }
+  }
+
+  // ── 事件绑定 ─────────────────────────────────────────
+  $("mediaSegmented").addEventListener("click", function (event) {
+    var target = event.target.closest("button[data-media]");
+    if (!target || state.calling) return;
+    state.mediaType = target.getAttribute("data-media");
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (b) {
+      b.classList.toggle("active", b === target);
+    });
+  });
+
+  $("callBtn").addEventListener("click", startCall);
+  $("hangupBtn").addEventListener("click", endCall);
+  $("micBtn").addEventListener("click", toggleMic);
+  $("cameraBtn").addEventListener("click", toggleCamera);
+  $("userID").addEventListener("keydown", function (e) { if (e.key === "Enter") startCall(); });
+
+  // 非安全上下文（局域网 HTTP）无法使用 getUserMedia，引导到 HTTPS + CA 安装
+  var initialSearch = location.search;
+  var secureContext = window.isSecureContext || LOCAL_HOSTS.indexOf(location.hostname) >= 0;
+  if (!secureContext) {
+    $("httpsLink").href = "https://" + location.hostname + ":18443/call" + initialSearch;
+    $("caLink").href = "http://" + location.hostname + ":18080/call/assets/ca.crt";
+    $("secureNotice").classList.remove("hidden");
+  }
+
+  // 恢复上次输入
+  try {
+    var params = new URLSearchParams(location.search);
+    var keyFromUrl = (params.get("key") || "").trim();
+    if (keyFromUrl) {
+      saveApiKey(keyFromUrl);
+      try { history.replaceState(null, "", location.pathname); } catch (e) {}
+    }
+    var lastUser = localStorage.getItem("bn_call_user_id");
+    if (lastUser) $("userID").value = lastUser;
+    var lastMedia = localStorage.getItem("bn_call_media");
+    if (lastMedia === "video") {
+      state.mediaType = "video";
+      Array.prototype.forEach.call(document.querySelectorAll("#mediaSegmented button"), function (b) {
+        b.classList.toggle("active", b.getAttribute("data-media") === "video");
+      });
+    }
+    $("apiKey").value = savedApiKey();
+  } catch (e) {}
+  $("userID").addEventListener("change", function () {
+    try { localStorage.setItem("bn_call_user_id", this.value.trim()); } catch (e) {}
+  });
+  $("mediaSegmented").addEventListener("click", function () {
+    try { localStorage.setItem("bn_call_media", state.mediaType); } catch (e) {}
+  });
+  $("apiKey").addEventListener("change", function () { saveApiKey(this.value); });
+
+  // 页面关闭/切后台时更新删房（fetch keepalive 能带上 API Key；失败再退回 sendBeacon）
+  window.addEventListener("pagehide", function () {
+    if (!state.roomName || !state.calling) return;
+    var roomName = state.roomName;
+    var sent = false;
+    try {
+      callApi("end", { room: roomName }, true).then(function () {
+        state.roomName = "";
+      }).catch(function () {});
+      sent = true;
+    } catch (e) {}
+    if (!sent) {
+      try {
+        var payload = JSON.stringify({ room: roomName });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("/api/call/end", new Blob([payload], { type: "application/json" }));
+        }
+      } catch (e) {}
+    }
+  });
+})();
+</script>
+</body>
+</html>

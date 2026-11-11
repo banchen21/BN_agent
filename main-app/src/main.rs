@@ -13,6 +13,7 @@
 //! | POST   | `/api/events`                | Publish an event to the bus      |
 //! | POST   | `/api/llm/chat`              | Simple LLM chat                  |
 //! | POST   | `/api/chat`                  | Full chat with tools + history   |
+//! | GET    | `/api/chat/history`          | Per-peer chat history            |
 //! | GET    | `/api/chat/sessions`         | List per-peer chat sessions      |
 //! | POST   | `/api/chat/sessions/refresh` | Refresh one session summary      |
 //! | GET    | `/api/tools`                 | List registered tools            |
@@ -29,10 +30,16 @@
 //! | GET    | `/api/token-usage/budget`    | Token budget status              |
 //! | POST   | `/api/cancel`                | Cancel in-flight request         |
 //! | GET    | `/api/retry/state`           | Circuit breaker state            |
+//! | GET    | `/api/plugin-config`         | List plugin config schemas       |
+//! | GET    | `/api/plugin-config/{name}`  | Read one plugin config (masked)  |
+//! | PUT    | `/api/plugin-config/{name}`  | Save config + reload plugin      |
+//! | POST   | `/api/plugin-config/{name}/reload` | Reload plugin with config  |
+//! | GET    | `/ui/config`                 | Static config WebUI (no auth)    |
 //! | ANY    | `/api/plugin/{name}/{path:.*}` | Proxy to plugin API handler    |
 //! | POST   | `/api/shutdown`              | Graceful shutdown                |
 
 mod agent_loop_actor;
+mod call_api;
 mod cancellation_actor;
 mod chat_store;
 mod claude_backend;
@@ -41,6 +48,7 @@ mod llm_actor;
 mod message_router;
 mod metrics_actor;
 mod pipeline;
+mod plugin_config;
 mod plugin_manager;
 mod plugin_tools;
 mod rate_limit_actor;
@@ -66,7 +74,10 @@ use message_router::MessageRouter;
 use metrics_actor::MetricsActor;
 use parking_lot::Mutex;
 use plugin_interface::*;
-use plugin_manager::PluginManager;
+use plugin_manager::{
+    GetPluginConfigSchema, ListPluginConfigSchemas, PluginManager, ReloadPluginVerified,
+};
+use plugin_config::SaveError;
 use rate_limit_actor::RateLimitActor;
 use retry_actor::RetryActor;
 use serde::Deserialize;
@@ -105,13 +116,26 @@ fn check_api_key(provided: Option<&str>, expected: &str) -> bool {
     token == expected
 }
 
-/// 可选 API key 鉴权中间件。未设 `API_KEY` 时放行；`/api/health` 始终豁免（便于探活）。
+/// 免鉴权路径：健康检查（探活）与静态配置/通话页（页面本身不含任何 secret，
+/// 页面内的 API 调用仍需携带 API_KEY）。
+const AUTH_EXEMPT_PATHS: [&str; 4] = ["/api/health", "/api/call/health", "/ui/config", "/config"];
+
+fn is_auth_exempt_path(path: &str) -> bool {
+    AUTH_EXEMPT_PATHS.contains(&path)
+        || path == "/call"
+        || path == "/call/"
+        || path.starts_with("/call/assets/")
+}
+
+/// 可选 API key 鉴权中间件。未设 `API_KEY` 时放行；免鉴权路径直接放行。
 async fn api_key_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
     let expected = std::env::var("API_KEY").unwrap_or_default();
-    if expected.is_empty() || req.path() == "/api/health" {
+    let cors_preflight = req.method() == actix_web::http::Method::OPTIONS
+        && req.path().starts_with("/api/call/");
+    if expected.is_empty() || is_auth_exempt_path(req.path()) || cors_preflight {
         return next.call(req).await;
     }
     let provided = req
@@ -241,6 +265,7 @@ async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) 
         tool_registry: Some(state.tool_registry.clone()),
         logger: PluginLogger::new(state.event_bus.clone(), "host".into()),
         chat_store: state.chat_store.clone(),
+        config: serde_json::json!({}),
     };
     match state
         .plugin_manager
@@ -252,6 +277,200 @@ async fn scan_plugins(state: web::Data<AppState>, body: web::Json<ScanRequest>) 
     {
         Ok(Ok(n)) => HttpResponse::Ok().json(serde_json::json!({ "loaded": n })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ── Plugin config ────────────────────────────────────────────────────────────
+
+/// 静态配置管理页（无前端构建，单文件 HTML）。
+const CONFIG_UI_HTML: &str = include_str!("../static/config.html");
+
+async fn config_ui() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(CONFIG_UI_HTML)
+}
+
+async fn list_plugin_configs(state: web::Data<AppState>) -> impl Responder {
+    match state.plugin_manager.send(ListPluginConfigSchemas).await {
+        Ok(entries) => {
+            let dir = plugin_interface::config::config_dir();
+            HttpResponse::Ok().json(plugin_config::list_response(&entries, &dir))
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+async fn get_plugin_config(state: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let name = path.into_inner();
+    match state
+        .plugin_manager
+        .send(GetPluginConfigSchema { name: name.clone() })
+        .await
+    {
+        Ok(Some(entry)) => {
+            let dir = plugin_interface::config::config_dir();
+            match plugin_config::detail_response(&entry, &dir) {
+                Ok(body) => HttpResponse::Ok().json(body),
+                Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+            }
+        }
+        Ok(None) => HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": format!("plugin '{}' is not loaded", name) })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdatePluginConfigPayload {
+    values: serde_json::Map<String, serde_json::Value>,
+}
+
+/// 保存配置 → 触发插件 reload。
+///
+/// reload 失败时把配置文件回滚到保存前内容，并用旧配置再次尝试加载；
+/// 响应明确告知 `config_rolled_back` / `plugin_restored`，不会静默留下半加载状态。
+async fn put_plugin_config(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<UpdatePluginConfigPayload>,
+) -> impl Responder {
+    let name = path.into_inner();
+
+    let entry = match state
+        .plugin_manager
+        .send(GetPluginConfigSchema { name: name.clone() })
+        .await
+    {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({ "error": format!("plugin '{}' is not loaded", name) }))
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": format!("{}", e) }))
+        }
+    };
+
+    let dir = plugin_interface::config::config_dir();
+    let prepared = match plugin_config::prepare_save(&entry, &dir, &body.values) {
+        Ok(prepared) => prepared,
+        Err(SaveError::BadRequest(error)) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": error }))
+        }
+        Err(SaveError::Validation(details)) => return HttpResponse::BadRequest().json(
+            serde_json::json!({ "error": "validation failed", "details": details }),
+        ),
+        Err(SaveError::Io(error)) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({ "error": error }))
+        }
+    };
+
+    // 使用带校验的 reload：插件必须真正运行且其工具仍注册，否则视为失败。
+    let reload_result = state
+        .plugin_manager
+        .send(ReloadPluginVerified { name: name.clone() })
+        .await;
+
+    match reload_result {
+        Ok(Ok(info)) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "saved",
+            "reloaded": true,
+            "verified": true,
+            "plugin": info,
+            "values": prepared.masked,
+            "path": prepared.path.to_string_lossy(),
+        })),
+        Ok(Err(reload_error)) => {
+            log::warn!(
+                "[plugin-config] reload failed for '{}', rolling back config: {} (restore attempt: {:?})",
+                name,
+                reload_error.error,
+                reload_error.restore_attempt_error
+            );
+            let rolled_back = match plugin_config::rollback_save(&prepared) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::error!(
+                        "[plugin-config] rollback failed for '{}': {}",
+                        name,
+                        e
+                    );
+                    false
+                }
+            };
+            log::warn!(
+                "[plugin-config] config rollback for '{}' done (rolled_back={}), retrying reload",
+                name,
+                rolled_back
+            );
+            // 用回滚后的旧配置再尝试加载一次（同样要求工具校验通过）。
+            let plugin_restored = matches!(
+                state
+                    .plugin_manager
+                    .send(ReloadPluginVerified { name: name.clone() })
+                    .await,
+                Ok(Ok(_))
+            );
+            log::warn!(
+                "[plugin-config] retry reload for '{}' => restored={}",
+                name,
+                plugin_restored
+            );
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "reload_failed",
+                "reloaded": false,
+                "config_rolled_back": rolled_back,
+                "plugin_restored": plugin_restored,
+                "plugin_unloaded_before_retry": reload_error.plugin_unloaded,
+                "error": reload_error.error,
+                "restore_attempt_error": reload_error.restore_attempt_error,
+                "note": "reload 失败：配置文件已回滚到保存前内容，并按旧配置尝试重新加载",
+            }))
+        }
+        Err(e) => {
+            let rolled_back = plugin_config::rollback_save(&prepared).is_ok();
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "reload_failed",
+                "reloaded": false,
+                "config_rolled_back": rolled_back,
+                "plugin_restored": false,
+                "error": format!("{}", e),
+            }))
+        }
+    }
+}
+
+/// 手动重载插件（应用已落盘的配置，带工具校验）。
+async fn reload_plugin_config(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let name = path.into_inner();
+    match state
+        .plugin_manager
+        .send(ReloadPluginVerified { name: name.clone() })
+        .await
+    {
+        Ok(Ok(info)) => HttpResponse::Ok()
+            .json(serde_json::json!({ "status": "reloaded", "plugin": info })),
+        Ok(Err(e)) => {
+            let status = if e.error.contains("is not loaded") {
+                actix_web::http::StatusCode::NOT_FOUND
+            } else {
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            HttpResponse::build(status).json(serde_json::json!({
+                "error": e.error,
+                "restore_attempt_error": e.restore_attempt_error,
+                "plugin_unloaded": e.plugin_unloaded,
+            }))
+        }
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -317,6 +536,28 @@ async fn llm_chat(state: web::Data<AppState>, body: web::Json<LlmChatRequest>) -
 #[derive(Deserialize)]
 struct ChatPayload {
     message: String,
+    /// 多会话标识（如 `android:<device_id>`）；省略时回退 `web:default`。
+    peer_id: Option<String>,
+    /// 用户显示名，透传给 LLM。
+    user_name: Option<String>,
+    /// 消息来源渠道（如 `android`、`web`）。
+    source: Option<String>,
+}
+
+/// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
+/// 结果为空时回退 `web:default`（兼容旧版单会话请求）。
+fn normalize_peer_id(raw: &str) -> String {
+    let filtered: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        .take(128)
+        .collect();
+    if filtered.is_empty() {
+        "web:default".to_string()
+    } else {
+        filtered
+    }
 }
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
@@ -328,7 +569,7 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         }
     };
 
-    let peer_id = "web:default".to_string();
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
 
     // Refresh peer-scoped snapshots.
     let _ = state
@@ -368,8 +609,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                 file_name: None,
                 stream: true,
                 request_id: request_id.clone(),
-                source: String::new(),
-                user_name: String::new(),
+                source: body.source.clone().unwrap_or_default(),
+                user_name: body.user_name.clone().unwrap_or_default(),
                 max_tokens: None,
                 original_user_msg: None,
                 assistant_tool_calls: vec![],
@@ -393,6 +634,52 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             HttpResponse::Ok().json(resp)
         }
         Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ── Chat history (per peer) ──────────────────────────────────────────────────
+
+const CHAT_HISTORY_DEFAULT_LIMIT: usize = 50;
+const CHAT_HISTORY_MAX_LIMIT: usize = 500;
+
+/// 历史条数：缺省 50，clamp 到 `[1, 500]`。
+fn clamp_history_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(CHAT_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, CHAT_HISTORY_MAX_LIMIT)
+}
+
+#[derive(Deserialize)]
+struct ChatHistoryQuery {
+    peer_id: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /api/chat/history?peer_id=<id>&limit=<n>`
+///
+/// 返回按时间正序的 JSON 数组：`[{"role","content","peer_id"}, ...]`。
+/// `peer_id` 经 `normalize_peer_id` 归一化（省略/非法时回退 `web:default`）。
+/// 注意：`FetchChatHistory` 目前只取 role/content/peer_id 三列，故响应不含 created_at。
+async fn chat_history(
+    state: web::Data<AppState>,
+    query: web::Query<ChatHistoryQuery>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store_addr else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    let peer_id = normalize_peer_id(query.peer_id.as_deref().unwrap_or(""));
+    let limit = clamp_history_limit(query.limit);
+    match store
+        .send(FetchChatHistory {
+            limit,
+            peer_id: Some(peer_id),
+        })
+        .await
+    {
+        Ok(records) => HttpResponse::Ok().json(records),
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -704,14 +991,10 @@ async fn retry_state(state: web::Data<AppState>) -> impl Responder {
 async fn plugin_proxy(
     state: web::Data<AppState>,
     req: HttpRequest,
-    path: web::Path<String>,
+    path: web::Path<(String, String)>,
     body: Option<web::Bytes>,
 ) -> impl Responder {
-    let full_path = path.into_inner();
-    let (plugin_name, sub_path) = full_path
-        .split_once('/')
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .unwrap_or_else(|| (full_path, String::new()));
+    let (plugin_name, sub_path) = path.into_inner();
 
     let method = req.method().as_str().to_uppercase();
     let body_str = body.and_then(|b| String::from_utf8(b.to_vec()).ok());
@@ -745,6 +1028,41 @@ async fn shutdown() -> impl Responder {
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
+
+/// 可选 HTTPS 监听配置：手机浏览器在非 localhost 的 HTTP 页面上没有
+/// `navigator.mediaDevices`（安全上下文限制），因此通话页需要 HTTPS。
+/// 证书由 `deploy/livekit/tls/` 下的本地 CA 签发；`ca.crt` 可从
+/// `/call/assets/ca.crt` 下载并安装到手机。
+fn build_rustls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<rustls::ServerConfig, String> {
+    use std::io::BufReader;
+
+    let cert_file =
+        std::fs::File::open(cert_path).map_err(|e| format!("open cert {cert_path}: {e}"))?;
+    let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse cert {cert_path}: {e}"))?;
+    if certs.is_empty() {
+        return Err(format!("{cert_path} 中没有证书"));
+    }
+
+    let key_file =
+        std::fs::File::open(key_path).map_err(|e| format!("open key {key_path}: {e}"))?;
+    let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+        .map_err(|e| format!("parse key {key_path}: {e}"))?
+        .ok_or_else(|| format!("{key_path} 中没有私钥"))?;
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("rustls protocol versions: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("rustls server config: {e}"))?;
+    Ok(config)
+}
 
 fn main() -> std::io::Result<()> {
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
@@ -1043,8 +1361,10 @@ fn main() -> std::io::Result<()> {
             agent_loop_addr,
         });
 
-        log::info!("HTTP API listening on http://127.0.0.1:8080");
-        HttpServer::new(move || {
+        let bind_addr =
+            std::env::var("HTTP_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        log::info!("HTTP API listening on http://{}", bind_addr);
+        let mut server = HttpServer::new(move || {
             actix_web::App::new()
                 .app_data(state.clone())
                 .wrap(actix_web::middleware::from_fn(api_key_middleware))
@@ -1057,6 +1377,7 @@ fn main() -> std::io::Result<()> {
                 .route("/api/events", web::post().to(publish_event))
                 .route("/api/llm/chat", web::post().to(llm_chat))
                 .route("/api/chat", web::post().to(chat))
+                .route("/api/chat/history", web::get().to(chat_history))
                 .route("/api/chat/sessions", web::get().to(list_chat_sessions))
                 .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))
                 .route("/api/tools", web::get().to(list_tools))
@@ -1073,19 +1394,52 @@ fn main() -> std::io::Result<()> {
                 .route("/api/token-usage/budget", web::get().to(get_token_budget))
                 .route("/api/cancel", web::post().to(cancel_handler))
                 .route("/api/retry/state", web::get().to(retry_state))
+                .route("/api/plugin-config", web::get().to(list_plugin_configs))
+                .route("/api/plugin-config/{name}", web::get().to(get_plugin_config))
+                .route("/api/plugin-config/{name}", web::put().to(put_plugin_config))
+                .route(
+                    "/api/plugin-config/{name}/reload",
+                    web::post().to(reload_plugin_config),
+                )
+                .route("/ui/config", web::get().to(config_ui))
+                .route("/config", web::get().to(config_ui))
                 .route("/api/shutdown", web::post().to(shutdown))
+                // ── 通话：/api/call/* 转发到 call-livekit-plugin，/call 提供浏览器页面 ──
+                .route("/api/call/{action}", web::get().to(call_api::call_api))
+                .route("/api/call/{action}", web::post().to(call_api::call_api))
+                .route(
+                    "/api/call/{action}",
+                    web::method(actix_web::http::Method::OPTIONS).to(call_api::call_preflight),
+                )
+                .route("/call", web::get().to(call_api::call_page))
+                .route("/call/", web::get().to(call_api::call_page))
+                .route("/call/assets/{file}", web::get().to(call_api::call_asset))
                 .route("/api/plugin/{name}/{path:.*}", web::method(actix_web::http::Method::GET).to(plugin_proxy))
                 .route("/api/plugin/{name}/{path:.*}", web::method(actix_web::http::Method::POST).to(plugin_proxy))
         })
-        .bind("127.0.0.1:8080")?
-        .run()
-        .await
+        .bind(bind_addr)?;
+        // 可选 HTTPS：手机 getUserMedia 需要安全上下文
+        if let Ok(https_bind) = std::env::var("HTTPS_BIND") {
+            let https_bind = https_bind.trim().to_string();
+            if !https_bind.is_empty() {
+                let cert = std::env::var("TLS_CERT").unwrap_or_default();
+                let key = std::env::var("TLS_KEY").unwrap_or_default();
+                match build_rustls_config(&cert, &key) {
+                    Ok(tls) => {
+                        server = server.bind_rustls_0_23(&https_bind, tls)?;
+                        log::info!("HTTPS API listening on https://{https_bind}");
+                    }
+                    Err(e) => log::warn!("HTTPS 未启用：{e}（检查 HTTPS_BIND/TLS_CERT/TLS_KEY）"),
+                }
+            }
+        }
+        server.run().await
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_health_json, check_api_key};
+    use super::{build_health_json, check_api_key, clamp_history_limit, normalize_peer_id};
 
     #[test]
     fn empty_expected_allows_all() {
@@ -1123,5 +1477,270 @@ mod tests {
         assert_eq!(v["uptime_secs"], 42);
         assert_eq!(v["plugins_loaded"], 5);
         assert_eq!(v["agent_loops_total"], 2);
+    }
+
+    #[test]
+    fn auth_exempt_paths() {
+        assert!(super::is_auth_exempt_path("/api/health"));
+        assert!(super::is_auth_exempt_path("/ui/config"));
+        assert!(super::is_auth_exempt_path("/config"));
+        assert!(!super::is_auth_exempt_path("/api/plugin-config"));
+        assert!(!super::is_auth_exempt_path("/api/plugin-config/demo"));
+        assert!(!super::is_auth_exempt_path("/"));
+    }
+
+    #[test]
+    fn normalize_peer_id_falls_back_to_default() {
+        assert_eq!(normalize_peer_id(""), "web:default");
+        assert_eq!(normalize_peer_id("   "), "web:default");
+        assert_eq!(normalize_peer_id("用户张三"), "web:default");
+        assert_eq!(normalize_peer_id("!!!/???"), "web:default");
+    }
+
+    #[test]
+    fn normalize_peer_id_trims_and_keeps_allowed_chars() {
+        assert_eq!(
+            normalize_peer_id("  android:device-1_2.3  "),
+            "android:device-1_2.3"
+        );
+        assert_eq!(normalize_peer_id("a b\tc\nd"), "abcd");
+        assert_eq!(normalize_peer_id("tg:123@456"), "tg:123456");
+    }
+
+    #[test]
+    fn normalize_peer_id_truncates_to_128_chars() {
+        let raw = "a".repeat(200);
+        let out = normalize_peer_id(&raw);
+        assert_eq!(out.len(), 128);
+        assert_eq!(out, "a".repeat(128));
+        // 128 字符以内保持原样。
+        let exact = "b".repeat(128);
+        assert_eq!(normalize_peer_id(&exact), exact);
+    }
+
+    #[test]
+    fn history_limit_defaults_and_caps() {
+        assert_eq!(clamp_history_limit(None), 50);
+        assert_eq!(clamp_history_limit(Some(10)), 10);
+        assert_eq!(clamp_history_limit(Some(0)), 1);
+        assert_eq!(clamp_history_limit(Some(500)), 500);
+        assert_eq!(clamp_history_limit(Some(10_000)), 500);
+    }
+}
+
+#[cfg(test)]
+mod plugin_config_api {
+    use super::*;
+    use actix_web::test;
+
+    struct StubPlugin;
+
+    impl Plugin for StubPlugin {
+        fn info(&self) -> PluginInfo {
+            PluginInfo {
+                name: "stub-plugin".into(),
+                version: "0.1.0".into(),
+                description: "stub for config API tests".into(),
+                author: "test".into(),
+                min_host_version: "0.1.0".into(),
+            }
+        }
+
+        fn start(&mut self, _ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+
+        fn stop(&mut self) {}
+
+        fn config_schema(&self) -> Option<PluginConfigSchema> {
+            Some(
+                serde_json::from_value(serde_json::json!({
+                    "version": 1,
+                    "title": "Stub 配置",
+                    "fields": {
+                        "url": {"type": "string", "default": "http://127.0.0.1:9"},
+                        "token": {"type": "string", "default": "", "secret": true},
+                        "n": {"type": "int", "default": 1, "min": 0, "max": 10}
+                    }
+                }))
+                .unwrap(),
+            )
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bn-agent-api-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn test_state() -> web::Data<AppState> {
+        let event_bus = EventBus::new().start();
+        let tool_registry: Arc<Mutex<ToolRegistry>> = Arc::new(Mutex::new(ToolRegistry::new()));
+        let plugin_dir = temp_dir("empty-plugins");
+        let manager = PluginManager::new(
+            event_bus.clone(),
+            None,
+            tool_registry.clone(),
+            plugin_dir.to_string_lossy().to_string(),
+            None,
+        )
+        .start();
+        manager
+            .send(plugin_manager::InsertTestPlugin(Box::new(StubPlugin)))
+            .await
+            .expect("insert stub plugin");
+
+        web::Data::new(AppState {
+            started_at: std::time::Instant::now(),
+            plugin_manager: manager,
+            event_bus,
+            llm: None,
+            tool_registry,
+            snapshots: Arc::new(Mutex::new(Vec::new())),
+            metrics_addr: None,
+            token_usage_addr: None,
+            retry_addr: None,
+            cancellation_addr: None,
+            chat_store_addr: None,
+            chat_store: None,
+            agent_loop_addr: None,
+        })
+    }
+
+    #[actix_rt::test]
+    async fn config_api_end_to_end() {
+        let dir = temp_dir("config");
+        // SAFETY: 本测试独占 PLUGIN_CONFIG_DIR（其他测试不读取该变量）。
+        std::env::set_var("PLUGIN_CONFIG_DIR", &dir);
+
+        let state = test_state().await;
+        let app = test::init_service(
+            actix_web::App::new().app_data(state.clone())
+                .route("/ui/config", web::get().to(config_ui))
+                .route("/config", web::get().to(config_ui))
+                .route("/api/plugin-config", web::get().to(list_plugin_configs))
+                .route("/api/plugin-config/{name}", web::get().to(get_plugin_config))
+                .route(
+                    "/api/plugin-config/{name}",
+                    web::put().to(put_plugin_config),
+                )
+                .route(
+                    "/api/plugin-config/{name}/reload",
+                    web::post().to(reload_plugin_config),
+                ),
+        )
+        .await;
+
+        // 静态页面可访问且包含页面标题（不含任何 secret）。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/ui/config").to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let body = test::read_body(resp).await;
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("插件配置"));
+        assert!(!html.contains("s3cret"));
+
+        // 列表包含桩插件，editable=true。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/api/plugin-config").to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let list: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(list["plugins"][0]["name"], "stub-plugin");
+        assert_eq!(list["plugins"][0]["title"], "Stub 配置");
+        assert_eq!(list["plugins"][0]["editable"], true);
+        assert_eq!(list["plugins"][0]["field_count"], 3);
+
+        // 详情返回默认值，secret 为空字符串（没有配置时不打码）。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/plugin-config/stub-plugin")
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let detail: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(detail["values"]["url"], "http://127.0.0.1:9");
+        assert_eq!(detail["values"]["token"], "");
+        assert_eq!(detail["values"]["n"], 1);
+
+        // 非法值拒绝（超出范围），且不触发写盘。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::put()
+                .uri("/api/plugin-config/stub-plugin")
+                .set_json(serde_json::json!({ "values": { "n": 99 } }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        let err: serde_json::Value = test::read_body_json(resp).await;
+        assert!(err["details"][0].as_str().unwrap().contains("n"));
+
+        // 未知字段拒绝。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::put()
+                .uri("/api/plugin-config/stub-plugin")
+                .set_json(serde_json::json!({ "values": { "nope": true } }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+
+        // 合法保存会写盘并触发 reload；桩插件没有动态库路径 → reload 失败，
+        // 配置必须回滚（文件被删除），响应明确说明。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::put()
+                .uri("/api/plugin-config/stub-plugin")
+                .set_json(serde_json::json!({
+                    "values": { "url": "http://new:1", "n": 5, "token": "s3cret" }
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "reload_failed");
+        assert_eq!(body["config_rolled_back"], true);
+        assert!(!dir.join("stub-plugin.json").exists());
+
+        // 未知插件：GET / reload 均为 404。
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/plugin-config/nope-plugin")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/plugin-config/nope-plugin/reload")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        std::env::remove_var("PLUGIN_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

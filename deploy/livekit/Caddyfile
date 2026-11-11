@@ -1,0 +1,12 @@
+# LiveKit 信令 TLS 反向代理（浏览器 HTTPS 页面必须用 wss）
+# 仅代理 HTTP/WebSocket 信令（7880）；WebRTC 媒体仍走 tcp 7881 / udp 7882-7892。
+{
+	admin off
+	auto_https off
+}
+
+:7443 {
+	tls tls/server.crt tls/server.key
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:7880
+}

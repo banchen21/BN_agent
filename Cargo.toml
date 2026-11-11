@@ -15,12 +15,14 @@ members = [
     "plugins/webrtc-plugin",
     "plugins/image-plugin",
     "plugins/image-gen-plugin",
+    "plugins/comfyui-qwen-plugin",
     "plugins/video-plugin",
     "plugins/mcp-plugin",
     "plugins/skill-plugin",
     "plugins/proactive-plugin",
     "plugins/memory-plugin",
     "plugins/toy-control-plugin",
+    "plugins/call-livekit-plugin",
 ]
 resolver = "2"
 
