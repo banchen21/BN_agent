@@ -57,6 +57,7 @@ import com.bnagent.shiyu.domain.model.pickNote
 import com.bnagent.shiyu.ui.components.Avatar
 import com.bnagent.shiyu.ui.components.IconButton44
 import com.bnagent.shiyu.ui.components.LargeTitleBar
+import com.bnagent.shiyu.ui.components.LocalToast
 import com.bnagent.shiyu.ui.components.SheetCancelButton
 import com.bnagent.shiyu.ui.components.SheetHandle
 import com.bnagent.shiyu.ui.components.SheetTitle
@@ -81,12 +82,10 @@ fun ChatsScreen(onOpenChat: (String) -> Unit) {
     val container = LocalAppContainer.current
     val conversations by container.conversationRepository.conversations
         .collectAsStateWithLifecycle(initialValue = emptyList())
-    val allConversations by container.conversationRepository.allConversations
-        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val toast = LocalToast.current
 
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var showNewChat by rememberSaveable { mutableStateOf(false) }
     val searchFocus = remember { FocusRequester() }
 
     LaunchedEffect(searchOpen) {
@@ -125,7 +124,7 @@ fun ChatsScreen(onOpenChat: (String) -> Unit) {
             IconButton44(
                 icon = ShiYuIcons.Plus,
                 contentDescription = "发起新聊天",
-                onClick = { showNewChat = true },
+                onClick = { toast?.show("发起新聊天暂未开放") },
             )
         }
         AnimatedVisibility(
@@ -161,17 +160,6 @@ fun ChatsScreen(onOpenChat: (String) -> Unit) {
                 }
             }
         }
-    }
-
-    if (showNewChat) {
-        NewChatSheet(
-            conversations = allConversations,
-            onDismiss = { showNewChat = false },
-            onPick = { id ->
-                showNewChat = false
-                onOpenChat(id)
-            },
-        )
     }
 }
 

@@ -8,8 +8,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -19,6 +22,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -101,7 +105,27 @@ fun ChatScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().background(ShiYuTheme.colors.chatBg)) {
+    // 键盘交互（产品要求）：
+    // - 消息已滑走：键盘覆盖消息区，只把输入框顶上来；
+    // - 停在最新：整个聊天内容随键盘上推，保持最新消息可见。
+    var atBottom by remember { mutableStateOf(true) }
+    var pushContent by remember { mutableStateOf(true) }
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val imeVisible = imeBottomPx > 0
+    val imeBottom = with(density) { imeBottomPx.toDp() }
+    LaunchedEffect(imeVisible) {
+        if (imeVisible) pushContent = atBottom
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(ShiYuTheme.colors.chatBg)
+            .then(
+                if (imeVisible && pushContent) Modifier.padding(bottom = imeBottom) else Modifier,
+            ),
+    ) {
         ChatHeader(
             name = conversation?.name ?: id,
             subtitle = if (vm.typing) "正在输入…" else conversation?.headerSubtitle.orEmpty(),
@@ -129,6 +153,7 @@ fun ChatScreen(
                     onImageClick = { viewer = it },
                     onVoiceClick = { vm.toggleVoice(it) },
                     onDownloadClick = { toast?.show("演示环境，暂不下载") },
+                    onAtBottomChange = { atBottom = it },
                 )
             }
         }
@@ -145,6 +170,7 @@ fun ChatScreen(
             onStartRecording = beginRecording,
             onCancelRecording = { vm.cancelRecording() },
             onSendRecording = { vm.stopRecordingAndSend() },
+            applyImePadding = !(imeVisible && pushContent),
         )
     }
 

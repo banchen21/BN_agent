@@ -20,6 +20,7 @@ object StockMedia {
     const val AVATAR_ZHAO = "avatar_zhao"
     const val AVATAR_WU = "avatar_wu"
     const val AVATAR_TEAM = "avatar_team"
+    const val AGENT_YUEYUE = "agent_yueyue"
 
     const val PHOTO_CAT = "photo_cat"
     const val PHOTO_COFFEE = "photo_coffee"
@@ -54,6 +55,7 @@ object StockMedia {
         AVATAR_ZHAO -> R.drawable.avatar_zhao
         AVATAR_WU -> R.drawable.avatar_wu
         AVATAR_TEAM -> R.drawable.avatar_team
+        AGENT_YUEYUE -> R.drawable.agent_yueyue
         PHOTO_CAT -> R.drawable.photo_cat
         PHOTO_COFFEE -> R.drawable.photo_coffee
         PHOTO_DESK -> R.drawable.photo_desk

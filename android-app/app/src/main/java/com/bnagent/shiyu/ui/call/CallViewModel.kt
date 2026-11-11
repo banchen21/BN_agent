@@ -44,7 +44,7 @@ import java.util.Locale
 class CallViewModel(
     application: Application,
     private val repository: ConversationRepository,
-    conversationId: String,
+    private val conversationId: String,
     private val video: Boolean,
 ) : AndroidViewModel(application) {
 
@@ -106,12 +106,13 @@ class CallViewModel(
         connectJob = viewModelScope.launch {
             _uiState.update { it.copy(connecting = true, error = null) }
             try {
-                val call = repository.startCall(if (video) "video" else "audio")
+                val call = repository.startCall(conversationId, if (video) "video" else "audio")
                 session = call
                 room.connect(call.localWsUrl, call.token)
                 room.localParticipant.setMicrophoneEnabled(true)
                 if (video) {
                     room.localParticipant.setCameraEnabled(true)
+                    _uiState.update { it.copy(cameraEnabled = true) }
                     refreshLocalVideoTrack()
                 }
                 enterAudioMode()
@@ -140,6 +141,19 @@ class CallViewModel(
         val next = !_uiState.value.speakerOn
         _uiState.update { it.copy(speakerOn = next) }
         runCatching { audioManager.isSpeakerphoneOn = next }
+    }
+
+    /** 语音通话中开/关摄像头（开启后 Agent 可通过视频帧看到画面）。 */
+    fun toggleCamera() {
+        val next = !_uiState.value.cameraEnabled
+        _uiState.update { it.copy(cameraEnabled = next) }
+        viewModelScope.launch {
+            runCatching { room.localParticipant.setCameraEnabled(next) }
+                .onSuccess {
+                    if (next) refreshLocalVideoTrack() else _localVideoTrack.value = null
+                }
+                .onFailure { _events.tryEmit("摄像头切换失败") }
+        }
     }
 
     /** 翻转摄像头并返回翻转后的状态（true = 前置 / 镜像）。 */
@@ -218,6 +232,7 @@ class CallViewModel(
         val muted: Boolean = false,
         val speakerOn: Boolean = false,
         val cameraFlipped: Boolean = false,
+        val cameraEnabled: Boolean = false,
         val error: String? = null,
     )
 

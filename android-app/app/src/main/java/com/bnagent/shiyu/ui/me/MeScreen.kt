@@ -19,9 +19,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,6 +54,9 @@ import com.bnagent.shiyu.ui.components.SheetTitle
 import com.bnagent.shiyu.ui.components.ShiYuIcons
 import com.bnagent.shiyu.ui.components.ShiYuSheet
 import com.bnagent.shiyu.ui.components.ShiYuSwitch
+import com.bnagent.shiyu.ui.components.ShiYuConfirmDialog
+import com.bnagent.shiyu.ui.settings.SettingsFieldLabel
+import com.bnagent.shiyu.ui.settings.SettingsTextField
 import com.bnagent.shiyu.ui.theme.ShiYuTheme
 import com.bnagent.shiyu.ui.theme.ShiYuType
 
@@ -72,11 +78,16 @@ fun MeScreen(
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val notificationsEnabled by viewModel.notificationsEnabled.collectAsStateWithLifecycle()
     val serverSettings by viewModel.serverSettings.collectAsStateWithLifecycle()
+    val cacheBytes by viewModel.cacheBytes.collectAsStateWithLifecycle()
     val settings = ShiYuTheme.settings
     val themeController = ShiYuTheme.controller
     val toast = LocalToast.current
     val colors = ShiYuTheme.colors
     var showAbout by remember { mutableStateOf(false) }
+    var showEditProfile by remember { mutableStateOf(false) }
+    var showClearCache by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { viewModel.refreshCacheSize() }
 
     Column(Modifier.fillMaxSize().background(colors.bg)) {
         LargeTitleBar(title = "我")
@@ -127,6 +138,23 @@ fun MeScreen(
 
             MenuGroup {
                 MenuRow(
+                    icon = ShiYuIcons.Me,
+                    title = "编辑资料",
+                    value = profile.name,
+                    onClick = { showEditProfile = true },
+                    divider = true,
+                )
+                MenuRow(
+                    icon = ShiYuIcons.File,
+                    title = "清理缓存",
+                    value = formatBytes(cacheBytes),
+                    onClick = { showClearCache = true },
+                    divider = false,
+                )
+            }
+
+            MenuGroup {
+                MenuRow(
                     icon = ShiYuIcons.Lock,
                     title = "服务器设置",
                     value = serverSettings.baseUrl,
@@ -149,6 +177,38 @@ fun MeScreen(
     if (showAbout) {
         AboutSheet(onDismiss = { showAbout = false })
     }
+    if (showEditProfile) {
+        EditProfileSheet(
+            profile = profile,
+            onDismiss = { showEditProfile = false },
+            onSave = { name, signature, avatar ->
+                viewModel.updateProfile(name, signature, avatar)
+                showEditProfile = false
+                toast?.show("资料已更新")
+            },
+        )
+    }
+    if (showClearCache) {
+        ShiYuConfirmDialog(
+            title = "清理缓存？",
+            message = "将删除本地语音文件（${formatBytes(cacheBytes)}），不影响聊天记录与后端数据。",
+            confirmLabel = "清理",
+            onConfirm = {
+                viewModel.clearCache()
+                showClearCache = false
+                toast?.show("缓存已清理")
+            },
+            onDismiss = { showClearCache = false },
+        )
+    }
+}
+
+/** 字节数 → `0 B` / `12.3 KB` / `4.5 MB`。 */
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0 -> "0 B"
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> String.format(java.util.Locale.ROOT, "%.1f KB", bytes / 1024.0)
+    else -> String.format(java.util.Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0))
 }
 
 // ─── 资料卡 ─────────────────────────────────────────────────────────
@@ -313,6 +373,77 @@ private val MenuValueStyle = TextStyle(
     lineHeight = 17.sp,
 )
 
+// ─── 编辑资料 sheet ──────────────────────────────────────────────────
+
+@Composable
+private fun EditProfileSheet(
+    profile: UserProfile,
+    onDismiss: () -> Unit,
+    onSave: (name: String, signature: String, avatar: String) -> Unit,
+) {
+    var name by remember(profile.name) { mutableStateOf(profile.name) }
+    var signature by remember(profile.signature) { mutableStateOf(profile.signature) }
+    var avatar by remember(profile.avatar) { mutableStateOf(profile.avatar) }
+    val colors = ShiYuTheme.colors
+    val choices = listOf("avatar_me", "avatar_lin", "avatar_chen", "avatar_zhao")
+
+    ShiYuSheet(onDismissRequest = onDismiss) {
+        SheetHandle()
+        SheetTitle("编辑资料")
+        SheetDescription("昵称、签名与头像保存在本地，聊天和通话都会使用。")
+        SettingsFieldLabel("昵称")
+        Spacer(Modifier.height(6.dp))
+        SettingsTextField(value = name, onValueChange = { name = it }, placeholder = "昵称")
+        Spacer(Modifier.height(12.dp))
+        SettingsFieldLabel("签名")
+        Spacer(Modifier.height(6.dp))
+        SettingsTextField(value = signature, onValueChange = { signature = it }, placeholder = "写一句签名")
+        Spacer(Modifier.height(14.dp))
+        SettingsFieldLabel("头像")
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            choices.forEach { asset ->
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .clickable { avatar = asset }
+                        .then(
+                            if (avatar == asset) {
+                                Modifier.border(2.dp, colors.accent, androidx.compose.foundation.shape.CircleShape)
+                            } else {
+                                Modifier.border(1.dp, colors.line, androidx.compose.foundation.shape.CircleShape)
+                            },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Avatar(
+                        name = name,
+                        size = 50.dp,
+                        model = StockMedia.drawableFor(asset),
+                        circle = true,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SheetCancelButton(
+                onClick = onDismiss,
+                text = "取消",
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = { onSave(name, signature, avatar) },
+                modifier = Modifier.weight(1f).height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+            ) {
+                Text("保存", color = colors.accentText)
+            }
+        }
+    }
+}
+
 // ─── 关于拾语 sheet（设计规格 7） ──────────────────────────────────────
 
 @Composable
@@ -321,12 +452,12 @@ private fun AboutSheet(onDismiss: () -> Unit) {
         SheetHandle()
         SheetTitle("关于拾语")
         SheetDescription(
-            "拾语 v2.4.0 · 即时通讯演示原型。消息、通话与已读状态均为本地模拟，" +
-                "不连接真实服务器，也不会离开当前页面。",
+            "拾语 v2.4.0 · 即时通讯客户端。消息、语音与通话连接本机 BN_agent 后端，" +
+                "语音识别与合成使用本地 SenseVoice / GSV-TTS。",
         )
         AboutInfoRow(label = "版本", value = "2.4.0（2026.11）")
         AboutInfoRow(label = "支持", value = "文字 · 图片 · 文件 · 语音 · 通话")
-        AboutInfoRow(label = "数据", value = "仅保存在当前页面")
+        AboutInfoRow(label = "数据", value = "本地缓存 + 本机后端")
         SheetCancelButton(onClick = onDismiss, text = "好的")
     }
 }

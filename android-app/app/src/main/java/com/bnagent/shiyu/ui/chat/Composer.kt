@@ -82,6 +82,8 @@ fun Composer(
     onCancelRecording: () -> Unit,
     onSendRecording: () -> Unit,
     modifier: Modifier = Modifier,
+    /** false 时由父布局整体上推（聊天页停在最新消息的键盘模式）。 */
+    applyImePadding: Boolean = true,
 ) {
     val colors = ShiYuTheme.colors
     Column(
@@ -89,7 +91,7 @@ fun Composer(
             .fillMaxWidth()
             .background(colors.surface)
             .navigationBarsPadding()
-            .imePadding(),
+            .then(if (applyImePadding) Modifier.imePadding() else Modifier),
     ) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(colors.line))
         if (recording) {

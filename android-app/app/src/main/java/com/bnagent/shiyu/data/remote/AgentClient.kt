@@ -92,6 +92,28 @@ class AgentClient(
         )
     }
 
+    /** 通讯录真实 Agent 列表（`GET /api/agents`）。 */
+    suspend fun agents(settings: ServerSettings): List<AgentInfo> {
+        val request = buildRequest(settings = settings, path = PATH_AGENTS)
+        val body = execute(request, timeoutSeconds = 20)
+        val dto = try {
+            json.decodeFromString(AgentListResponseDto.serializer(), body)
+        } catch (e: SerializationException) {
+            throw AgentException.InvalidResponse("/api/agents 响应解析失败：${e.message}", e)
+        }
+        return dto.agents.map {
+            AgentInfo(
+                id = it.id,
+                name = it.name,
+                handle = it.handle,
+                role = it.role,
+                sign = it.sign,
+                avatar = it.avatar,
+                online = it.online,
+            )
+        }
+    }
+
     /**
      * 语音消息：上传录音，后端走本地 ASR → LLM → 本地 TTS。
      * 返回转写文本、文字回复，以及可选的回语音频（WAV）。
@@ -143,8 +165,15 @@ class AgentClient(
         settings: ServerSettings,
         userId: String,
         mediaType: String,
+        peerId: String,
+        history: List<CallHistoryMessage> = emptyList(),
     ): CallSession {
-        val payload = CallStartRequestDto(userID = userId, mediaType = mediaType)
+        val payload = CallStartRequestDto(
+            userID = userId,
+            mediaType = mediaType,
+            peerId = peerId,
+            history = history.map { CallHistoryMessageDto(it.role, it.content) },
+        )
         val request = buildRequest(
             settings = settings,
             path = PATH_CALL_START,
@@ -278,11 +307,23 @@ class AgentClient(
         private const val PATH_CHAT = "/api/chat"
         private const val PATH_VOICE = "/api/chat/voice"
         private const val PATH_HEALTH = "/api/health"
+        private const val PATH_AGENTS = "/api/agents"
         private const val PATH_CALL_START = "/api/call/start"
         private const val PATH_CALL_END = "/api/call/end"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+/** 可直接对话的 Agent（通讯录数据源）。 */
+data class AgentInfo(
+    val id: String,
+    val name: String,
+    val handle: String,
+    val role: String,
+    val sign: String,
+    val avatar: String,
+    val online: Boolean,
+)
 
 /** 后端回复。 */
 data class ChatReply(
@@ -319,6 +360,12 @@ data class VoiceChatReply(
         return result
     }
 }
+
+/** 通话前聊天记录（用于保持通话与文字聊天的主体一致性）。 */
+data class CallHistoryMessage(
+    val role: String,
+    val content: String,
+)
 
 /** LiveKit 通话会话（/api/call/start 返回）。 */
 data class CallSession(
@@ -385,6 +432,23 @@ internal data class HealthResponseDto(
 )
 
 @Serializable
+internal data class AgentListResponseDto(
+    val agents: List<AgentDto> = emptyList(),
+)
+
+@Serializable
+internal data class AgentDto(
+    val id: String = "",
+    val name: String = "",
+    val handle: String = "",
+    val role: String = "",
+    val sign: String = "",
+    val avatar: String = "",
+    val online: Boolean = false,
+    val kind: String = "agent",
+)
+
+@Serializable
 internal data class VoiceChatRequestDto(
     @SerialName("audio_base64") val audioBase64: String,
     val mime: String,
@@ -408,6 +472,14 @@ internal data class CallStartRequestDto(
     // 后端字段名就是 userID（大写 ID）
     @SerialName("userID") val userID: String,
     val mediaType: String,
+    @SerialName("peer_id") val peerId: String = "",
+    val history: List<CallHistoryMessageDto> = emptyList(),
+)
+
+@Serializable
+internal data class CallHistoryMessageDto(
+    val role: String,
+    val content: String,
 )
 
 @Serializable
