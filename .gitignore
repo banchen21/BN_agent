@@ -48,6 +48,11 @@ temp_images/
 persona.md
 persona.md.bak
 data/
+# Android 源码里的 data 包不是运行时数据，上面的 data/ 会误伤，需入库
+!android-app/app/src/main/java/com/bnagent/shiyu/data/
+!android-app/app/src/main/java/com/bnagent/shiyu/data/**
+!android-app/app/src/test/java/com/bnagent/shiyu/data/
+!android-app/app/src/test/java/com/bnagent/shiyu/data/**
 weixin-ilink-sdk-rust/
 
 # ─── Android（android-app） ────────────────────────────────

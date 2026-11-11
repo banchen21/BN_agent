@@ -1,8 +1,16 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+}
+
+// 本机调试用：从 local.properties（不入库）读取后端 API Key，仅注入 debug 包。
+val localProps = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
 }
 
 android {
@@ -17,9 +25,17 @@ android {
         versionName = "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "DEFAULT_API_KEY", "\"\"")
     }
 
     buildTypes {
+        debug {
+            buildConfigField(
+                "String",
+                "DEFAULT_API_KEY",
+                "\"${localProps.getProperty("shiyu.apiKey", "")}\"",
+            )
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

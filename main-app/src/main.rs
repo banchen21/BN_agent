@@ -360,9 +360,21 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             peer_id: peer_id.clone(),
         })
         .await;
-    let contexts: Vec<String> = state.snapshots.lock().clone();
+    let mut contexts: Vec<String> = state.snapshots.lock().clone();
+    if body.source.as_deref() == Some("android") {
+        // 聊天客户端不执行工具，也不应看到工具/系统指令语法。
+        contexts.push(
+            "【聊天客户端】请直接以自然语言回复用户；不要输出任何工具调用、XML/JSON 标签、\
+             系统指令或定时任务语法。"
+                .to_string(),
+        );
+    }
 
-    let tools: Vec<serde_json::Value> = {
+    // Android 客户端是纯聊天界面，不执行工具调用；暴露工具会让模型返回
+    // 空文本 + tool_calls（例如 proactive_schedule_once），客户端只能标记失败。
+    let tools: Vec<serde_json::Value> = if body.source.as_deref() == Some("android") {
+        Vec::new()
+    } else {
         let reg = state.tool_registry.lock();
         reg.all_defs().iter()
             .filter(|d| !d.internal)

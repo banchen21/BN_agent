@@ -1,5 +1,6 @@
 package com.bnagent.shiyu.domain.model
 
+import com.bnagent.shiyu.BuildConfig
 import kotlinx.serialization.Serializable
 
 /**
@@ -14,7 +15,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ServerSettings(
     val baseUrl: String = DEFAULT_BASE_URL,
-    val apiKey: String = "",
+    /** debug 包可由 local.properties 的 `shiyu.apiKey` 预置；release 恒为空。 */
+    val apiKey: String = BuildConfig.DEFAULT_API_KEY,
 ) {
     /** 去掉首尾空白与结尾斜杠，供拼 URL 使用。 */
     val normalizedBaseUrl: String
