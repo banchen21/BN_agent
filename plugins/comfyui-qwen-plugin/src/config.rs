@@ -19,6 +19,8 @@ pub const DEFAULT_HEIGHT: u32 = 1024;
 pub const DEFAULT_STEPS: u32 = 25;
 pub const DEFAULT_CFG: f64 = 1.0;
 pub const DEFAULT_PUBLISH_EVENT: bool = true;
+/// 8GB 显存下 8 张参考图会触发驱动 TDR；默认按安全值 4 张，配置上限保留 1–16。
+pub const DEFAULT_MAX_REFERENCE_IMAGES: u32 = 4;
 
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 3600;
@@ -39,6 +41,8 @@ pub struct QwenConfig {
     pub default_negative: String,
     pub output_dir: String,
     pub publish_event: bool,
+    /// 单次编辑允许的参考图数量上限（1–16，默认 4）。
+    pub max_reference_images: u32,
 }
 
 impl Default for QwenConfig {
@@ -54,6 +58,7 @@ impl Default for QwenConfig {
             default_negative: String::new(),
             output_dir: String::new(),
             publish_event: DEFAULT_PUBLISH_EVENT,
+            max_reference_images: DEFAULT_MAX_REFERENCE_IMAGES,
         }
     }
 }
@@ -93,8 +98,25 @@ impl QwenConfig {
             if let Some(v) = map.get("publish_event").and_then(Value::as_bool) {
                 cfg.publish_event = v;
             }
+            // 不做钳制：越界值保留原样，由 `validate()` 明确拒绝。
+            if let Some(v) = map.get("max_reference_images").and_then(Value::as_u64) {
+                cfg.max_reference_images = v.min(u64::from(u32::MAX)) as u32;
+            }
         }
         cfg
+    }
+
+    /// 严格校验配置。宿主 schema 校验之外，插件自身也拒绝越界值，
+    /// 避免手写配置文件绕过 WebUI 后带病启动。
+    pub fn validate(&self) -> Result<(), String> {
+        let max_allowed = super::workflow::MAX_REFERENCE_IMAGES as u32;
+        if !(1..=max_allowed).contains(&self.max_reference_images) {
+            return Err(format!(
+                "max_reference_images 必须在 1~{} 之间（当前 {}）",
+                max_allowed, self.max_reference_images
+            ));
+        }
+        Ok(())
     }
 
     /// 宿主加载插件时调用。`host` 为 `ctx.config`（旧宿主没有该字段时传 `None`）。
@@ -176,6 +198,13 @@ impl QwenConfig {
                     matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
             }
         }
+        if !is_explicit("max_reference_images") {
+            if let Some(v) = env_non_empty("COMFYUI_QWEN_MAX_REFERENCES")
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                cfg.max_reference_images = v.min(u64::from(u32::MAX)) as u32;
+            }
+        }
 
         if cfg.server_url.trim().is_empty() {
             cfg.server_url = DEFAULT_SERVER_URL.to_string();
@@ -231,6 +260,8 @@ mod tests {
         assert_eq!(cfg.default_cfg, 1.0);
         assert!(cfg.default_negative.is_empty());
         assert!(cfg.publish_event);
+        assert_eq!(cfg.max_reference_images, 4);
+        cfg.validate().expect("defaults valid");
     }
 
     #[test]
@@ -245,7 +276,8 @@ mod tests {
             "default_cfg": 99.0,
             "default_negative": "blur",
             "output_dir": " D:/out ",
-            "publish_event": false
+            "publish_event": false,
+            "max_reference_images": 8
         }));
         assert_eq!(cfg.server_url, "http://10.0.0.2:8188");
         assert_eq!(cfg.timeout_secs, 3600);
@@ -257,6 +289,23 @@ mod tests {
         assert_eq!(cfg.default_negative, "blur");
         assert_eq!(cfg.output_dir, "D:/out");
         assert!(!cfg.publish_event);
+        assert_eq!(cfg.max_reference_images, 8);
+        cfg.validate().expect("8 is within 1..=16");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_max_reference_images() {
+        for value in [0u64, 17, 100] {
+            let cfg = QwenConfig::from_json(&json!({ "max_reference_images": value }));
+            let err = cfg.validate().expect_err("must reject");
+            assert!(err.contains("max_reference_images"), "{err}");
+            assert!(err.contains("1~16"), "{err}");
+        }
+        for value in [1u64, 4, 8, 16] {
+            let cfg = QwenConfig::from_json(&json!({ "max_reference_images": value }));
+            cfg.validate().expect("within range");
+            assert_eq!(cfg.max_reference_images, value as u32);
+        }
     }
 
     #[test]
@@ -264,7 +313,8 @@ mod tests {
         let cfg = QwenConfig::from_json(&json!({
             "server_url": 123,
             "timeout_secs": "abc",
-            "default_steps": 7.5
+            "default_steps": 7.5,
+            "max_reference_images": "four"
         }));
         assert_eq!(cfg, QwenConfig::default());
     }

@@ -79,8 +79,9 @@
 > `call-agent/README.md`；人设/记忆数据放在 `data/yueyue/`（运行时数据，不入库）。
 >
 > **Qwen 参考图上限（本机实测）**：RTX 4070 Laptop 8GB 在 512²/8 步 LoRA 下
-> 4 张参考图安全，8 张会触发 GPU TDR（驱动重置）。插件保留 1–16 张能力，
-> 显存 ≥12GB 再放开；TDR 后需整机重启才能恢复 ComfyUI。
+> 4 张参考图安全，8 张会触发 GPU TDR（驱动重置）。插件通过
+> `max_reference_images`（默认 4，范围 1–16）在请求 ComfyUI 前强制拒绝超限参考图；
+> 显存 ≥12GB 可在 WebUI 配置里调高；TDR 后需整机重启才能恢复 ComfyUI。
 
 ## 快速开始
 

@@ -74,6 +74,14 @@
       "default": true,
       "description": "生成完成后是否发布 image.gen.complete 事件（供 IM / WebUI 订阅）",
       "secret": false
+    },
+    "max_reference_images": {
+      "type": "int",
+      "default": 4,
+      "min": 1,
+      "max": 16,
+      "description": "单次编辑允许的参考图数量上限（1–16，默认 4）；超限直接拒绝且不调用 ComfyUI。8GB 显存建议不超过 4，调高可能触发驱动 TDR",
+      "secret": false
     }
   }
 }

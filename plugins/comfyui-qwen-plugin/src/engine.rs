@@ -71,6 +71,7 @@ pub struct QwenEngine {
 
 impl QwenEngine {
     pub fn new(config: QwenConfig) -> Result<Self, String> {
+        config.validate()?;
         let (workflow_source, text) = load_workflow_text(&config)?;
         let template = WorkflowTemplate::parse(
             &workflow_source,
@@ -95,6 +96,10 @@ impl QwenEngine {
         self.config.publish_event
     }
 
+    pub fn max_reference_images(&self) -> u32 {
+        self.config.max_reference_images
+    }
+
     pub async fn generate(
         &self,
         mode: Mode,
@@ -114,6 +119,13 @@ impl QwenEngine {
                 return Err("编辑需要至少一张参考图片".to_string());
             }
             _ => {}
+        }
+        if req.reference_images.len() as u32 > self.config.max_reference_images {
+            return Err(format!(
+                "参考图 {} 张超过本机上限 {} 张（max_reference_images，可在插件配置中调整）",
+                req.reference_images.len(),
+                self.config.max_reference_images
+            ));
         }
         if req.reference_images.len() > MAX_REFERENCE_IMAGES {
             return Err(format!(

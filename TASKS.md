@@ -186,7 +186,7 @@ Token 用量    ██████████ 完成
 ## 已知问题
 
 - **ComfyUI 依赖外部启动** — 生图需要独立运行 ComfyUI 服务
-- **8GB 显存参考图上限 4 张** — RTX 4070 Laptop 在 512²/8 步 LoRA 下，4 张参考图正常（实测 329s），8 张会触发 GPU TDR（`nvlddmkm` 153 / Display 4101），ComfyUI 崩溃且需整机重启恢复；插件保留 1–16 张能力，显存 ≥12GB 再放开
+- **8GB 显存参考图上限 4 张** — RTX 4070 Laptop 在 512²/8 步 LoRA 下，4 张参考图正常（实测 329s），8 张会触发 GPU TDR（`nvlddmkm` 153 / Display 4101），ComfyUI 崩溃且需整机重启恢复；插件已用 `max_reference_images`（默认 4，1–16 可配）在请求前强制拒绝超限，显存 ≥12GB 可在 WebUI 调高
 - **ComfyUI 8188 崩溃后需重启整机** — TDR 后新进程加载 `QwenImage21TEModel_` 会持续 access violation（0xC0000005），进程重启/watchdog 无效，只有整机重启能恢复
 
 ## 已解决的问题

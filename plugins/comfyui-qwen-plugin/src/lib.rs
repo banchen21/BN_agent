@@ -38,6 +38,8 @@ struct SharedState {
     event_bus: Addr<EventBus>,
     recent_images: Arc<Mutex<VecDeque<CachedImage>>>,
     publish_event: bool,
+    /// 单次编辑允许的参考图上限（来自 `max_reference_images` 配置）。
+    max_reference_images: u32,
     logger: PluginLogger,
 }
 
@@ -167,7 +169,7 @@ impl ToolExecutor for EditImageTool {
         static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
         DEF.get_or_init(|| ToolDef {
             name: TOOL_EDIT.into(),
-            description: "参考图编辑、合成及参考图驱动的生成。需要修改已有图、保留主体或参考多图时使用。参考图按给定顺序对应 <image1>、<image2> 等；可用 image_paths 指定本地图片路径，或用 image_indices 选择最近收到的图片（1 = 最近一张）；都省略时使用最近收到的一张。没有可用图片时请用户提供，不要编造输入，也不要改成纯文生图。最多 16 张参考图。".into(),
+            description: "参考图编辑、合成及参考图驱动的生成。需要修改已有图、保留主体或参考多图时使用。参考图按给定顺序对应 <image1>、<image2> 等；可用 image_paths 指定本地图片路径，或用 image_indices 选择最近收到的图片（1 = 最近一张）；都省略时使用最近收到的一张。没有可用图片时请用户提供，不要编造输入，也不要改成纯文生图。参数最多 16 张；实际受 max_reference_images 配置限制（默认 4 张），超限会直接拒绝且不调用 ComfyUI。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -229,7 +231,11 @@ impl ToolExecutor for EditImageTool {
             Err(e) => return ToolResult::err(&format!("参数解析失败：{}", e)),
         };
 
-        let reference_images = match collect_edit_images(&self.state.recent_images, &parsed) {
+        let reference_images = match collect_edit_images(
+            &self.state.recent_images,
+            &parsed,
+            self.state.max_reference_images,
+        ) {
             Ok(images) => images,
             Err(e) => return ToolResult::err(&e),
         };
@@ -249,10 +255,23 @@ impl ToolExecutor for EditImageTool {
 
 /// 按 AstrBot 的语义收集参考图：序号图在前、文件图在后；
 /// 三者都为空时回退到最近收到的一张图片。
+///
+/// 上限校验在任何文件读取/解码/ComfyUI 请求之前完成，超限直接拒绝。
 fn collect_edit_images(
     recent_images: &Mutex<VecDeque<CachedImage>>,
     args: &EditArgs,
+    max_reference_images: u32,
 ) -> Result<Vec<Vec<u8>>, String> {
+    let declared_count = args
+        .image_indices
+        .as_ref()
+        .map_or(0, Vec::len)
+        + args.image_paths.as_ref().map_or(0, Vec::len)
+        + args.image_base64s.as_ref().map_or(0, Vec::len);
+    if declared_count > 0 {
+        ensure_reference_limit(declared_count, max_reference_images)?;
+    }
+
     let mut images: Vec<Vec<u8>> = Vec::new();
 
     if let Some(indices) = args.image_indices.as_ref().filter(|list| !list.is_empty()) {
@@ -299,14 +318,24 @@ fn collect_edit_images(
             "编辑需要至少一张参考图片：请在消息中附图，或提供 image_paths / image_base64s".into(),
         );
     }
-    if images.len() > workflow::MAX_REFERENCE_IMAGES {
+    ensure_reference_limit(images.len(), max_reference_images)?;
+    Ok(images)
+}
+
+fn ensure_reference_limit(count: usize, max_reference_images: u32) -> Result<(), String> {
+    if count > max_reference_images as usize {
         return Err(format!(
-            "最多支持 {} 张参考图（收到 {} 张）",
-            workflow::MAX_REFERENCE_IMAGES,
-            images.len()
+            "参考图 {} 张超过本机上限 {} 张（max_reference_images，可在插件配置中调整）",
+            count, max_reference_images
         ));
     }
-    Ok(images)
+    if count > workflow::MAX_REFERENCE_IMAGES {
+        return Err(format!(
+            "最多支持 {} 张参考图（收到 {} 张）",
+            workflow::MAX_REFERENCE_IMAGES, count
+        ));
+    }
+    Ok(())
 }
 
 fn run_generation(state: &SharedState, mode: Mode, request: QwenRequest) -> ToolResult {
@@ -465,6 +494,7 @@ impl Plugin for ComfyQwenPlugin {
         let state = Arc::new(SharedState {
             runtime,
             publish_event: engine.publish_event(),
+            max_reference_images: engine.max_reference_images(),
             engine: Arc::new(engine),
             event_bus: ctx.event_bus.clone(),
             recent_images: self.recent_images.clone(),
@@ -556,10 +586,15 @@ mod tests {
             "default_negative",
             "output_dir",
             "publish_event",
+            "max_reference_images",
         ] {
             assert!(schema.fields.contains_key(name), "missing field {name}");
         }
         assert!(schema.fields.values().all(|field| !field.secret));
+        let limit = &schema.fields["max_reference_images"];
+        assert_eq!(limit.default, json!(4));
+        assert_eq!(limit.min, Some(1.0));
+        assert_eq!(limit.max, Some(16.0));
     }
 
     #[test]
@@ -611,7 +646,7 @@ mod tests {
     #[test]
     fn collect_edit_images_reports_missing_images() {
         let cache = Mutex::new(VecDeque::new());
-        let err = collect_edit_images(&cache, &edit_args()).expect_err("no images");
+        let err = collect_edit_images(&cache, &edit_args(), 4).expect_err("no images");
         assert!(err.contains("至少一张参考图片"), "{err}");
     }
 
@@ -631,12 +666,12 @@ mod tests {
             received_ms: 0,
         }]));
 
-        let images = collect_edit_images(&cache, &edit_args()).expect("fallback");
+        let images = collect_edit_images(&cache, &edit_args(), 4).expect("fallback");
         assert_eq!(images, vec![png]);
 
         let mut args = edit_args();
         args.image_indices = Some(vec![2]);
-        let err = collect_edit_images(&cache, &args).expect_err("index out of range");
+        let err = collect_edit_images(&cache, &args, 4).expect_err("index out of range");
         assert!(err.contains("序号无效"), "{err}");
     }
 
@@ -662,8 +697,100 @@ mod tests {
 
         let mut args = edit_args();
         args.image_indices = Some(vec![2, 1]);
-        let images = collect_edit_images(&cache, &args).expect("indices");
+        let images = collect_edit_images(&cache, &args, 4).expect("indices");
         assert_eq!(images, vec![older, newest], "index 2 在前，index 1 在后");
+    }
+
+    // ── 参考图上限（max_reference_images，默认 4） ───────────────
+
+    fn base64_image(tag: &str) -> String {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(tag.as_bytes());
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+    }
+
+    #[test]
+    fn default_max_reference_images_is_four() {
+        assert_eq!(QwenConfig::default().max_reference_images, 4);
+    }
+
+    #[test]
+    fn collect_edit_images_allows_configured_eight() {
+        let cache = Mutex::new(VecDeque::new());
+        let mut args = edit_args();
+        args.image_base64s = Some((0..8).map(|i| base64_image(&format!("u{i}"))).collect());
+        let images = collect_edit_images(&cache, &args, 8).expect("8 allowed");
+        assert_eq!(images.len(), 8);
+    }
+
+    #[test]
+    fn collect_edit_images_rejects_over_limit_before_reading_files() {
+        let cache = Mutex::new(VecDeque::new());
+        let mut args = edit_args();
+        // 故意使用不存在的路径：如果先读文件会报「读取参考图失败」，这里应优先报上限。
+        args.image_paths = Some(
+            (0..5)
+                .map(|i| format!("definitely-missing-{i}.png"))
+                .collect(),
+        );
+        let err = collect_edit_images(&cache, &args, 4).expect_err("5 > 4");
+        assert!(err.contains("参考图 5 张超过本机上限 4 张"), "{err}");
+        assert!(err.contains("max_reference_images"), "{err}");
+        assert!(!err.contains("读取参考图失败"), "{err}");
+    }
+
+    #[test]
+    fn collect_edit_images_counts_all_sources_together() {
+        let cache = Mutex::new(VecDeque::new());
+        let mut args = edit_args();
+        args.image_indices = Some(vec![1, 1]); // 序号会在索引检查时失败，但上限应优先
+        args.image_paths = Some(vec!["a.png".into(), "b.png".into()]);
+        args.image_base64s = Some(vec![base64_image("c")]);
+        let err = collect_edit_images(&cache, &args, 4).expect_err("2+2+1=5 > 4");
+        assert!(err.contains("参考图 5 张超过本机上限 4 张"), "{err}");
+    }
+
+    #[test]
+    fn edit_tool_rejects_over_limit_without_network_call() {
+        // 在普通测试上下文构造（System::block_on 仅用于创建 EventBus），
+        // 避免在 async 上下文中 drop tokio Runtime。
+        let system = actix_rt::System::new();
+        let (state, tool, args) = system.block_on(async {
+            // server 指向不可达端口：若发生任何 ComfyUI 请求，错误会是连接失败而不是上限提示。
+            let config = QwenConfig {
+                server_url: "http://127.0.0.1:1".into(),
+                max_reference_images: 4,
+                ..Default::default()
+            };
+            let engine = QwenEngine::new(config).expect("engine builds without connecting");
+            let event_bus = EventBus::new().start();
+            let state = Arc::new(SharedState {
+                runtime: Runtime::new().expect("runtime"),
+                engine: Arc::new(engine),
+                event_bus: event_bus.clone(),
+                recent_images: Arc::new(Mutex::new(VecDeque::new())),
+                publish_event: false,
+                max_reference_images: 4,
+                logger: PluginLogger::new(event_bus, PLUGIN_NAME.to_string()),
+            });
+            let tool = EditImageTool {
+                state: state.clone(),
+            };
+            let args = json!({
+                "prompt": "把背景改成白色",
+                "image_base64s": (0..5).map(|i| base64_image(&format!("n{i}"))).collect::<Vec<_>>()
+            });
+            (state, tool, args)
+        });
+
+        let result = tool.execute(&args);
+        assert!(!result.success);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("参考图 5 张超过本机上限 4 张"), "{error}");
+        assert!(!error.contains("无法连接"), "must fail before network: {error}");
+
+        drop(tool);
+        drop(state);
     }
 
     #[test]
@@ -686,7 +813,8 @@ mod tests {
             "default_cfg": 1.0,
             "default_negative": "",
             "output_dir": "",
-            "publish_event": true
+            "publish_event": true,
+            "max_reference_images": 4
         })
     }
 
@@ -749,5 +877,25 @@ mod tests {
         assert!(message.contains("缺少绑定"), "{message}");
         assert!(plugin.state.is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[actix_rt::test]
+    async fn start_returns_err_when_max_reference_images_out_of_range() {
+        for value in [0, 17] {
+            let mut plugin = ComfyQwenPlugin::new();
+            let mut ctx = PluginContext::for_test(PLUGIN_NAME);
+            ctx.config = start_config("");
+            ctx.config["max_reference_images"] = json!(value);
+            let registry = ctx.tool_registry.clone().expect("test registry");
+
+            let error = plugin
+                .start(ctx)
+                .expect_err("invalid max_reference_images must fail start");
+            let message = error.to_string();
+            assert!(message.contains("max_reference_images"), "{message}");
+            assert!(message.contains("1~16"), "{message}");
+            assert!(plugin.state.is_none());
+            assert!(registry.lock().all_defs().is_empty());
+        }
     }
 }
