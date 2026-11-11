@@ -8,6 +8,7 @@ import com.bnagent.shiyu.data.remote.AgentClient
 import com.bnagent.shiyu.data.remote.AgentException
 import com.bnagent.shiyu.data.remote.CallHistoryMessage
 import com.bnagent.shiyu.data.remote.CallSession
+import com.bnagent.shiyu.data.remote.HistoryEntry
 import com.bnagent.shiyu.domain.model.Contact
 import com.bnagent.shiyu.domain.model.Conversation
 import com.bnagent.shiyu.domain.model.Message
@@ -71,7 +72,7 @@ class ConversationRepository(
     fun messages(conversationId: String): Flow<List<Message>> =
         store.state.map { it.messages[conversationId].orEmpty() }.distinctUntilChanged()
 
-    /** 进入聊天：未读清零 + order 递增（设计规格 5.1）。 */
+    /** 进入聊天：未读清零 + order 递增，并把后端历史（含通话回写）合并到本地。 */
     suspend fun openConversation(id: String) {
         store.update { state ->
             if (state.conversation(id) == null) return@update state
@@ -83,6 +84,22 @@ class ConversationRepository(
                 },
             )
         }
+        syncBackendHistory(id)
+    }
+
+    /**
+     * 合并后端聊天历史（`GET /api/chat/history`）。按「方向 + 文本」去重，
+     * 把通话回写的 ASR/回复文本补齐到本地会话；网络失败静默保留本地状态。
+     */
+    suspend fun syncBackendHistory(conversationId: String) {
+        val server = settingsRepository.serverSettings.first()
+        val peerId = AgentClient.peerIdFor(conversationId)
+        val entries = runCatching {
+            agentClient.history(server, peerId, limit = 200)
+        }.getOrNull().orEmpty()
+        if (entries.isEmpty()) return
+        val time = now().format(TIME_FORMAT)
+        store.update { it.mergeBackendHistory(conversationId, entries, time) }
     }
 
     /**
@@ -298,6 +315,8 @@ class ConversationRepository(
 
     /** 创建 LiveKit 通话房间并取 token；把当前会话的近期聊天记录一起带给 Agent。 */
     suspend fun startCall(conversationId: String, mediaType: String): CallSession {
+        // 先同步后端历史，确保上一通电话的内容也能带入本次通话。
+        syncBackendHistory(conversationId)
         val server = settingsRepository.serverSettings.first()
         val history = store.state.first().messages[conversationId].orEmpty()
             .mapNotNull { message ->
@@ -439,4 +458,60 @@ private fun ChatState.setVoiceTranscript(
         }
     }
     return copy(messages = messages + (conversationId to updated))
+}
+
+/**
+ * 合并后端历史：按「方向 + 文本」去重后追加缺失条目。
+ * 通话回写的 ASR 文本会以我方/对方文字气泡出现在会话里。
+ */
+private fun ChatState.mergeBackendHistory(
+    conversationId: String,
+    entries: List<HistoryEntry>,
+    timeLabel: String,
+): ChatState {
+    val conv = conversation(conversationId) ?: return this
+    val existing = messages[conversationId].orEmpty()
+    val seen = mutableSetOf<String>()
+    existing.forEach { message ->
+        when (message) {
+            is Message.Text -> seen.add("${message.sender.name}|${message.content.trim()}")
+            is Message.Voice -> message.transcript
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { seen.add("${message.sender.name}|$it") }
+            else -> Unit
+        }
+    }
+    val appended = entries.mapNotNull { entry ->
+        val content = entry.content.trim()
+        if (content.isEmpty()) return@mapNotNull null
+        val sender = if (entry.role == "user") MessageSender.ME else MessageSender.THEM
+        if (!seen.add("${sender.name}|$content")) return@mapNotNull null
+        Message.Text(
+            id = UUID.randomUUID().toString(),
+            sender = sender,
+            content = content,
+            time = timeLabel,
+            status = if (sender == MessageSender.ME) MessageStatus.READ else null,
+        )
+    }
+    if (appended.isEmpty()) return this
+    val nextSeq = orderSeq + 1
+    val last = appended.last()
+    return copy(
+        orderSeq = nextSeq,
+        messages = messages + (conversationId to (existing + appended)),
+        conversations = conversations.map {
+            if (it.id == conversationId) {
+                it.copy(
+                    preview = last.conversationPreview(conv.isGroup),
+                    timeLabel = timeLabel,
+                    order = nextSeq,
+                    unread = 0,
+                )
+            } else {
+                it
+            }
+        },
+    )
 }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.Callback
@@ -158,6 +159,24 @@ class AgentClient(
             durationSeconds = dto.durationSeconds.coerceAtLeast(1),
             ttsError = dto.ttsError,
         )
+    }
+
+    /** 拉取某会话的后端聊天历史（含通话回写的对话）。 */
+    suspend fun history(
+        settings: ServerSettings,
+        peerId: String,
+        limit: Int = 100,
+    ): List<HistoryEntry> {
+        val encoded = java.net.URLEncoder.encode(peerId, "UTF-8")
+        val path = "/api/chat/history?peer_id=$encoded&limit=$limit"
+        val request = buildRequest(settings = settings, path = path)
+        val body = execute(request, timeoutSeconds = 12)
+        val dto = try {
+            json.decodeFromString(ListSerializer(HistoryRecordDto.serializer()), body)
+        } catch (e: SerializationException) {
+            throw AgentException.InvalidResponse("/api/chat/history 响应解析失败：${e.message}", e)
+        }
+        return dto.map { HistoryEntry(role = it.role, content = it.content) }
     }
 
     /** 创建 LiveKit 房间并获取参与方 token（后端派发 yueyue agent）。 */
@@ -367,6 +386,12 @@ data class CallHistoryMessage(
     val content: String,
 )
 
+/** 后端聊天历史条目（role = user / assistant）。 */
+data class HistoryEntry(
+    val role: String,
+    val content: String,
+)
+
 /** LiveKit 通话会话（/api/call/start 返回）。 */
 data class CallSession(
     val url: String,
@@ -434,6 +459,13 @@ internal data class HealthResponseDto(
 @Serializable
 internal data class AgentListResponseDto(
     val agents: List<AgentDto> = emptyList(),
+)
+
+@Serializable
+internal data class HistoryRecordDto(
+    val role: String = "",
+    val content: String = "",
+    @SerialName("peer_id") val peerId: String? = null,
 )
 
 @Serializable
