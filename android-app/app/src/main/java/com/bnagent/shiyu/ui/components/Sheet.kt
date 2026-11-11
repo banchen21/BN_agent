@@ -1,5 +1,6 @@
 package com.bnagent.shiyu.ui.components
 
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -15,11 +16,15 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -78,9 +83,14 @@ fun ShiYuSheet(
             decorFitsSystemWindows = false,
         ),
     ) {
-        // 关闭系统默认 dim，使用设计稿遮罩色
+        // 关闭系统默认 dim，使用设计稿遮罩色；键盘弹出时让窗口按 IME 调整，供 imePadding 生效
         val dialogWindowProvider = LocalView.current.parent as? DialogWindowProvider
-        SideEffect { dialogWindowProvider?.window?.setDimAmount(0f) }
+        SideEffect {
+            dialogWindowProvider?.window?.setDimAmount(0f)
+            dialogWindowProvider?.window?.setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
+            )
+        }
 
         val colors = ShiYuTheme.colors
         val screenHeight = LocalConfiguration.current.screenHeightDp.dp
@@ -115,7 +125,8 @@ fun ShiYuSheet(
                         .heightIn(max = screenHeight * 0.78f)
                         .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                         .background(colors.surface)
-                        .navigationBarsPadding()
+                        // 底部安全区与键盘取并集：键盘弹出时整个面板抬到键盘上方
+                        .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
                         .verticalScroll(rememberScrollState())
                         .padding(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 16.dp),
                     content = content,
