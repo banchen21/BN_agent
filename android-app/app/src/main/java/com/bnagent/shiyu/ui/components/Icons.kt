@@ -19,11 +19,13 @@ import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
@@ -52,6 +54,7 @@ object ShiYuIcons {
     val Mic: ImageVector = Icons.Rounded.Mic
     val Speaker: ImageVector = Icons.Rounded.VolumeUp
     val Image: ImageVector = Icons.Rounded.Image
+    val Camera: ImageVector = Icons.Rounded.PhotoCamera
     val File: ImageVector = Icons.Rounded.Description
     val Download: ImageVector = Icons.Rounded.Download
     val Close: ImageVector = Icons.Rounded.Close

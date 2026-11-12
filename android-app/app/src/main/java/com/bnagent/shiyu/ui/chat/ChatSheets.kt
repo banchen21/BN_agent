@@ -48,11 +48,12 @@ import com.bnagent.shiyu.ui.theme.ShiYuTheme
  * 发送 sheet、选择文件 sheet、聊天设置 sheet、图片查看器。
  */
 
-/** 发送 sheet：图片 / 文件 / 语音三列。 */
+/** 发送 sheet：图片 / 拍照 / 文件 / 语音。 */
 @Composable
 fun AttachSheet(
     onDismiss: () -> Unit,
     onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
     onPickFile: () -> Unit,
     onRecordVoice: () -> Unit,
 ) {
@@ -68,6 +69,12 @@ fun AttachSheet(
                 label = "图片",
                 modifier = Modifier.weight(1f),
                 onClick = onPickImage,
+            )
+            AttachCell(
+                icon = ShiYuIcons.Camera,
+                label = "拍照",
+                modifier = Modifier.weight(1f),
+                onClick = onTakePhoto,
             )
             AttachCell(
                 icon = ShiYuIcons.File,

@@ -10,6 +10,7 @@ import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
+import io.livekit.android.room.track.DataPublishReliability
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -248,6 +250,44 @@ class CallManager(
         }
     }
 
+    /** 通话中收到对方自行拍摄的照片（`shiyu.photo` 原始 JPEG）：写入聊天并弹浮层。 */
+    private fun handleIncomingPhoto(jpeg: ByteArray) {
+        if (jpeg.size < 2 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return
+        val conversationId = _uiState.value.conversationId
+        scope.launch {
+            val file = saveImage(jpeg) ?: return@launch
+            if (conversationId.isNotBlank()) {
+                repository.appendIncomingImage(conversationId, file.absolutePath, "通话中收到的照片")
+            }
+            _incomingImages.emit(
+                IncomingImage(type = "image", path = file.absolutePath),
+            )
+        }
+    }
+
+    /**
+     * 我把一张图片发给 Agent：
+     * - 通话中：经 LiveKit 数据通道（topic `shiyu.photo`）把 JPEG 发给 call-agent，进入对话上下文；
+     * - 非通话状态：交给文字聊天后端（带图片的 `/api/chat`）。
+     */
+    fun sendImageToAgent(file: File) {
+        val state = _uiState.value
+        val room = _room.value
+        if (!state.isActive || room == null) return
+        scope.launch {
+            val data: ByteArray? =
+                runCatching { withContext(Dispatchers.IO) { file.readBytes() } }.getOrNull()
+            val sent = data != null && data.size <= MAX_PHOTO_BYTES && runCatching {
+                room.localParticipant.publishData(
+                    data = data,
+                    reliability = DataPublishReliability.RELIABLE,
+                    topic = PHOTO_TOPIC,
+                )
+            }.getOrNull()?.isSuccess == true
+            _events.tryEmit(if (sent) "照片已发给对方" else "照片没能发给对方")
+        }
+    }
+
     private fun saveImage(bytes: ByteArray): File? = runCatching {
         val dir = File(application.filesDir, "call_images").apply { mkdirs() }
         File(dir, "img_${System.currentTimeMillis()}.jpg").apply { writeBytes(bytes) }
@@ -276,7 +316,10 @@ class CallManager(
                         }
                     }
                     is RoomEvent.DataReceived -> {
-                        if (event.topic == IMAGE_TOPIC) handleIncomingImage(event.data)
+                        when (event.topic) {
+                            IMAGE_TOPIC -> handleIncomingImage(event.data)
+                            PHOTO_TOPIC -> handleIncomingPhoto(event.data)
+                        }
                     }
                     is RoomEvent.Disconnected -> {
                         if (_uiState.value.connected) {
@@ -371,6 +414,12 @@ class CallManager(
     private companion object {
         private const val TICK_MS = 1_000L
         private const val IMAGE_TOPIC = "shiyu.image"
+
+        /** 我发给 Agent 的照片（JPEG 原始字节）。 */
+        private const val PHOTO_TOPIC = "shiyu.photo"
+
+        /** LiveKit 数据消息单包上限约 15KB 级，照片先压缩到 1.5MB 内避免被拒。 */
+        private const val MAX_PHOTO_BYTES = 1_500_000
     }
 }
 
