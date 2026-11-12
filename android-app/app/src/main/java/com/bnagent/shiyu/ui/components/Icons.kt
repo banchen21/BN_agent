@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.PhoneInTalk
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.NotificationsOff
@@ -52,7 +53,11 @@ object ShiYuIcons {
     val Phone: ImageVector = Icons.Rounded.Phone
     val Video: ImageVector = Icons.Rounded.Videocam
     val Mic: ImageVector = Icons.Rounded.Mic
+    /** 已静音：麦克风带斜杠。 */
+    val MicOff: ImageVector = Icons.Rounded.MicOff
     val Speaker: ImageVector = Icons.Rounded.VolumeUp
+    /** 已开启外放：手机外放 / 免提。 */
+    val SpeakerOn: ImageVector = Icons.Rounded.PhoneInTalk
     val Image: ImageVector = Icons.Rounded.Image
     val Camera: ImageVector = Icons.Rounded.PhotoCamera
     val File: ImageVector = Icons.Rounded.Description

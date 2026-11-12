@@ -1,5 +1,10 @@
 package com.bnagent.shiyu.ui.me
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,10 +22,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +32,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -73,7 +79,7 @@ fun MeScreen(
 ) {
     val container = LocalAppContainer.current
     val viewModel: MeViewModel = viewModel(
-        factory = MeViewModel.factory(container.conversationRepository, container.settingsRepository),
+        factory = MeViewModel.factory(container.applicationContext, container.conversationRepository, container.settingsRepository),
     )
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val notificationsEnabled by viewModel.notificationsEnabled.collectAsStateWithLifecycle()
@@ -181,6 +187,7 @@ fun MeScreen(
         EditProfileSheet(
             profile = profile,
             onDismiss = { showEditProfile = false },
+            onPickCustomAvatar = { uri, previous -> viewModel.saveCustomAvatar(uri, previous) },
             onSave = { name, signature, avatar ->
                 viewModel.updateProfile(name, signature, avatar)
                 showEditProfile = false
@@ -229,7 +236,7 @@ private fun MeProfileCard(profile: UserProfile) {
         Avatar(
             name = profile.name,
             size = 64.dp,
-            model = StockMedia.drawableFor(profile.avatar),
+            model = StockMedia.avatarModel(profile.avatar),
         )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
@@ -379,13 +386,23 @@ private val MenuValueStyle = TextStyle(
 private fun EditProfileSheet(
     profile: UserProfile,
     onDismiss: () -> Unit,
+    onPickCustomAvatar: suspend (android.net.Uri, String) -> String?,
     onSave: (name: String, signature: String, avatar: String) -> Unit,
 ) {
     var name by remember(profile.name) { mutableStateOf(profile.name) }
     var signature by remember(profile.signature) { mutableStateOf(profile.signature) }
     var avatar by remember(profile.avatar) { mutableStateOf(profile.avatar) }
     val colors = ShiYuTheme.colors
-    val choices = listOf("avatar_me", "avatar_lin", "avatar_chen", "avatar_zhao")
+    val scope = rememberCoroutineScope()
+    val fixedChoices = listOf("avatar_me", "avatar_lin", "avatar_chen", "avatar_zhao")
+    val customChosen = avatar.startsWith("file://")
+
+    // 自定义头像：相册选图后拷进应用私有目录（旧的自定义图会被清掉）。
+    val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            scope.launch { onPickCustomAvatar(uri, avatar)?.let { avatar = it } }
+        }
+    }
 
     ShiYuSheet(onDismissRequest = onDismiss) {
         SheetHandle()
@@ -401,46 +418,94 @@ private fun EditProfileSheet(
         Spacer(Modifier.height(14.dp))
         SettingsFieldLabel("头像")
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            choices.forEach { asset ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            fixedChoices.forEach { asset ->
+                AvatarChoice(selected = avatar == asset, onClick = { avatar = asset }) {
+                    Avatar(name = name, size = CHOICE_INNER, model = StockMedia.avatarModel(asset), circle = true)
+                }
+            }
+            if (customChosen) {
+                AvatarChoice(selected = true, onClick = {}) {
+                    Avatar(name = name, size = CHOICE_INNER, model = StockMedia.avatarModel(avatar), circle = true)
+                }
+            }
+            // 从相册选自定义头像
+            AvatarChoice(
+                selected = false,
+                onClick = {
+                    pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+            ) {
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
-                        .clickable { avatar = asset }
-                        .then(
-                            if (avatar == asset) {
-                                Modifier.border(2.dp, colors.accent, androidx.compose.foundation.shape.CircleShape)
-                            } else {
-                                Modifier.border(1.dp, colors.line, androidx.compose.foundation.shape.CircleShape)
-                            },
-                        ),
+                        .size(CHOICE_INNER)
+                        .clip(CircleShape)
+                        .background(colors.surface2),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Avatar(
-                        name = name,
-                        size = 50.dp,
-                        model = StockMedia.drawableFor(asset),
-                        circle = true,
+                    Icon(
+                        imageVector = ShiYuIcons.Plus,
+                        contentDescription = "从相册选择头像",
+                        tint = colors.ink2,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
         }
         Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             SheetCancelButton(
                 onClick = onDismiss,
                 text = "取消",
                 modifier = Modifier.weight(1f),
             )
-            Button(
-                onClick = { onSave(name, signature, avatar) },
-                modifier = Modifier.weight(1f).height(48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+            // 不用 M3 Button：默认 disabled 容器色会让「保存」文字几乎看不见。
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(colors.accent)
+                    .clickable { onSave(name, signature, avatar) },
+                contentAlignment = Alignment.Center,
             ) {
-                Text("保存", color = colors.accentText)
+                Text(
+                    text = "保存",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
+    }
+}
+
+private val CHOICE_SIZE = 52.dp
+private val CHOICE_INNER = 44.dp
+
+@Composable
+private fun AvatarChoice(
+    selected: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val colors = ShiYuTheme.colors
+    Box(
+        modifier = Modifier
+            .size(CHOICE_SIZE)
+            .clip(CircleShape)
+            .clickable(onClick = onClick)
+            .border(if (selected) 2.dp else 1.dp, if (selected) colors.accent else colors.line, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
     }
 }
 

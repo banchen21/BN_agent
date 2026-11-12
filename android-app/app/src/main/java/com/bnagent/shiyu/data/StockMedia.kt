@@ -61,4 +61,17 @@ object StockMedia {
         PHOTO_DESK -> R.drawable.photo_desk
         else -> null
     }
+
+    /**
+     * 头像模型：内置资源名走 drawable；相册选的「自定义头像」是 `file:///...` 路径，交给 Coil 加载。
+     * 文件已被删掉时回退 [AVATAR_ME]。
+     */
+    fun avatarModel(asset: String): Any? =
+        if (asset.startsWith("file://")) {
+            java.io.File(android.net.Uri.parse(asset).path.orEmpty())
+                .takeIf { it.isFile }
+                ?: R.drawable.avatar_me
+        } else {
+            drawableFor(asset)
+        }
 }

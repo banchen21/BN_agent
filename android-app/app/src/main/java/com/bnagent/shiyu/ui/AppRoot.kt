@@ -211,6 +211,10 @@ fun ShiYuApp() {
             launchSingleTop = true
         }
     }
+    // 兜底：App 在前台时，系统浮窗一律收起（避免和 App 内小窗叠在一起）。
+    LaunchedEffect(appActive, route, callState.video, callState.connected) {
+        if (appActive) CallFloatingOverlay.hideIfShown()
+    }
     // 从授权页回来：若用户已允许浮窗，再补开服务。
     LaunchedEffect(appActive) {
         if (appActive && pendingOverlayGrant && Settings.canDrawOverlays(overlayContext)) {

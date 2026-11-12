@@ -248,8 +248,9 @@ object CallFloatingOverlay {
         }
         val density = appContext.resources.displayMetrics.density
         val metrics = appContext.resources.displayMetrics
+        val videoCall = manager.uiState.value.video
         val width = (density * FLOAT_WIDTH_DP).toInt()
-        val height = (density * FLOAT_HEIGHT_DP).toInt()
+        val height = (density * if (videoCall) FLOAT_VIDEO_HEIGHT_DP else FLOAT_VOICE_HEIGHT_DP).toInt()
         val layout = WindowManager.LayoutParams(
             width,
             height,
@@ -283,10 +284,19 @@ object CallFloatingOverlay {
         owner?.detach()
         owner = null
     }
+
+    fun isShown(): Boolean = view != null
+
+    /** App 回到前台时的兜底：无论浮窗由谁添加，只要还在就收起。 */
+    fun hideIfShown() {
+        if (view != null) hide()
+    }
 }
 
-private const val FLOAT_WIDTH_DP = 168f
-private const val FLOAT_HEIGHT_DP = 210f
+// 通话浮窗（参考微信通话浮窗大小）：视频比语音稍高，用来放摄像头画面。
+private const val FLOAT_WIDTH_DP = 104f
+private const val FLOAT_VOICE_HEIGHT_DP = 124f
+private const val FLOAT_VIDEO_HEIGHT_DP = 152f
 
 /** 浮窗点了「回到通话页」：MainActivity 启动后打开对应通话页。 */
 object PendingCallOpen {
@@ -346,7 +356,7 @@ private fun FloatingContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(FloatingBackground)
             // 单击回到通话页（双击会让第一次点击丢失感知，返回时容易连续跳转）。
             .clickable(
@@ -359,32 +369,32 @@ private fun FloatingContent(
         } else {
             val model = StockMedia.drawableFor(conv?.avatar.orEmpty())
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Avatar(name = name, size = 78.dp, model = model, circle = true)
+                Avatar(name = name, size = 52.dp, model = model, circle = true)
             }
         }
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(8.dp)
+                .padding(horizontal = 5.dp, vertical = 5.dp)
                 .clip(RoundedCornerShape(50))
                 .background(FloatingPill)
-                .padding(start = 10.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                .padding(start = 8.dp, end = 3.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Column {
-                Text(name, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(name, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                 Text(
                     text = state?.let {
-                        if (it.connected) formatCallDuration(it.elapsedSeconds) else "正在接通…"
+                        if (it.connected) formatCallDuration(it.elapsedSeconds) else "接通中…"
                     } ?: "",
                     color = FloatingMeta,
-                    fontSize = 10.sp,
+                    fontSize = 9.sp,
                 )
             }
             Box(
                 modifier = Modifier
-                    .size(26.dp)
+                    .size(22.dp)
                     .clip(CircleShape)
                     .background(FloatingHangup)
                     .clickable(onClick = onHangup),
@@ -394,7 +404,7 @@ private fun FloatingContent(
                     imageVector = ShiYuIcons.Hangup,
                     contentDescription = "挂断",
                     tint = Color.White,
-                    modifier = Modifier.size(14.dp),
+                    modifier = Modifier.size(12.dp),
                 )
             }
         }
