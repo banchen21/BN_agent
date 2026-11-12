@@ -42,6 +42,8 @@ object ShiYuIcons {
     val Back: ImageVector = Icons.AutoMirrored.Rounded.ArrowBack
     val Chevron: ImageVector = Icons.Rounded.ChevronRight
     val Down: ImageVector = Icons.Rounded.KeyboardArrowDown
+    /** 通话页「最小化到后台」：向下的箭头。 */
+    val Minimize: ImageVector = Icons.Rounded.KeyboardArrowDown
     val Search: ImageVector = Icons.Rounded.Search
     val Plus: ImageVector = Icons.Rounded.Add
     val More: ImageVector = Icons.Rounded.MoreVert

@@ -1,7 +1,9 @@
 package com.bnagent.shiyu.data
 
+import android.app.Application
 import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.bnagent.shiyu.data.call.CallManager
 import com.bnagent.shiyu.data.local.ChatStore
 import com.bnagent.shiyu.data.local.SettingsStore
 import com.bnagent.shiyu.data.remote.AgentClient
@@ -46,6 +48,12 @@ class AppContainer(context: Context) {
         settingsRepository = settingsRepository,
         agentClient = agentClient,
         appContext = applicationContext,
+    )
+
+    /** 进程级通话状态机：离开通话页（最小化）后通话继续。 */
+    val callManager: CallManager = CallManager(
+        application = applicationContext as Application,
+        repository = conversationRepository,
     )
 
     /** 首装种子写入（首次启动生效），随后同步后端真实 Agent 列表。 */
