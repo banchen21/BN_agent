@@ -1,7 +1,6 @@
 package com.bnagent.shiyu.ui.call
 
 import android.Manifest
-import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -61,10 +60,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.bnagent.shiyu.data.LocalAppContainer
 import com.bnagent.shiyu.data.StockMedia
+import com.bnagent.shiyu.data.call.formatCallDuration
+import com.bnagent.shiyu.domain.model.UserProfile
 import com.bnagent.shiyu.ui.components.Avatar
 import com.bnagent.shiyu.ui.components.LocalToast
 import com.bnagent.shiyu.ui.components.ShiYuIcons
@@ -78,25 +78,26 @@ import kotlin.math.roundToInt
 /**
  * 语音通话（设计规格 4.7）：呼叫波纹、接通计时、静音 / 免提、挂断。
  *
- * 挂断与系统返回键等价；结束后由导航固定回到该会话聊天页。
+ * 右上角为最小化：只退出通话页，通话交给进程级 CallManager 继续（悬浮条可返回）；
+ * 挂断走底部红色按钮，结束后由导航固定回到该会话聊天页。
  */
 @Composable
 fun VoiceCallScreen(
     conversationId: String,
+    onMinimize: () -> Unit,
     onEndToChat: () -> Unit,
 ) {
     val container = LocalAppContainer.current
-    val app = LocalContext.current.applicationContext as Application
-    val viewModel: CallViewModel = viewModel(
-        factory = CallViewModel.factory(app, container.conversationRepository, conversationId, video = false),
-    )
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val conversation by viewModel.conversation.collectAsStateWithLifecycle()
-    val localVideo by viewModel.localVideoTrack.collectAsStateWithLifecycle()
+    val callManager = container.callManager
+    val state by callManager.uiState.collectAsStateWithLifecycle()
+    val conversation by container.conversationRepository.conversation(conversationId)
+        .collectAsStateWithLifecycle(initialValue = null)
+    val localVideo by callManager.localVideoTrack.collectAsStateWithLifecycle()
+    val room by callManager.room.collectAsStateWithLifecycle()
     val toast = LocalToast.current
 
     val endCall: () -> Unit = {
-        val result = viewModel.endCall()
+        val result = callManager.endCall()
         toast?.show(
             if (result.connected) {
                 "通话结束 · ${formatCallDuration(result.elapsedSeconds)}"
@@ -106,13 +107,15 @@ fun VoiceCallScreen(
         )
         onEndToChat()
     }
-    BackHandler(onBack = endCall)
+    // 返回键与右上角一致：最小化，不挂断。
+    BackHandler(onBack = onMinimize)
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
         if (grants.values.all { it }) {
-            viewModel.connect()
+            // 已在通话中时 connect 幂等复用现有连接（从悬浮条返回）。
+            callManager.connect(conversationId, video = false)
         } else {
             toast?.show("需要麦克风权限才能通话")
             endCall()
@@ -122,7 +125,7 @@ fun VoiceCallScreen(
         permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
     }
     LaunchedEffect(Unit) {
-        viewModel.events.collect { toast?.show(it) }
+        callManager.events.collect { toast?.show(it) }
     }
     LaunchedEffect(state.error) {
         state.error?.let { toast?.show("通话连接失败：$it") }
@@ -136,7 +139,7 @@ fun VoiceCallScreen(
                 .navigationBarsPadding()
                 .padding(start = 22.dp, end = 22.dp, top = 6.dp, bottom = 24.dp),
         ) {
-            VoiceCallTopBar(onClose = endCall)
+            VoiceCallTopBar(onMinimize = onMinimize)
             Column(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.Center,
@@ -185,25 +188,26 @@ fun VoiceCallScreen(
                     icon = ShiYuIcons.Mic,
                     label = "静音",
                     active = state.muted,
-                    onClick = viewModel::toggleMute,
+                    onClick = callManager::toggleMute,
                 )
                 VoiceControl(
                     icon = ShiYuIcons.Speaker,
                     label = "免提",
                     active = state.speakerOn,
-                    onClick = viewModel::toggleSpeaker,
+                    onClick = callManager::toggleSpeaker,
                 )
                 VoiceControl(
                     icon = ShiYuIcons.Video,
                     label = if (state.cameraEnabled) "关摄像头" else "摄像头",
                     active = state.cameraEnabled,
-                    onClick = viewModel::toggleCamera,
+                    onClick = callManager::toggleCamera,
                 )
                 HangupButton(size = 68.dp, iconSize = 28.dp, onClick = endCall)
             }
         }
         // 语音通话中开启摄像头后显示本地预览（Agent 同时能收到视频帧）。
         val localTrack = localVideo
+        val activeRoom = room
         if (state.cameraEnabled) {
             Box(
                 modifier = Modifier
@@ -213,9 +217,9 @@ fun VoiceCallScreen(
                     .clip(RoundedCornerShape(18.dp))
                     .background(ShiYuCallColors.videoLocalBg),
             ) {
-                if (localTrack != null) {
+                if (localTrack != null && activeRoom != null) {
                     LiveKitVideo(
-                        room = viewModel.room,
+                        room = activeRoom,
                         track = localTrack,
                         mirrored = true,
                         modifier = Modifier.fillMaxSize(),
@@ -227,7 +231,7 @@ fun VoiceCallScreen(
 }
 
 @Composable
-private fun VoiceCallTopBar(onClose: () -> Unit) {
+private fun VoiceCallTopBar(onMinimize: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -260,14 +264,14 @@ private fun VoiceCallTopBar(onClose: () -> Unit) {
                 .size(44.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(CallSubtleBg)
-                .clickable(onClick = onClose),
+                .clickable(onClick = onMinimize),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = ShiYuIcons.Close,
-                contentDescription = "挂断",
+                imageVector = ShiYuIcons.Minimize,
+                contentDescription = "最小化",
                 tint = ShiYuCallColors.name,
-                modifier = Modifier.size(21.dp),
+                modifier = Modifier.size(24.dp),
             )
         }
     }
@@ -372,22 +376,23 @@ private fun VoiceControl(
 @Composable
 fun VideoCallScreen(
     conversationId: String,
+    onMinimize: () -> Unit,
     onEndToChat: () -> Unit,
 ) {
     val container = LocalAppContainer.current
-    val app = LocalContext.current.applicationContext as Application
-    val viewModel: CallViewModel = viewModel(
-        factory = CallViewModel.factory(app, container.conversationRepository, conversationId, video = true),
-    )
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val conversation by viewModel.conversation.collectAsStateWithLifecycle()
-    val me by viewModel.me.collectAsStateWithLifecycle()
-    val localVideo by viewModel.localVideoTrack.collectAsStateWithLifecycle()
-    val remoteVideo by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
+    val callManager = container.callManager
+    val state by callManager.uiState.collectAsStateWithLifecycle()
+    val conversation by container.conversationRepository.conversation(conversationId)
+        .collectAsStateWithLifecycle(initialValue = null)
+    val me by container.conversationRepository.profile
+        .collectAsStateWithLifecycle(initialValue = UserProfile())
+    val localVideo by callManager.localVideoTrack.collectAsStateWithLifecycle()
+    val remoteVideo by callManager.remoteVideoTrack.collectAsStateWithLifecycle()
+    val room by callManager.room.collectAsStateWithLifecycle()
     val toast = LocalToast.current
 
     val endCall: () -> Unit = {
-        val result = viewModel.endCall()
+        val result = callManager.endCall()
         toast?.show(
             if (result.connected) {
                 "通话结束 · ${formatCallDuration(result.elapsedSeconds)}"
@@ -398,16 +403,18 @@ fun VideoCallScreen(
         onEndToChat()
     }
     val onFlip: () -> Unit = {
-        val flipped = viewModel.flipCamera()
+        val flipped = callManager.flipCamera()
         toast?.show(if (flipped) "已切换到前置摄像头" else "已切换到后置摄像头")
     }
-    BackHandler(onBack = endCall)
+    // 返回键与右上角一致：最小化，不挂断。
+    BackHandler(onBack = onMinimize)
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
         if (grants.values.all { it }) {
-            viewModel.connect()
+            // 已在通话中时 connect 幂等复用现有连接（从悬浮条返回）。
+            callManager.connect(conversationId, video = true)
         } else {
             toast?.show("需要麦克风与摄像头权限才能视频通话")
             endCall()
@@ -419,7 +426,7 @@ fun VideoCallScreen(
         )
     }
     LaunchedEffect(Unit) {
-        viewModel.events.collect { toast?.show(it) }
+        callManager.events.collect { toast?.show(it) }
     }
     LaunchedEffect(state.error) {
         state.error?.let { toast?.show("通话连接失败：$it") }
@@ -429,6 +436,7 @@ fun VideoCallScreen(
     var pipOffset by remember { mutableStateOf(Offset.Zero) }
     val remoteDrawable = conversation?.let { StockMedia.drawableFor(it.avatar) }
     val meDrawable = StockMedia.drawableFor(me.avatar)
+    val activeRoom = room
 
     Box(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
         // 大屏：默认远端（悦悦自拍 / 远端视频），点击后与本地画面互换。
@@ -442,9 +450,9 @@ fun VideoCallScreen(
         ) {
             if (localLarge) {
                 val localTrack = localVideo
-                if (localTrack != null) {
+                if (localTrack != null && activeRoom != null) {
                     LiveKitVideo(
-                        room = viewModel.room,
+                        room = activeRoom,
                         track = localTrack,
                         mirrored = state.cameraFlipped,
                         modifier = Modifier.fillMaxSize(),
@@ -459,9 +467,9 @@ fun VideoCallScreen(
                 }
             } else {
                 val remoteTrack = remoteVideo
-                if (remoteTrack != null) {
+                if (remoteTrack != null && activeRoom != null) {
                     LiveKitVideo(
-                        room = viewModel.room,
+                        room = activeRoom,
                         track = remoteTrack,
                         mirrored = false,
                         modifier = Modifier.fillMaxSize(),
@@ -481,7 +489,7 @@ fun VideoCallScreen(
         // 渐晕层
         Box(Modifier.fillMaxSize().background(VideoScrim))
 
-        // 顶部：名字 + 状态 / 计时 + 切换摄像头
+        // 顶部：名字 + 状态 / 计时 + 最小化 / 切换摄像头
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -514,19 +522,16 @@ fun VideoCallScreen(
                     ),
                 )
             }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(VideoFlipBg)
-                    .clickable(onClick = onFlip),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = ShiYuIcons.Flip,
-                    contentDescription = "切换摄像头",
-                    tint = Color.White,
-                    modifier = Modifier.size(21.dp),
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                VideoTopButton(
+                    icon = ShiYuIcons.Minimize,
+                    label = "最小化",
+                    onClick = onMinimize,
+                )
+                VideoTopButton(
+                    icon = ShiYuIcons.Flip,
+                    label = "切换摄像头",
+                    onClick = onFlip,
                 )
             }
         }
@@ -544,9 +549,9 @@ fun VideoCallScreen(
         ) {
             if (smallIsLocal) {
                 val localTrack = localVideo
-                if (localTrack != null) {
+                if (localTrack != null && activeRoom != null) {
                     LiveKitVideo(
-                        room = viewModel.room,
+                        room = activeRoom,
                         track = localTrack,
                         mirrored = state.cameraFlipped,
                         modifier = Modifier.fillMaxSize(),
@@ -563,9 +568,9 @@ fun VideoCallScreen(
                 }
             } else {
                 val remoteTrack = remoteVideo
-                if (remoteTrack != null) {
+                if (remoteTrack != null && activeRoom != null) {
                     LiveKitVideo(
-                        room = viewModel.room,
+                        room = activeRoom,
                         track = remoteTrack,
                         mirrored = false,
                         modifier = Modifier.fillMaxSize(),
@@ -596,13 +601,13 @@ fun VideoCallScreen(
                 icon = ShiYuIcons.Mic,
                 label = "静音",
                 active = state.muted,
-                onClick = viewModel::toggleMute,
+                onClick = callManager::toggleMute,
             )
             VideoControl(
                 icon = ShiYuIcons.Speaker,
                 label = "免提",
                 active = state.speakerOn,
-                onClick = viewModel::toggleSpeaker,
+                onClick = callManager::toggleSpeaker,
             )
             VideoControl(
                 icon = ShiYuIcons.Flip,
@@ -640,6 +645,29 @@ private fun VideoControl(
             contentDescription = label,
             tint = if (active) ShiYuCallColors.controlActiveInk else Color.White,
             modifier = Modifier.size(23.dp),
+        )
+    }
+}
+
+@Composable
+private fun VideoTopButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(VideoFlipBg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = Color.White,
+            modifier = Modifier.size(21.dp),
         )
     }
 }

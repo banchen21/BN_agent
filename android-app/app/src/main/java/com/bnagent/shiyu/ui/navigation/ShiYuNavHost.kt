@@ -103,6 +103,7 @@ fun ShiYuNavHost(
             val id = entry.arguments?.getString("id").orEmpty()
             VoiceCallScreen(
                 conversationId = id,
+                onMinimize = { navController.minimizeCall(id) },
                 onEndToChat = { navController.returnToChatAfterCall(id) },
             )
         }
@@ -115,9 +116,20 @@ fun ShiYuNavHost(
             val id = entry.arguments?.getString("id").orEmpty()
             VideoCallScreen(
                 conversationId = id,
+                onMinimize = { navController.minimizeCall(id) },
                 onEndToChat = { navController.returnToChatAfterCall(id) },
             )
         }
+    }
+}
+
+/**
+ * 最小化通话：只退出通话页，通话本身由进程级 CallManager 继续；
+ * 没有可回退的页面时（异常栈）回到该会话聊天页。
+ */
+private fun NavHostController.minimizeCall(conversationId: String) {
+    if (!popBackStack()) {
+        navigate(ShiYuRoutes.chat(conversationId)) { launchSingleTop = true }
     }
 }
 
