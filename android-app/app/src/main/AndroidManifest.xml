@@ -18,6 +18,17 @@
         android:theme="@style/Theme.ShiYu"
         android:usesCleartextTraffic="true">
 
+        <!-- 聊天页「拍照」：系统相机写入本应用 cache 目录（无需外部存储权限） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

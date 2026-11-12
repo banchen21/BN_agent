@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 拍照交给系统相机：只把 cache 目录下的临时文件以 file:// URI 暴露给它。 -->
+<paths>
+    <cache-path name="photos" path="photos/" />
+</paths>

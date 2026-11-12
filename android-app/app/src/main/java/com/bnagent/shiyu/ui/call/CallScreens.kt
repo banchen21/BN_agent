@@ -464,7 +464,7 @@ fun VideoCallScreen(
         val pipWidthPx = with(density) { 96.dp.toPx() }
         val pipHeightPx = with(density) { 132.dp.toPx() }
         val pipEndPx = with(density) { 16.dp.toPx() }
-        val pipTopPx = with(density) { 74.dp.toPx() }
+        val pipTopPx = with(density) { 128.dp.toPx() }
         val pipBaseLeft = screenWidthPx - pipEndPx - pipWidthPx
         val minOffsetX = -pipBaseLeft
         val maxOffsetX = screenWidthPx - pipWidthPx - pipBaseLeft
@@ -559,18 +559,11 @@ fun VideoCallScreen(
                     ),
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                VideoTopButton(
-                    icon = ShiYuIcons.Minimize,
-                    label = "最小化",
-                    onClick = onMinimize,
-                )
-                VideoTopButton(
-                    icon = ShiYuIcons.Flip,
-                    label = "切换摄像头",
-                    onClick = onFlip,
-                )
-            }
+            VideoTopButton(
+                icon = ShiYuIcons.Minimize,
+                label = "最小化",
+                onClick = onMinimize,
+            )
         }
 
         // 小窗：默认本地画面；点击小窗即可交换大小屏；可拖动。
@@ -581,7 +574,7 @@ fun VideoCallScreen(
             onClick = { localLarge = !localLarge },
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 74.dp, end = 16.dp)
+                .padding(top = 128.dp, end = 16.dp)
                 .size(width = 96.dp, height = 132.dp),
         ) {
             if (smallIsLocal) {
