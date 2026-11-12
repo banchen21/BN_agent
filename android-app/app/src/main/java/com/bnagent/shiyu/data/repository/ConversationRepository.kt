@@ -379,6 +379,16 @@ class ConversationRepository(
         }
     }
 
+    /** 通话中心跳：后端据此判断 App 是否还在线，停止心跳的房间会被自动删除。 */
+    suspend fun callHeartbeat(room: String) {
+        if (room.isBlank()) return
+        runCatching {
+            val server = settingsRepository.serverSettings.first()
+            agentClient.callHeartbeat(server, room)
+            agentClient.incomingCall(server, room = room)
+        }
+    }
+
     /** 清空单个会话记录（设计规格 5.8）：消息清空、预览回到「还没有消息」。 */    suspend fun clearMessages(conversationId: String) {
         store.update { state ->
             if (state.conversation(conversationId) == null) return@update state

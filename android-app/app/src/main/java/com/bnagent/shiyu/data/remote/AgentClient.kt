@@ -219,8 +219,13 @@ class AgentClient(
      * 轮询 Agent 主动发起的来电；没有待接来电时返回 null。
      * 服务端返回即消费该邀请（接听后用返回的 token 直接入会）。
      */
-    suspend fun incomingCall(settings: ServerSettings): CallSession? {
-        val request = buildRequest(settings = settings, path = PATH_CALL_INCOMING)
+    suspend fun incomingCall(settings: ServerSettings, room: String? = null): CallSession? {
+        val path = if (room.isNullOrBlank()) {
+            PATH_CALL_INCOMING
+        } else {
+            "$PATH_CALL_INCOMING?room=${java.net.URLEncoder.encode(room, "UTF-8")}"
+        }
+        val request = buildRequest(settings = settings, path = path)
         val body = execute(request, timeoutSeconds = 15)
         val dto = try {
             json.decodeFromString(IncomingCallResponseDto.serializer(), body)
@@ -253,6 +258,20 @@ class AgentClient(
             body = payload.toRequestBody(JSON_MEDIA_TYPE),
         )
         runCatching { execute(request, timeoutSeconds = 15) }
+    }
+
+    /** 通话中心跳（POST /api/call/heartbeat）。 */
+    suspend fun callHeartbeat(settings: ServerSettings, room: String) {
+        val payload = json.encodeToString(
+            CallEndRequestDto.serializer(),
+            CallEndRequestDto(room = room),
+        )
+        val request = buildRequest(
+            settings = settings,
+            path = PATH_CALL_HEARTBEAT,
+            body = payload.toRequestBody(JSON_MEDIA_TYPE),
+        )
+        runCatching { execute(request, timeoutSeconds = 10) }
     }
 
     /** 下载通话中 Agent 发来的图片（相对路径，如 `/api/call/image/x.png`）。 */
@@ -398,6 +417,7 @@ class AgentClient(
         private const val PATH_CALL_START = "/api/call/start"
         private const val PATH_CALL_END = "/api/call/end"
         private const val PATH_CALL_INCOMING = "/api/call/incoming"
+        private const val PATH_CALL_HEARTBEAT = "/api/call/heartbeat"
         private const val PATH_CALL_DECLINE = "/api/call/decline"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

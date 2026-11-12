@@ -79,6 +79,7 @@ class CallManager(
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
     private var session: CallSession? = null
+    private var heartbeatJob: Job? = null
     private var timerJob: Job? = null
     private var connectJob: Job? = null
     private var roomEventsJob: Job? = null
@@ -130,6 +131,7 @@ class CallManager(
                 enterAudioMode()
                 _uiState.update { it.copy(connecting = false, connected = true) }
                 startTimer()
+                startHeartbeat(call.room)
             } catch (e: Exception) {
                 val message = e.message?.takeIf { it.isNotBlank() } ?: "无法建立通话连接"
                 _uiState.update { it.copy(connecting = false, connected = false, error = message) }
@@ -335,10 +337,26 @@ class CallManager(
     private fun releaseRoom() {
         roomEventsJob?.cancel()
         roomEventsJob = null
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         _room.value?.let { room -> runCatching { room.disconnect() } }
         _room.value = null
         _localVideoTrack.value = null
         _remoteVideoTrack.value = null
+    }
+
+    /**
+     * 通话心跳：每 4s 告诉后端房间还在用；App 被杀/退到后台后心跳停止，
+     * 后端看门狗会删除房间，避免 Agent 留在空房间里。
+     */
+    private fun startHeartbeat(room: String) {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                repository.callHeartbeat(room)
+                delay(HEARTBEAT_MS)
+            }
+        }
     }
 
     private fun startTimer() {
@@ -413,6 +431,7 @@ class CallManager(
 
     private companion object {
         private const val TICK_MS = 1_000L
+        private const val HEARTBEAT_MS = 4_000L
         private const val IMAGE_TOPIC = "shiyu.image"
 
         /** 我发给 Agent 的照片（JPEG 原始字节）。 */
