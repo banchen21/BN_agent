@@ -129,7 +129,12 @@ fun VoiceCallScreen(
         }
     }
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            // 从悬浮条/浮窗返回且在通话中：直接续上，不再重复弹权限框。
+            callManager.connect(conversationId, video = false)
+        } else {
+            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        }
     }
     LaunchedEffect(Unit) {
         callManager.events.collect { toast?.show(it) }
@@ -435,9 +440,13 @@ fun VideoCallScreen(
         }
     }
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(
-            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
-        )
+        val perms = arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+        if (perms.all(::hasPermission)) {
+            // 从悬浮条/浮窗返回且在通话中：直接续上，不再重复弹权限框。
+            callManager.connect(conversationId, video = true)
+        } else {
+            permissionLauncher.launch(perms)
+        }
     }
     LaunchedEffect(Unit) {
         callManager.events.collect { toast?.show(it) }
@@ -837,6 +846,14 @@ private fun LiveKitVideo(
         factory = { renderer },
         modifier = modifier.graphicsLayer { scaleX = if (mirrored) -1f else 1f },
     )
+}
+
+/** 是否已授予权限（用于从悬浮条返回时跳过重复授权弹窗）。 */
+private fun hasPermission(permission: String): Boolean {
+    val context = com.bnagent.shiyu.ui.call.CallFloatingService.appContext
+    return context != null &&
+        androidx.core.content.ContextCompat.checkSelfPermission(context, permission) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
 }
 
 /** 通话页固定配色（不随主题变化）。 */

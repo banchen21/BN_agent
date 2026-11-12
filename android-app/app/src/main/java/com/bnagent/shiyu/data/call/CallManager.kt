@@ -26,12 +26,13 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 进程级通话状态机（LiveKit），由 [com.bnagent.shiyu.data.AppContainer] 持有。
@@ -56,6 +57,20 @@ class CallManager(
 
     private val _uiState = MutableStateFlow(CallUiState())
     val uiState: StateFlow<CallUiState> = _uiState.asStateFlow()
+
+    private val stateObservers = CopyOnWriteArrayList<(CallUiState) -> Unit>()
+
+    /** 非 Compose 的观察者（通话浮窗服务）订阅状态。 */
+    fun subscribeState(observer: (CallUiState) -> Unit): () -> Unit {
+        stateObservers += observer
+        return { stateObservers -= observer }
+    }
+
+    /** 所有状态写入统一走这里，顺带通知浮窗等非 Compose 观察者。 */
+    private inline fun updateState(transform: (CallUiState) -> CallUiState) {
+        val next = _uiState.updateAndGet(transform)
+        stateObservers.forEach { observer -> runCatching { observer(next) } }
+    }
 
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val events: SharedFlow<String> = _events.asSharedFlow()
@@ -108,12 +123,14 @@ class CallManager(
         pendingInvite = null
         val effectiveVideo = invite?.mediaType?.equals("video", ignoreCase = true) ?: video
         connectJob = scope.launch {
-            _uiState.value = CallUiState(
-                conversationId = conversationId,
-                video = effectiveVideo,
-                incoming = invite != null,
-                connecting = true,
-            )
+            updateState {
+                CallUiState(
+                    conversationId = conversationId,
+                    video = effectiveVideo,
+                    incoming = invite != null,
+                    connecting = true,
+                )
+            }
             try {
                 val call = invite
                     ?: repository.startCall(conversationId, if (video) "video" else "audio")
@@ -125,16 +142,16 @@ class CallManager(
                 room.localParticipant.setMicrophoneEnabled(true)
                 if (effectiveVideo) {
                     room.localParticipant.setCameraEnabled(true)
-                    _uiState.update { it.copy(cameraEnabled = true) }
+                    updateState { it.copy(cameraEnabled = true) }
                     refreshLocalVideoTrack()
                 }
                 enterAudioMode()
-                _uiState.update { it.copy(connecting = false, connected = true) }
+                updateState { it.copy(connecting = false, connected = true) }
                 startTimer()
                 startHeartbeat(call.room)
             } catch (e: Exception) {
                 val message = e.message?.takeIf { it.isNotBlank() } ?: "无法建立通话连接"
-                _uiState.update { it.copy(connecting = false, connected = false, error = message) }
+                updateState { it.copy(connecting = false, connected = false, error = message) }
                 _events.tryEmit("通话连接失败：$message")
                 releaseRoom()
                 endSessionOnServer()
@@ -144,7 +161,7 @@ class CallManager(
 
     fun toggleMute() {
         val next = !_uiState.value.muted
-        _uiState.update { it.copy(muted = next) }
+        updateState { it.copy(muted = next) }
         scope.launch {
             runCatching {
                 _room.value?.localParticipant?.setMicrophoneEnabled(!next)
@@ -154,7 +171,7 @@ class CallManager(
 
     fun toggleSpeaker() {
         val next = !_uiState.value.speakerOn
-        _uiState.update { it.copy(speakerOn = next) }
+        updateState { it.copy(speakerOn = next) }
         runCatching { audioManager.isSpeakerphoneOn = next }
     }
 
@@ -162,7 +179,7 @@ class CallManager(
     fun toggleCamera() {
         if (_uiState.value.conversationId.isEmpty()) return
         val next = !_uiState.value.cameraEnabled
-        _uiState.update { it.copy(cameraEnabled = next) }
+        updateState { it.copy(cameraEnabled = next) }
         scope.launch {
             runCatching {
                 _room.value?.localParticipant?.setCameraEnabled(next)
@@ -175,7 +192,7 @@ class CallManager(
     /** 翻转摄像头并返回翻转后的状态（true = 前置 / 镜像）。 */
     fun flipCamera(): Boolean {
         val next = !_uiState.value.cameraFlipped
-        _uiState.update { it.copy(cameraFlipped = next) }
+        updateState { it.copy(cameraFlipped = next) }
         runCatching { _localVideoTrack.value?.switchCamera() }
             .onFailure { _events.tryEmit("切换摄像头失败") }
         return next
@@ -189,7 +206,7 @@ class CallManager(
         timerJob = null
         pendingInvite = null
         val snapshot = _uiState.value
-        _uiState.value = CallUiState()
+        updateState { CallUiState() }
         releaseRoom()
         restoreAudioMode()
         endSessionOnServer()
@@ -210,7 +227,7 @@ class CallManager(
         connectJob = null
         timerJob?.cancel()
         timerJob = null
-        _uiState.value = CallUiState()
+        updateState { CallUiState() }
         releaseRoom()
         restoreAudioMode()
         endSessionOnServer()
@@ -325,7 +342,7 @@ class CallManager(
                     }
                     is RoomEvent.Disconnected -> {
                         if (_uiState.value.connected) {
-                            _uiState.update { it.copy(connected = false) }
+                            updateState { it.copy(connected = false) }
                         }
                     }
                     else -> Unit
@@ -364,7 +381,7 @@ class CallManager(
         timerJob = scope.launch {
             while (isActive) {
                 delay(TICK_MS)
-                _uiState.update { it.copy(elapsedSeconds = it.elapsedSeconds + 1) }
+                updateState { it.copy(elapsedSeconds = it.elapsedSeconds + 1) }
             }
         }
     }

@@ -1,5 +1,11 @@
 package com.bnagent.shiyu.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +36,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
@@ -47,6 +55,10 @@ import com.bnagent.shiyu.data.LocalAppContainer
 import com.bnagent.shiyu.data.StockMedia
 import com.bnagent.shiyu.data.call.CallManager
 import com.bnagent.shiyu.data.call.formatCallDuration
+import com.bnagent.shiyu.ui.call.CallFloatingOverlay
+import com.bnagent.shiyu.ui.call.CallFloatingService
+import com.bnagent.shiyu.ui.call.PendingCallOpen
+import com.bnagent.shiyu.ui.call.callRouteFor
 import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.ui.components.Avatar
 import com.bnagent.shiyu.ui.components.LocalToast
@@ -62,7 +74,7 @@ import com.bnagent.shiyu.ui.theme.ShiYuCallColors
 import com.bnagent.shiyu.ui.theme.ShiYuTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.isActive as coroutineActive
 import kotlinx.coroutines.launch
 
 /**
@@ -105,7 +117,7 @@ fun ShiYuApp() {
 
     LaunchedEffect(callManager, lifecycleOwner) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (isActive) {
+            while (coroutineActive) {
                 if (incomingInvite == null && !callManager.uiState.value.isActive) {
                     val invite = runCatching {
                         val server = container.settingsRepository.serverSettings.first()
@@ -120,6 +132,70 @@ fun ShiYuApp() {
 
     val isCallRoute = route?.startsWith(ShiYuRoutes.CALL_PREFIX) == true
     val showMiniCall = callState.isActive && !isCallRoute
+
+    // App 在前台时用内置悬浮条；离开 App（退到桌面/其他应用）时改由系统级浮窗承接通话。
+    val overlayContext = LocalContext.current.applicationContext
+    val appLifecycle = lifecycleOwner.lifecycle
+    val appActive = appLifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+    var pendingOverlayGrant by remember { mutableStateOf(false) }
+    val showOverlay: () -> Unit = {
+        if (Settings.canDrawOverlays(overlayContext)) {
+            CallFloatingService.launch(overlayContext)
+            CallFloatingService.isRunning = true
+        } else {
+            Toast.makeText(overlayContext, "请允许拾语显示在其他应用上层", Toast.LENGTH_LONG).show()
+            pendingOverlayGrant = true
+            runCatching {
+                overlayContext.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${overlayContext.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
+    }
+    val hideOverlay: () -> Unit = {
+        CallFloatingService.stop(overlayContext)
+        CallFloatingService.isRunning = false
+    }
+    DisposableEffect(callState.isActive) {
+        if (callState.isActive) showOverlay() else hideOverlay()
+        onDispose { }
+    }
+    LaunchedEffect(callState.isActive, appActive) {
+        if (!callState.isActive) return@LaunchedEffect
+        if (appActive) {
+            // 从后台回到 App（或从授权页返回）：收起系统浮窗，用内置悬浮条。
+            CallFloatingOverlay.hide()
+        } else {
+            // 退到桌面/其他应用：显示系统浮窗（未授权时提示一次）。
+            if (Settings.canDrawOverlays(overlayContext)) {
+                CallFloatingOverlay.show(
+                    context = overlayContext,
+                    windowManager = overlayContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager,
+                    manager = callManager,
+                    conversation = container.conversationRepository,
+                )
+            } else if (pendingOverlayGrant) {
+                pendingOverlayGrant = false
+            }
+        }
+    }
+    // 从浮窗/通知回来：直接跳到通话页。
+    LaunchedEffect(Unit) {
+        PendingCallOpen.consume()?.takeIf { it.isNotBlank() }?.let { id ->
+            val video = callManager.uiState.value.video
+            navController.navigate(callRouteFor(id, video)) { launchSingleTop = true }
+        }
+    }
+    // 从授权页回来：若用户已允许浮窗，再补开服务。
+    LaunchedEffect(appActive) {
+        if (appActive && pendingOverlayGrant && Settings.canDrawOverlays(overlayContext)) {
+            if (callState.isActive) showOverlay()
+            pendingOverlayGrant = false
+        }
+    }
     val showTabBar = route == ShiYuRoutes.CHATS ||
         route == ShiYuRoutes.CONTACTS ||
         route == ShiYuRoutes.ME
