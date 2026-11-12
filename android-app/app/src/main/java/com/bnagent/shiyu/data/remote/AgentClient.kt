@@ -255,6 +255,12 @@ class AgentClient(
         runCatching { execute(request, timeoutSeconds = 15) }
     }
 
+    /** 下载通话中 Agent 发来的图片（相对路径，如 `/api/call/image/x.png`）。 */
+    suspend fun fetchImage(settings: ServerSettings, path: String): ByteArray {
+        val request = buildRequest(settings = settings, path = path)
+        return executeBytes(request, timeoutSeconds = 30)
+    }
+
     // ─── 内部实现 ─────────────────────────────────────────────────────
 
     private fun buildRequest(
@@ -318,6 +324,46 @@ class AgentClient(
                         } else {
                             runCatching {
                                 cont.resumeWithException(agentExceptionForHttp(resp.code, body))
+                            }
+                        }
+                    }
+                }
+            })
+        }
+
+    /** 二进制响应（图片下载）；错误处理与 [execute] 一致。 */
+    private suspend fun executeBytes(request: Request, timeoutSeconds: Long = 60): ByteArray =
+        suspendCancellableCoroutine { cont ->
+            val call = httpClient.newCall(request)
+            call.timeout().timeout(timeoutSeconds, TimeUnit.SECONDS)
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (!cont.isActive) return
+                    runCatching { cont.resumeWithException(e.toAgentException()) }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        val bytes = try {
+                            resp.body?.bytes()
+                        } catch (e: IOException) {
+                            if (cont.isActive) {
+                                runCatching { cont.resumeWithException(AgentException.Network(e)) }
+                            }
+                            return
+                        }
+                        if (!cont.isActive) return
+                        if (resp.isSuccessful) {
+                            runCatching { cont.resume(bytes ?: ByteArray(0)) }
+                        } else {
+                            runCatching {
+                                cont.resumeWithException(
+                                    agentExceptionForHttp(
+                                        resp.code,
+                                        bytes?.toString(Charsets.UTF_8).orEmpty(),
+                                    ),
+                                )
                             }
                         }
                     }
