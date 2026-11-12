@@ -13,6 +13,10 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:7880";
 pub const DEFAULT_AGENT_NAME: &str = "yueyue";
 pub const DEFAULT_ROOM_PREFIX: &str = "ai-call-";
 pub const DEFAULT_MEDIA_TYPE: &str = "audio";
+pub const DEFAULT_SIGNALING_URL: &str = "ws://127.0.0.1:7880";
+pub const DEFAULT_ASR_URL: &str = "http://127.0.0.1:8877/api/asr";
+pub const DEFAULT_TTS_URL: &str = "http://127.0.0.1:8877/api/tts";
+pub const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:18080";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallConfig {
@@ -34,6 +38,17 @@ pub struct CallConfig {
     pub turn_password: String,
     pub empty_timeout_secs: u64,
     pub token_ttl_secs: u64,
+    /// 插件是否以 agent 身份进房接话（默认开）。
+    pub backend_agent_enabled: bool,
+    /// agent 进房用的信令地址（本机直连，不走代理）。
+    pub signaling_url: String,
+    /// yueyue ASR / TTS 地址。
+    pub asr_url: String,
+    pub tts_url: String,
+    /// 主后端地址（派生 /api/chat、/api/chat/append、/api/tools/call）。
+    pub backend_url: String,
+    /// 主后端的 API_KEY（为空则不带鉴权头）。
+    pub backend_api_key: String,
 }
 
 impl Default for CallConfig {
@@ -53,6 +68,12 @@ impl Default for CallConfig {
             turn_password: String::new(),
             empty_timeout_secs: 300,
             token_ttl_secs: 3600,
+            backend_agent_enabled: true,
+            signaling_url: DEFAULT_SIGNALING_URL.to_string(),
+            asr_url: DEFAULT_ASR_URL.to_string(),
+            tts_url: DEFAULT_TTS_URL.to_string(),
+            backend_url: DEFAULT_BACKEND_URL.to_string(),
+            backend_api_key: String::new(),
         }
     }
 }
@@ -74,6 +95,26 @@ fn string_field(value: &Value, name: &str) -> Option<String> {
 
 fn u64_field(value: &Value, name: &str) -> Option<u64> {
     value.get(name).and_then(Value::as_u64)
+}
+
+fn bool_field(value: &Value, name: &str) -> Option<bool> {
+    value.get(name).and_then(Value::as_bool)
+}
+
+/// 布尔配置：WebUI 值 > 环境变量（1/true/0/false）> 默认值。
+fn bool_or(value: &Value, name: &str, env: &str, default: bool) -> bool {
+    if let Some(v) = bool_field(value, name) {
+        return v;
+    }
+    match env_nonempty(env).map(|v| v.to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
+}
+
+fn trim_url(url: String) -> String {
+    url.trim_end_matches('/').to_string()
 }
 
 fn read_or(value: &Value, name: &str, env: &str, default: &str) -> String {
@@ -121,11 +162,24 @@ impl CallConfig {
             .or_else(|| env_nonempty("LIVEKIT_API_CA_CERT"))
             .unwrap_or_default();
 
-        config.agent_name = read_or(value, "agent_name", "LIVEKIT_AGENT_NAME", DEFAULT_AGENT_NAME);
-        config.room_prefix = read_or(value, "room_prefix", "LIVEKIT_ROOM_PREFIX", DEFAULT_ROOM_PREFIX);
-        config.default_media_type = normalize_media_type(
-            &read_or(value, "default_media_type", "LIVEKIT_DEFAULT_MEDIA_TYPE", DEFAULT_MEDIA_TYPE),
-        )
+        config.agent_name = read_or(
+            value,
+            "agent_name",
+            "LIVEKIT_AGENT_NAME",
+            DEFAULT_AGENT_NAME,
+        );
+        config.room_prefix = read_or(
+            value,
+            "room_prefix",
+            "LIVEKIT_ROOM_PREFIX",
+            DEFAULT_ROOM_PREFIX,
+        );
+        config.default_media_type = normalize_media_type(&read_or(
+            value,
+            "default_media_type",
+            "LIVEKIT_DEFAULT_MEDIA_TYPE",
+            DEFAULT_MEDIA_TYPE,
+        ))
         .unwrap_or_else(|| DEFAULT_MEDIA_TYPE.to_string());
 
         config.ice_servers = value
@@ -143,8 +197,36 @@ impl CallConfig {
         config.turn_username = string_field(value, "turn_username").unwrap_or_default();
         config.turn_password = string_field(value, "turn_password").unwrap_or_default();
 
-        config.empty_timeout_secs = u64_field(value, "empty_timeout_secs").unwrap_or(300).clamp(10, 86400);
-        config.token_ttl_secs = u64_field(value, "token_ttl_secs").unwrap_or(3600).clamp(60, 86400);
+        config.empty_timeout_secs = u64_field(value, "empty_timeout_secs")
+            .unwrap_or(300)
+            .clamp(10, 86400);
+        config.token_ttl_secs = u64_field(value, "token_ttl_secs")
+            .unwrap_or(3600)
+            .clamp(60, 86400);
+
+        config.backend_agent_enabled = bool_or(
+            value,
+            "backend_agent_enabled",
+            "LIVEKIT_BACKEND_AGENT_ENABLED",
+            true,
+        );
+        config.signaling_url = trim_url(read_or(
+            value,
+            "signaling_url",
+            "LIVEKIT_SIGNALING_URL",
+            DEFAULT_SIGNALING_URL,
+        ));
+        config.asr_url = read_or(value, "asr_url", "VOICE_ASR_URL", DEFAULT_ASR_URL);
+        config.tts_url = read_or(value, "tts_url", "VOICE_TTS_URL", DEFAULT_TTS_URL);
+        config.backend_url = trim_url(read_or(
+            value,
+            "backend_url",
+            "BN_BACKEND_URL",
+            DEFAULT_BACKEND_URL,
+        ));
+        config.backend_api_key = string_field(value, "backend_api_key")
+            .or_else(|| env_nonempty("BN_BACKEND_API_KEY"))
+            .unwrap_or_default();
 
         config
     }
@@ -160,9 +242,7 @@ impl CallConfig {
             .iter()
             .map(|url| {
                 let is_turn = url.starts_with("turn:") || url.starts_with("turns:");
-                if is_turn
-                    && (!self.turn_username.is_empty() || !self.turn_password.is_empty())
-                {
+                if is_turn && (!self.turn_username.is_empty() || !self.turn_password.is_empty()) {
                     serde_json::json!({
                         "urls": [url],
                         "username": self.turn_username,
@@ -217,9 +297,15 @@ mod tests {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../config_schema.json")).unwrap();
         let config = CallConfig::from_json(&json!({}));
-        assert_eq!(config.livekit_url, schema["fields"]["livekit_url"]["default"]);
+        assert_eq!(
+            config.livekit_url,
+            schema["fields"]["livekit_url"]["default"]
+        );
         assert_eq!(config.agent_name, schema["fields"]["agent_name"]["default"]);
-        assert_eq!(config.room_prefix, schema["fields"]["room_prefix"]["default"]);
+        assert_eq!(
+            config.room_prefix,
+            schema["fields"]["room_prefix"]["default"]
+        );
         assert_eq!(config.default_media_type, "audio");
         assert_eq!(config.empty_timeout_secs, 300);
         assert_eq!(config.token_ttl_secs, 3600);
@@ -278,8 +364,14 @@ mod tests {
 
     #[test]
     fn derive_api_url_from_various_schemes() {
-        assert_eq!(derive_api_url("ws://127.0.0.1:7880"), "http://127.0.0.1:7880");
-        assert_eq!(derive_api_url("wss://lk.example.com"), "https://lk.example.com");
+        assert_eq!(
+            derive_api_url("ws://127.0.0.1:7880"),
+            "http://127.0.0.1:7880"
+        );
+        assert_eq!(
+            derive_api_url("wss://lk.example.com"),
+            "https://lk.example.com"
+        );
         assert_eq!(derive_api_url("http://x:1"), "http://x:1");
         assert_eq!(derive_api_url("127.0.0.1:7880"), "http://127.0.0.1:7880");
     }

@@ -9,19 +9,25 @@
 //! 浏览器通话页由 main-app 的 `/call` 路由提供（插件 API 只能返回纯文本 body，
 //! 无法设置 `text/html`，因此页面放在 main-app 静态路由里）。
 
+mod agent;
 mod config;
+mod jpeg;
 mod jwt;
 mod livekit;
+mod voice;
 
 pub use config::{CallConfig, PLUGIN_NAME};
 
+use agent::{AgentBackend, AgentRun, CallSession, LogFn};
 use livekit::LiveKitAdmin;
 use plugin_interface::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 
 // ── 共享状态 ────────────────────────────────────────────────────────────────
 
@@ -30,6 +36,22 @@ struct SharedState {
     config: CallConfig,
     admin: LiveKitAdmin,
     logger: PluginLogger,
+    /// 通话房间 → 后台 agent 任务。`end` 时通过它通知 agent 退出。
+    agents: std::sync::Mutex<HashMap<String, oneshot::Sender<()>>>,
+}
+
+impl SharedState {
+    /// 把宿主 `PluginLogger` 包装成可跨线程调用的日志函数，交给 agent 任务。
+    fn log_fn(&self) -> LogFn {
+        let logger = self.logger.clone();
+        LogFn(Arc::new(move |warn, msg| {
+            if warn {
+                logger.warn(msg);
+            } else {
+                logger.info(msg);
+            }
+        }))
+    }
 }
 
 fn now_ms() -> u64 {
@@ -57,6 +79,10 @@ struct StartRequest {
     media_type: Option<String>,
     #[serde(default)]
     identity: Option<String>,
+    #[serde(rename = "peerID", alias = "peer_id", alias = "peerId", default)]
+    peer_id: Option<String>,
+    #[serde(rename = "userName", alias = "user_name", alias = "userName", default)]
+    user_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +131,114 @@ fn resolve_start(
     Ok((room, identity, media_type))
 }
 
+// ── agent 进房 ──────────────────────────────────────────────────────────────
+
+/// `peer_id` 归一化：与主后端 `normalize_peer_id` 同口径（trim → 只留
+/// `[A-Za-z0-9_.:-]` → ≤128 字符 → 空则回退 `android:yueyue`）。
+fn normalize_peer_id(raw: Option<&str>) -> String {
+    let cleaned: String = raw
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        .take(128)
+        .collect();
+    if cleaned.is_empty() {
+        "android:yueyue".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn default_user_name(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("苏雨")
+        .to_string()
+}
+
+/// 以 agent 身份进同一房间并启动接话循环（阻塞到 `Room::connect` 返回）。
+fn join_agent(state: &SharedState, room: &str, request: &StartRequest) -> Result<(), String> {
+    let identity = agent::agent_identity(room);
+    let token = jwt::sign_token(
+        &state.config.api_key,
+        &state.config.api_secret,
+        &identity,
+        jwt::agent_grants(room),
+        state.config.token_ttl_secs,
+    )?;
+
+    let session = Arc::new(CallSession::new(
+        room.to_string(),
+        normalize_peer_id(request.peer_id.as_deref()),
+        default_user_name(request.user_name.as_deref()),
+        AgentBackend::from_config(
+            &state.config,
+            format!("{}/api/chat", state.config.backend_url),
+            format!("{}/api/chat/append", state.config.backend_url),
+            format!("{}/api/tools/call", state.config.backend_url),
+        ),
+        state.log_fn(),
+    ));
+    let run = AgentRun {
+        login_url: state.config.signaling_url.clone(),
+        token,
+        session: session.clone(),
+    };
+
+    // 宿主回调是同步的：进房结果通过 std 通道回传，`end` 通过 oneshot 通知退出。
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    state
+        .agents
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(room.to_string(), stop_tx);
+
+    let room_name = room.to_string();
+    let abort_handle = state.runtime.spawn({
+        let room_name = room_name.clone();
+        async move {
+            match run.drive(Some(ready_tx)).await {
+                Ok(()) => log::info!("[{room_name}] agent 通话结束"),
+                Err(e) => log::warn!("[{room_name}] agent 异常退出：{e}"),
+            }
+        }
+    });
+    // 挂断信号：取消 agent 任务（Room 随之 Drop 断开）。
+    state.runtime.spawn(async move {
+        let _ = stop_rx.await;
+        log::info!("[{room_name}] 收到挂断信号，结束 agent");
+        abort_handle.abort();
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Ok(())) => {
+            state.logger.info(format!(
+                "悦悦已进房 {room}（peer_id={}）",
+                session.peer_id()
+            ));
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            state
+                .agents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(room);
+            Err(e)
+        }
+        Err(_) => {
+            state
+                .agents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(room);
+            Err("agent 进房超时（20 秒）".to_string())
+        }
+    }
+}
+
 // ── API 实现 ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Default)]
@@ -149,9 +283,7 @@ impl CallApi {
         )) {
             Ok(_) => {}
             Err(e) => {
-                state
-                    .logger
-                    .error(format!("创建房间 {room} 失败：{e}"));
+                state.logger.error(format!("创建房间 {room} 失败：{e}"));
                 return error_resp(502, format!("创建房间失败：{e}"));
             }
         }
@@ -172,48 +304,22 @@ impl CallApi {
 
         let mut agent_info = json!({
             "name": state.config.agent_name,
-            "dispatched": false,
+            "joined": false,
         });
-        if !state.config.agent_name.is_empty() {
-            let dispatch_metadata = json!({
-                "userID": request.user_id.trim(),
-                "identity": identity,
-                "mediaType": media_type,
-                "room": room,
-                "source": "bn-call",
-            })
-            .to_string();
-            match state.runtime.block_on(state.admin.create_dispatch(
-                &room,
-                &state.config.agent_name,
-                &dispatch_metadata,
-            )) {
-                Ok(dispatch) => {
-                    state.logger.info(format!(
-                        "agent {} 已派发到房间 {} (dispatch={})",
-                        state.config.agent_name,
-                        room,
-                        dispatch
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("-")
-                    ));
-                    agent_info["dispatched"] = json!(true);
-                    if let Some(id) = dispatch.get("id") {
-                        agent_info["dispatchId"] = id.clone();
-                    }
+        if state.config.backend_agent_enabled && state.config.credentials_ok() {
+            match join_agent(state, &room, &request) {
+                Ok(()) => {
+                    agent_info["joined"] = json!(true);
                 }
                 Err(e) => {
-                    // agent worker 尚未上线（call-agent 任务并行开发中）时不阻断通话。
-                    state.logger.warn(format!(
-                        "agent {} 派发失败（房间 {} 仍可用）：{}",
-                        state.config.agent_name, room, e
-                    ));
-                    agent_info["warning"] = json!(format!(
-                        "agent 派发失败：{e}（call-agent 可能尚未启动）"
-                    ));
+                    state
+                        .logger
+                        .warn(format!("悦悦进房失败（房间 {room} 仍可用，但不接话）：{e}"));
+                    agent_info["warning"] = json!(e);
                 }
             }
+        } else if !state.config.backend_agent_enabled {
+            agent_info["disabled"] = json!(true);
         }
 
         json_resp(
@@ -232,6 +338,18 @@ impl CallApi {
         )
     }
 
+    /// 结束房间内的 agent 任务（挂断 / 删除房间时调用）。
+    fn stop_agent(&self, state: &SharedState, room: &str) {
+        if let Some(tx) = state
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(room)
+        {
+            let _ = tx.send(());
+        }
+    }
+
     fn handle_end(&self, state: &SharedState, body: Option<&str>) -> (u16, String) {
         let request: EndRequest = match parse_body(body) {
             Ok(r) => r,
@@ -242,13 +360,16 @@ impl CallApi {
             return error_resp(400, "room 不能为空");
         }
 
+        self.stop_agent(state, room);
         match state.runtime.block_on(state.admin.delete_room(room)) {
             Ok(_) => json_resp(
                 200,
                 json!({ "status": "deleted", "room": room, "deleted": true }),
             ),
             Err(e) if e.is_not_found() => {
-                state.logger.info(format!("删除房间 {room}：房间不存在，按已删除处理"));
+                state
+                    .logger
+                    .info(format!("删除房间 {room}：房间不存在，按已删除处理"));
                 json_resp(
                     200,
                     json!({ "status": "ok", "room": room, "deleted": false }),
@@ -272,8 +393,11 @@ impl CallApi {
                     "url": state.config.livekit_url,
                     "urlLocal": state.config.livekit_url_local,
                     "agentName": state.config.agent_name,
+                    "agentEnabled": state.config.backend_agent_enabled,
+                    "signalingUrl": state.config.signaling_url,
                     "configured": state.config.credentials_ok(),
                     "rooms": rooms.len(),
+                    "activeAgents": state.agents.lock().unwrap_or_else(|e| e.into_inner()).len(),
                 }),
             ),
             Err(e) => {
@@ -387,14 +511,14 @@ impl Plugin for CallLivekitPlugin {
             );
         }
 
-        let runtime = Runtime::new()
-            .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
+        let runtime = Runtime::new().map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
         let admin = LiveKitAdmin::new(&config);
         self.api.set_state(Some(Arc::new(SharedState {
             runtime,
             config,
             admin,
             logger: ctx.logger.clone(),
+            agents: std::sync::Mutex::new(HashMap::new()),
         })));
         ctx.logger.info(
             "call-livekit-plugin 启动完成 — API: POST /api/call/start, POST /api/call/end, GET /api/call/health",
@@ -482,6 +606,26 @@ mod tests {
     }
 
     #[test]
+    fn peer_id_normalization_matches_backend() {
+        assert_eq!(normalize_peer_id(None), "android:yueyue");
+        assert_eq!(normalize_peer_id(Some("  ")), "android:yueyue");
+        assert_eq!(
+            normalize_peer_id(Some(" android:yueyue ")),
+            "android:yueyue"
+        );
+        assert_eq!(normalize_peer_id(Some("a b!?")), "ab");
+        let long = "x".repeat(300);
+        assert_eq!(normalize_peer_id(Some(&long)).len(), 128);
+    }
+
+    #[test]
+    fn user_name_defaults_to_su_yu() {
+        assert_eq!(default_user_name(None), "苏雨");
+        assert_eq!(default_user_name(Some("  ")), "苏雨");
+        assert_eq!(default_user_name(Some(" 小雨 ")), "小雨");
+    }
+
+    #[test]
     fn resolve_start_builds_room_identity_and_media() {
         let cfg = config();
         let (room, identity, media) = resolve_start(
@@ -490,6 +634,8 @@ mod tests {
                 user_id: "alice-01".into(),
                 media_type: Some("video".into()),
                 identity: None,
+                peer_id: None,
+                user_name: None,
             },
             1_700_000_000_123,
         )
@@ -508,6 +654,8 @@ mod tests {
                 user_id: "bob".into(),
                 media_type: None,
                 identity: Some("phone-a".into()),
+                peer_id: None,
+                user_name: None,
             },
             1,
         )
@@ -519,11 +667,7 @@ mod tests {
     #[test]
     fn resolve_start_rejects_bad_input() {
         let cfg = config();
-        let cases = [
-            ("", None),
-            ("   ", None),
-            ("alice", Some("screen")),
-        ];
+        let cases = [("", None), ("   ", None), ("alice", Some("screen"))];
         for (user_id, media) in cases {
             let result = resolve_start(
                 &cfg,
@@ -531,6 +675,8 @@ mod tests {
                     user_id: user_id.into(),
                     media_type: media.map(str::to_string),
                     identity: None,
+                    peer_id: None,
+                    user_name: None,
                 },
                 1,
             );
@@ -563,6 +709,7 @@ mod tests {
             admin: LiveKitAdmin::new(&cfg),
             config: cfg,
             logger,
+            agents: std::sync::Mutex::new(HashMap::new()),
         })));
 
         let (status, _) = api.handle_api("POST", "end", Some("{}")).unwrap();

@@ -2,7 +2,7 @@
 name = "call-livekit-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "LiveKit 全双工通话后端插件：建房、签发 token、dispatch yueyue agent"
+description = "LiveKit 全双工通话后端插件：建房、签发 token，内置 yueyue 语音/视觉接话 agent"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -17,6 +17,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
+livekit = { version = "0.10.1", features = ["__rustls-tls"] }
+tokio-stream = "0.1.19"
 
 [dev-dependencies]
 actix-rt = "2.9"

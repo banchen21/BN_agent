@@ -1,0 +1,9 @@
+# livekit 依赖 tokio 的 unstable API。
+#
+# Windows 上 livekit/webrtc-sys 的预编译库是静态 CRT（/MT），与本仓库默认的
+# 动态 CRT 混链会 LNK2038，因此 workspace 统一使用静态 CRT。
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+
+[target.'cfg(target_os = "windows")']
+rustflags = ["--cfg", "tokio_unstable", "-C", "target-feature=+crt-static"]

@@ -17,7 +17,11 @@ pub struct TwirpError {
 
 impl std::fmt::Display for TwirpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LiveKit {} ({}): {}", self.status, self.code, self.message)
+        write!(
+            f,
+            "LiveKit {} ({}): {}",
+            self.status, self.code, self.message
+        )
     }
 }
 
@@ -67,18 +71,15 @@ impl LiveKitAdmin {
             if let Some(path) = candidates.iter().find(|p| p.is_file()) {
                 match std::fs::read(path)
                     .map_err(|e| e.to_string())
-                    .and_then(|pem| {
-                        reqwest::Certificate::from_pem(&pem).map_err(|e| e.to_string())
-                    }) {
+                    .and_then(|pem| reqwest::Certificate::from_pem(&pem).map_err(|e| e.to_string()))
+                {
                     Ok(cert) => builder = builder.add_root_certificate(cert),
                     Err(_) => {}
                 }
             }
         }
 
-        let client = builder
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_url: config.api_url.trim_end_matches('/').to_string(),
             api_key: config.api_key.clone(),
@@ -92,7 +93,8 @@ impl LiveKitAdmin {
     }
 
     async fn twirp(&self, method: &str, body: Value) -> Result<Value, TwirpError> {
-        self.twirp_with_grants(method, body, jwt::server_grants()).await
+        self.twirp_with_grants(method, body, jwt::server_grants())
+            .await
     }
 
     async fn twirp_with_grants(
@@ -189,25 +191,6 @@ impl LiveKitAdmin {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default())
-    }
-
-    /// 派发 agent 到房间。agent 未注册时 LiveKit 会返回错误，由调用方降级为 warning。
-    pub async fn create_dispatch(
-        &self,
-        room: &str,
-        agent_name: &str,
-        metadata: &str,
-    ) -> Result<Value, TwirpError> {
-        self.twirp_with_grants(
-            "AgentDispatchService/CreateDispatch",
-            json!({
-                "room": room,
-                "agent_name": agent_name,
-                "metadata": metadata,
-            }),
-            jwt::dispatch_grants(room),
-        )
-        .await
     }
 }
 

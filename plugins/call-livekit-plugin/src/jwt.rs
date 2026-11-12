@@ -65,13 +65,9 @@ pub fn server_grants() -> Value {
     })
 }
 
-/// dispatch 专用 token：AgentDispatchService 要求 **房间级** roomAdmin
-/// （`roomAdmin: true` 必须与 `room: <房间名>` 同时出现，否则 401）。
-pub fn dispatch_grants(room: &str) -> Value {
-    json!({
-        "roomAdmin": true,
-        "room": room,
-    })
+/// agent token：与参与方同权限，subject 为 `agent-yueyue-<room>`。
+pub fn agent_grants(room: &str) -> Value {
+    participant_grants(room)
 }
 
 /// 参与方 token：只能进指定房间，可发布/订阅音视频与 data。
@@ -109,8 +105,14 @@ mod tests {
 
     #[test]
     fn token_has_livekit_claims_and_valid_signature() {
-        let token = sign_token("key123", "secret456", "user-alice", participant_grants("room-a"), 600)
-            .unwrap();
+        let token = sign_token(
+            "key123",
+            "secret456",
+            "user-alice",
+            participant_grants("room-a"),
+            600,
+        )
+        .unwrap();
         assert!(verify(&token, "secret456"));
         assert!(!verify(&token, "wrong-secret"));
 
@@ -137,12 +139,5 @@ mod tests {
         assert_eq!(grants["roomCreate"], true);
         assert_eq!(grants["roomList"], true);
         assert_eq!(grants["roomAdmin"], true);
-    }
-
-    #[test]
-    fn dispatch_grants_are_room_scoped() {
-        let grants = dispatch_grants("ai-call-x-1");
-        assert_eq!(grants["roomAdmin"], true);
-        assert_eq!(grants["room"], "ai-call-x-1");
     }
 }

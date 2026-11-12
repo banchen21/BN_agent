@@ -1,7 +1,7 @@
 {
   "version": 1,
   "title": "LiveKit 通话",
-  "description": "WebRTC 全双工语音/视频通话：建房、签发 token、dispatch agent_name=yueyue。",
+  "description": "WebRTC 全双工语音/视频通话：建房、签发 token，悦悦以 agent 身份进房接话（ASR → 主后端 /api/chat → TTS → 发回），并订阅摄像头做画面理解。",
   "fields": {
     "livekit_url": {
       "type": "string",
@@ -38,7 +38,9 @@
     "agent_name": {
       "type": "select",
       "default": "yueyue",
-      "options": ["yueyue"],
+      "options": [
+        "yueyue"
+      ],
       "description": "通话开始时 dispatch 的 agent 名称"
     },
     "room_prefix": {
@@ -49,7 +51,10 @@
     "default_media_type": {
       "type": "select",
       "default": "audio",
-      "options": ["audio", "video"],
+      "options": [
+        "audio",
+        "video"
+      ],
       "description": "请求未指定 mediaType 时的默认模式"
     },
     "ice_servers": {
@@ -81,6 +86,37 @@
       "min": 60,
       "max": 86400,
       "description": "参与方 token 有效期（秒）"
+    },
+    "backend_agent_enabled": {
+      "type": "bool",
+      "default": true,
+      "description": "通话时悦悦以 agent 身份进房接话（ASR → /api/chat → TTS）；关闭则只建房不接话"
+    },
+    "signaling_url": {
+      "type": "string",
+      "default": "ws://127.0.0.1:7880",
+      "description": "agent 进房用的 LiveKit 信令地址（本机直连，不走代理）"
+    },
+    "asr_url": {
+      "type": "string",
+      "default": "http://127.0.0.1:8877/api/asr",
+      "description": "yueyue ASR 接口（multipart 字段 file）"
+    },
+    "tts_url": {
+      "type": "string",
+      "default": "http://127.0.0.1:8877/api/tts",
+      "description": "yueyue TTS 接口（JSON {text}，返回 WAV）"
+    },
+    "backend_url": {
+      "type": "string",
+      "default": "http://127.0.0.1:18080",
+      "description": "主后端地址（派生 /api/chat、/api/chat/append、/api/tools/call）"
+    },
+    "backend_api_key": {
+      "type": "string",
+      "default": "",
+      "secret": true,
+      "description": "主后端 API_KEY（与 main-app 的 API_KEY 一致；留空则不带鉴权头）"
     }
   }
 }
