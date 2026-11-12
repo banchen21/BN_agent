@@ -55,6 +55,7 @@ mod rate_limit_actor;
 mod retry_actor;
 mod token_usage_actor;
 mod tool_exec;
+mod voice_api;
 
 use actix::prelude::*;
 use actix_web::body::MessageBody;
@@ -189,6 +190,26 @@ async fn health(state: web::Data<AppState>) -> impl Responder {
         plugins_loaded,
         agent_loops_total,
     ))
+}
+
+// ── Agents ───────────────────────────────────────────────────────────────────
+
+/// 可对话的 Agent 列表（Android 通讯录的真实数据源）。
+///
+/// 目前只有本地 LiveKit 通话 Agent「悦悦」；后续多 Agent/多人时在这里扩展。
+async fn list_agents() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "agents": [{
+            "id": "yueyue",
+            "name": "齐悦",
+            "handle": "yueyue",
+            "role": "AI Agent · 语音 / 视频",
+            "sign": "叫我悦悦就行。",
+            "avatar": "agent_yueyue",
+            "online": true,
+            "kind": "agent"
+        }]
+    }))
 }
 
 // ── Plugin handlers ──────────────────────────────────────────────────────────
@@ -546,7 +567,7 @@ struct ChatPayload {
 
 /// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
 /// 结果为空时回退 `web:default`（兼容旧版单会话请求）。
-fn normalize_peer_id(raw: &str) -> String {
+pub(crate) fn normalize_peer_id(raw: &str) -> String {
     let filtered: String = raw
         .trim()
         .chars()
@@ -560,16 +581,19 @@ fn normalize_peer_id(raw: &str) -> String {
     }
 }
 
-async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
-    let retry_addr = match &state.retry_addr {
-        Some(a) => a.clone(),
-        None => {
-            return HttpResponse::ServiceUnavailable()
-                .json(serde_json::json!({ "error": "LLM not configured" }))
-        }
-    };
-
-    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+/// 内核对一次聊天请求：刷新 peer 快照、按来源裁剪工具/上下文，走重试链路。
+/// 供 `/api/chat` 与 `/api/chat/voice` 共用。
+pub(crate) async fn run_chat(
+    state: &AppState,
+    message: &str,
+    peer_id: String,
+    user_name: String,
+    source: String,
+) -> Result<LlmResponse, (u16, String)> {
+    let retry_addr = state
+        .retry_addr
+        .clone()
+        .ok_or((503u16, "LLM not configured".to_string()))?;
 
     // Refresh peer-scoped snapshots.
     let _ = state
@@ -578,9 +602,22 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
             peer_id: peer_id.clone(),
         })
         .await;
-    let contexts: Vec<String> = state.snapshots.lock().clone();
+    let is_android = source == "android";
+    let mut contexts: Vec<String> = state.snapshots.lock().clone();
+    if is_android {
+        // 聊天客户端不执行工具，也不应看到工具/系统指令语法。
+        contexts.push(
+            "【聊天客户端】请直接以自然语言回复用户；不要输出任何工具调用、XML/JSON 标签、\
+             系统指令或定时任务语法。"
+                .to_string(),
+        );
+    }
 
-    let tools: Vec<serde_json::Value> = {
+    // Android 客户端是纯聊天界面，不执行工具调用；暴露工具会让模型返回
+    // 空文本 + tool_calls（例如 proactive_schedule_once），客户端只能标记失败。
+    let tools: Vec<serde_json::Value> = if is_android {
+        Vec::new()
+    } else {
         let reg = state.tool_registry.lock();
         reg.all_defs().iter()
             .filter(|d| !d.internal)
@@ -596,7 +633,7 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
     match retry_addr
         .send(retry_actor::RetryChatRequest {
             request: ChatRequest {
-                message: body.message.clone(),
+                message: message.to_string(),
                 peer_id,
                 tools,
                 skip_store: false,
@@ -608,9 +645,9 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                 file_base64: None,
                 file_name: None,
                 stream: true,
-                request_id: request_id.clone(),
-                source: body.source.clone().unwrap_or_default(),
-                user_name: body.user_name.clone().unwrap_or_default(),
+                request_id,
+                source,
+                user_name,
                 max_tokens: None,
                 original_user_msg: None,
                 assistant_tool_calls: vec![],
@@ -631,11 +668,30 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
                     prompt_cache_miss_tokens: resp.prompt_cache_miss_tokens,
                 });
             }
-            HttpResponse::Ok().json(resp)
+            Ok(resp)
         }
-        Ok(Err(e)) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
-        Err(e) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(Err(e)) => Err((502u16, e)),
+        Err(e) => Err((500u16, format!("{}", e))),
+    }
+}
+
+async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+    match run_chat(
+        &state,
+        &body.message,
+        peer_id,
+        body.user_name.clone().unwrap_or_default(),
+        body.source.clone().unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(resp) => HttpResponse::Ok().json(resp),
+        Err((code, message)) => HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(code)
+                .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+        )
+        .json(serde_json::json!({ "error": message })),
     }
 }
 
@@ -683,6 +739,65 @@ async fn chat_history(
         Err(e) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": format!("{}", e) })),
     }
+}
+
+// ── Append chat history (call transcripts) ───────────────────────────────────
+
+#[derive(Deserialize)]
+struct AppendHistoryPayload {
+    #[serde(default)]
+    peer_id: Option<String>,
+    #[serde(default)]
+    messages: Vec<AppendHistoryMessage>,
+}
+
+#[derive(Deserialize)]
+struct AppendHistoryMessage {
+    role: String,
+    content: String,
+}
+
+/// `POST /api/chat/append`：把通话产生的对话（ASR 用户句 + 助手回复）
+/// 追加到指定 peer 的聊天历史，让后续文字聊天/通话延续同一上下文。
+async fn append_chat_history(
+    state: web::Data<AppState>,
+    body: web::Json<AppendHistoryPayload>,
+) -> impl Responder {
+    let Some(store) = &state.chat_store else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({ "error": "Chat store not available" }));
+    };
+    let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
+    let mut appended = 0usize;
+    for message in &body.messages {
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
+        match store
+            .send(ChatStoreMsg::Append {
+                role: role.to_string(),
+                content: content.to_string(),
+                peer_id: Some(peer_id.clone()),
+            })
+            .await
+        {
+            Ok(_) => appended += 1,
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({ "error": format!("{}", e) }))
+            }
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "appended": appended,
+        "peer_id": peer_id,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1367,8 +1482,10 @@ fn main() -> std::io::Result<()> {
         let mut server = HttpServer::new(move || {
             actix_web::App::new()
                 .app_data(state.clone())
+                .app_data(web::JsonConfig::default().limit(20 * 1024 * 1024))
                 .wrap(actix_web::middleware::from_fn(api_key_middleware))
                 .route("/api/health", web::get().to(health))
+                .route("/api/agents", web::get().to(list_agents))
                 .route("/api/plugins", web::get().to(list_plugins))
                 .route("/api/plugins/load", web::post().to(load_plugin))
                 .route("/api/plugins/unload/{name}", web::post().to(unload_plugin))
@@ -1377,7 +1494,9 @@ fn main() -> std::io::Result<()> {
                 .route("/api/events", web::post().to(publish_event))
                 .route("/api/llm/chat", web::post().to(llm_chat))
                 .route("/api/chat", web::post().to(chat))
+                .route("/api/chat/voice", web::post().to(voice_api::voice_chat))
                 .route("/api/chat/history", web::get().to(chat_history))
+                .route("/api/chat/append", web::post().to(append_chat_history))
                 .route("/api/chat/sessions", web::get().to(list_chat_sessions))
                 .route("/api/chat/sessions/refresh", web::post().to(refresh_chat_session))
                 .route("/api/tools", web::get().to(list_tools))

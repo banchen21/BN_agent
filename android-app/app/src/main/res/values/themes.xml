@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      基础窗口主题：Compose 接管全部 UI，这里只负责启动窗口与系统栏透明。
+      edge-to-edge 由 MainActivity 的 enableEdgeToEdge() + Compose insets 处理。
+    -->
+    <style name="Theme.ShiYu" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/shiyu_window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- API 27+ 属性；API 26 上由系统忽略，不影响运行。 -->
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>
