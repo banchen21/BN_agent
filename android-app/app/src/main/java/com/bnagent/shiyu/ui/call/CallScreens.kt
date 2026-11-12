@@ -201,14 +201,14 @@ fun VoiceCallScreen(
                 verticalAlignment = Alignment.Top,
             ) {
                 VoiceControl(
-                    icon = ShiYuIcons.Mic,
-                    label = "静音",
+                    icon = if (state.muted) ShiYuIcons.MicOff else ShiYuIcons.Mic,
+                    label = if (state.muted) "已静音" else "静音",
                     active = state.muted,
                     onClick = callManager::toggleMute,
                 )
                 VoiceControl(
-                    icon = ShiYuIcons.Speaker,
-                    label = "免提",
+                    icon = if (state.speakerOn) ShiYuIcons.SpeakerOn else ShiYuIcons.Speaker,
+                    label = if (state.speakerOn) "外放中" else "免提",
                     active = state.speakerOn,
                     onClick = callManager::toggleSpeaker,
                 )
@@ -462,7 +462,7 @@ fun VideoCallScreen(
     var localLarge by remember { mutableStateOf(false) }
     var pipOffset by remember { mutableStateOf(Offset.Zero) }
     val remoteDrawable = conversation?.let { StockMedia.drawableFor(it.avatar) }
-    val meDrawable = StockMedia.drawableFor(me.avatar)
+    val meDrawable = StockMedia.avatarModel(me.avatar)
     val activeRoom = room
 
     BoxWithConstraints(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
@@ -637,14 +637,14 @@ fun VideoCallScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             VideoControl(
-                icon = ShiYuIcons.Mic,
-                label = "静音",
+                icon = if (state.muted) ShiYuIcons.MicOff else ShiYuIcons.Mic,
+                label = if (state.muted) "已静音" else "静音",
                 active = state.muted,
                 onClick = callManager::toggleMute,
             )
             VideoControl(
-                icon = ShiYuIcons.Speaker,
-                label = "免提",
+                icon = if (state.speakerOn) ShiYuIcons.SpeakerOn else ShiYuIcons.Speaker,
+                label = if (state.speakerOn) "外放中" else "免提",
                 active = state.speakerOn,
                 onClick = callManager::toggleSpeaker,
             )
