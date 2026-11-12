@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BN Agent — 插件配置</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1e2230;
+    --line: #2a2f3d;
+    --text: #e7eaf0;
+    --muted: #8b93a7;
+    --accent: #5b8cff;
+    --accent-2: #3f6fe0;
+    --ok: #35c48b;
+    --err: #ff6b6b;
+    --warn: #f0b45e;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 22px; border-bottom: 1px solid var(--line);
+    background: var(--panel); position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  .key-box { display: flex; align-items: center; gap: 8px; }
+  .key-box input {
+    width: 220px; padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  }
+  .key-box input:focus { outline: none; border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid; grid-template-columns: 280px minmax(0, 1fr);
+    gap: 18px; padding: 18px 22px 40px; max-width: 1200px; margin: 0 auto;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 0 0 12px; }
+  select {
+    width: 100%; padding: 9px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  }
+  select:focus { outline: none; border-color: var(--accent); }
+  .plugin-meta { margin-top: 12px; color: var(--muted); font-size: 12px; word-break: break-all; }
+  .plugin-meta code { color: #a9b4d0; }
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-weight: 600; margin-bottom: 4px; }
+  .field .type {
+    font-size: 11px; color: var(--muted); font-weight: 400;
+    border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 6px;
+  }
+  .field .desc { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .field input[type=text], .field input[type=password], .field input[type=number],
+  .field textarea, .field select {
+    width: 100%; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    font-family: inherit; font-size: 14px;
+  }
+  .field textarea { resize: vertical; min-height: 76px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--accent); }
+  .field .row { display: flex; align-items: center; gap: 8px; }
+  .field input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: 6px;
+  }
+  .badge.secret { color: var(--warn); border-color: #5a4725; background: #2a2113; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+  button {
+    padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 14px;
+    font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: var(--accent-2); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #status { margin-top: 14px; padding: 10px 12px; border-radius: 8px; display: none; white-space: pre-wrap; }
+  #status.ok { display: block; background: #102a20; color: var(--ok); border: 1px solid #1d4a37; }
+  #status.err { display: block; background: #2c1518; color: var(--err); border: 1px solid #5a2329; }
+  #status.warn { display: block; background: #2a2113; color: var(--warn); border: 1px solid #5a4725; }
+  #status ul { margin: 8px 0 0; padding-left: 20px; }
+  .empty { color: var(--muted); padding: 30px 10px; text-align: center; }
+  .warnings { color: var(--warn); font-size: 12px; margin-top: 10px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; }
+    header .key-box input { width: 150px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>插件配置</h1>
+  <span class="hint">schema 驱动 · 保存后自动重载插件</span>
+  <span class="spacer"></span>
+  <div class="key-box">
+    <span class="hint">API Key</span>
+    <input id="apiKey" type="password" placeholder="API_KEY（未启用可留空）" autocomplete="off">
+    <button id="connectBtn">连接</button>
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>插件</h2>
+    <select id="pluginSelect"></select>
+    <div class="plugin-meta" id="pluginMeta"></div>
+    <div class="actions" style="margin-top:16px;padding-top:12px;">
+      <button id="refreshBtn">刷新列表</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div id="editor">
+      <div class="empty">正在加载…</div>
+    </div>
+    <div id="status"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var KEY_STORAGE = "bn_agent_api_key";
+  var apiKey = localStorage.getItem(KEY_STORAGE) || "";
+
+  var els = {
+    apiKey: document.getElementById("apiKey"),
+    connectBtn: document.getElementById("connectBtn"),
+    select: document.getElementById("pluginSelect"),
+    meta: document.getElementById("pluginMeta"),
+    editor: document.getElementById("editor"),
+    status: document.getElementById("status"),
+    refreshBtn: document.getElementById("refreshBtn")
+  };
+
+  els.apiKey.value = apiKey;
+
+  var state = { plugins: [], current: null, detail: null, busy: false };
+
+  function headers() {
+    var h = { "Content-Type": "application/json" };
+    if (apiKey) h["X-API-Key"] = apiKey;
+    return h;
+  }
+
+  function request(path, options) {
+    options = options || {};
+    var init = { method: options.method || "GET", headers: headers() };
+    if (options.body !== undefined) init.body = JSON.stringify(options.body);
+    return fetch(path, init).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try { data = JSON.parse(text); } catch (_) { data = text; }
+        }
+        if (!res.ok) {
+          var msg = (data && data.error) ? data.error : (res.status + " " + res.statusText);
+          var err = new Error(msg);
+          err.status = res.status;
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  function setStatus(kind, text, details) {
+    els.status.className = kind || "";
+    if (!kind) { els.status.style.display = "none"; els.status.textContent = ""; return; }
+    els.status.textContent = "";
+    var p = document.createElement("div");
+    p.textContent = text;
+    els.status.appendChild(p);
+    if (details && details.length) {
+      var ul = document.createElement("ul");
+      details.forEach(function (d) {
+        var li = document.createElement("li");
+        li.textContent = d;
+        ul.appendChild(li);
+      });
+      els.status.appendChild(ul);
+    }
+  }
+
+  function describeError(err) {
+    if (err.status === 401) {
+      return "鉴权失败（401）：请确认 API Key 与服务端 API_KEY 一致。";
+    }
+    var details = [];
+    if (err.data && Array.isArray(err.data.details)) details = err.data.details;
+    if (err.data && err.data.status === "reload_failed") {
+      var parts = ["插件 reload 失败，配置已回滚：" + err.message];
+      parts.push("配置已回滚：" + (err.data.config_rolled_back ? "是" : "否"));
+      parts.push("插件已恢复：" + (err.data.plugin_restored ? "是" : "否（当前可能处于卸载状态）"));
+      return { text: parts.join("\n"), details: details };
+    }
+    return { text: err.message || String(err), details: details };
+  }
+
+  function loadPlugins(preferred) {
+    return request("/api/plugin-config").then(function (data) {
+      state.plugins = (data && data.plugins) || [];
+      var dir = (data && data.config_dir) || "";
+      var dirLine = document.createElement("div");
+      els.meta.textContent = "";
+      dirLine.textContent = "配置目录：" + dir;
+      els.meta.appendChild(dirLine);
+      if (!state.plugins.length) {
+        els.editor.innerHTML = "";
+        var empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "当前没有已加载的插件。";
+        els.editor.appendChild(empty);
+        return null;
+      }
+      return renderPluginOptions(preferred);
+    }).catch(function (err) {
+      var d = describeError(err);
+      setStatus("err", d.text, d.details);
+    });
+  }
+
+  function renderPluginOptions(preferred) {
+    els.select.innerHTML = "";
+    state.plugins.forEach(function (p) {
+      var opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.title + " (" + p.name + ")" + (p.editable ? "" : " — 不可配置");
+      els.select.appendChild(opt);
+    });
+    if (!state.plugins.length) return null;
+    var target = preferred && state.plugins.some(function (p) { return p.name === preferred; })
+      ? preferred : state.plugins[0].name;
+    els.select.value = target;
+    return loadDetail(target);
+  }
+
+  function loadDetail(name) {
+    state.current = name;
+    var p = state.plugins.find(function (x) { return x.name === name; });
+    els.meta.textContent = "";
+    if (p) {
+      var t = document.createElement("div");
+      t.textContent = p.description || "";
+      els.meta.appendChild(t);
+    }
+    return request("/api/plugin-config/" + encodeURIComponent(name)).then(function (data) {
+      state.detail = data;
+      renderEditor(data);
+    }).catch(function (err) {
+      state.detail = null;
+      els.editor.innerHTML = "";
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "加载失败：" + err.message;
+      els.editor.appendChild(empty);
+      var d = describeError(err);
+      setStatus("err", d.text, d.details);
+    });
+  }
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function renderEditor(detail) {
+    els.editor.innerHTML = "";
+    var head = el("div");
+    var title = el("h2", "", detail.title || detail.name);
+    title.style.cssText = "font-size:16px;text-transform:none;letter-spacing:0;color:var(--text);margin:0 0 4px;";
+    head.appendChild(title);
+    if (detail.description) head.appendChild(el("div", "desc", detail.description));
+    var pathLine = el("div", "plugin-meta");
+    var code = el("code", "", detail.path || "");
+    pathLine.appendChild(el("span", "", "配置文件："));
+    pathLine.appendChild(code);
+    pathLine.appendChild(el("span", "badge", detail.stored ? "已存在" : "尚未创建"));
+    head.appendChild(pathLine);
+    els.editor.appendChild(head);
+
+    if (!detail.editable || !detail.schema) {
+      var note = el("div", "empty", detail.note || "该插件未提供 config schema，不能在 WebUI 中编辑。");
+      els.editor.appendChild(note);
+      return;
+    }
+
+    if (Array.isArray(detail.warnings) && detail.warnings.length) {
+      var warn = el("div", "warnings", "配置警告：");
+      detail.warnings.forEach(function (w) { warn.appendChild(el("div", "", "· " + w)); });
+      els.editor.appendChild(warn);
+    }
+
+    var form = el("div");
+    var fields = detail.schema.fields || {};
+    Object.keys(fields).forEach(function (name) {
+      form.appendChild(renderField(name, fields[name], detail.values || {}));
+    });
+    els.editor.appendChild(form);
+
+    var actions = el("div", "actions");
+    var saveBtn = el("button", "primary", "保存并重载");
+    var reloadBtn = el("button", "", "重载插件");
+    saveBtn.addEventListener("click", save);
+    reloadBtn.addEventListener("click", reloadPlugin);
+    actions.appendChild(saveBtn);
+    actions.appendChild(reloadBtn);
+    els.editor.appendChild(actions);
+  }
+
+  function renderField(name, field, values) {
+    var wrap = el("div", "field");
+    wrap.dataset.name = name;
+    wrap.dataset.type = field.type;
+
+    var labelRow = el("label");
+    labelRow.appendChild(document.createTextNode(name));
+    labelRow.appendChild(el("span", "type", field.type));
+    if (field.secret) {
+      var sb = el("span", "badge secret", "secret");
+      labelRow.appendChild(sb);
+    }
+    wrap.appendChild(labelRow);
+
+    if (field.description) wrap.appendChild(el("div", "desc", field.description));
+
+    var value = values[name];
+    var control;
+    switch (field.type) {
+      case "text":
+        control = el("textarea");
+        control.value = value == null ? "" : String(value);
+        break;
+      case "bool": {
+        var row = el("div", "row");
+        control = el("input");
+        control.type = "checkbox";
+        control.checked = value === true;
+        row.appendChild(control);
+        row.appendChild(el("span", "hint", "开启 / 关闭"));
+        wrap.appendChild(row);
+        wrap.dataset.control = "checkbox";
+        return wrap;
+      }
+      case "int":
+      case "float": {
+        control = el("input");
+        control.type = "number";
+        control.step = field.type === "int" ? "1" : "any";
+        if (typeof field.min === "number") control.min = String(field.min);
+        if (typeof field.max === "number") control.max = String(field.max);
+        control.value = value == null ? "" : String(value);
+        if (field.placeholder) control.placeholder = field.placeholder;
+        break;
+      }
+      case "select": {
+        control = el("select");
+        var options = Array.isArray(field.options) ? field.options.slice() : [];
+        if (value != null && !options.some(function (o) { return String(o) === String(value); })) {
+          options.push(value);
+        }
+        options.forEach(function (o) {
+          var opt = el("option", "", String(o));
+          opt.value = String(o);
+          control.appendChild(opt);
+        });
+        control.value = value == null ? "" : String(value);
+        break;
+      }
+      case "list": {
+        control = el("textarea");
+        control.placeholder = "每行一项";
+        control.value = Array.isArray(value) ? value.join("\n") : "";
+        break;
+      }
+      case "string":
+      default:
+        control = el("input");
+        control.type = field.secret ? "password" : "text";
+        control.autocomplete = "off";
+        control.value = value == null ? "" : String(value);
+        if (field.placeholder) control.placeholder = field.placeholder;
+        if (field.secret) {
+          control.title = "值为 ****** 表示保持原值；清空表示清除该密钥";
+        }
+        break;
+    }
+    if (field.secret && field.type === "string") {
+      control.addEventListener("focus", function () {
+        if (control.value === "******") control.select();
+      });
+    }
+    wrap.appendChild(control);
+    return wrap;
+  }
+
+  function collectValues() {
+    var values = {};
+    var fieldEls = els.editor.querySelectorAll(".field");
+    fieldEls.forEach(function (wrap) {
+      var name = wrap.dataset.name;
+      var type = wrap.dataset.type;
+      var control = wrap.querySelector("input, textarea, select");
+      if (!control) return;
+      switch (type) {
+        case "bool":
+          values[name] = !!control.checked;
+          break;
+        case "int": {
+          if (control.value === "") return;
+          var iv = parseInt(control.value, 10);
+          if (!isNaN(iv)) values[name] = iv;
+          break;
+        }
+        case "float": {
+          if (control.value === "") return;
+          var fv = parseFloat(control.value);
+          if (!isNaN(fv)) values[name] = fv;
+          break;
+        }
+        case "list":
+          values[name] = control.value.split("\n").map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+          break;
+        case "select": {
+          var raw = control.value;
+          var field = state.detail && state.detail.schema && state.detail.schema.fields[name];
+          var opts = (field && Array.isArray(field.options)) ? field.options : [];
+          var match = opts.find(function (o) { return String(o) === raw; });
+          values[name] = match !== undefined ? match : raw;
+          break;
+        }
+        case "string":
+        case "text":
+        default:
+          values[name] = control.value;
+          break;
+      }
+    });
+    return values;
+  }
+
+  function setBusy(busy) {
+    state.busy = busy;
+    Array.prototype.forEach.call(els.editor.querySelectorAll("button"), function (b) {
+      b.disabled = busy;
+    });
+    els.refreshBtn.disabled = busy;
+    els.connectBtn.disabled = busy;
+  }
+
+  function save() {
+    if (!state.current || state.busy) return;
+    setBusy(true);
+    setStatus("warn", "保存中…");
+    var payload = { values: collectValues() };
+    request("/api/plugin-config/" + encodeURIComponent(state.current), { method: "PUT", body: payload })
+      .then(function (data) {
+        return loadDetail(state.current).then(function () {
+          setStatus("ok", "已保存并重载插件：" + state.current + "（" + (data.path || "") + "）");
+        });
+      })
+      .catch(function (err) {
+        var d = describeError(err);
+        // 插件可能因 reload 失败被卸载，刷新列表以反映真实状态。
+        return loadPlugins(state.current).then(function () {
+          setStatus("err", d.text, d.details);
+        });
+      })
+      .then(function () { setBusy(false); });
+  }
+
+  function reloadPlugin() {
+    if (!state.current || state.busy) return;
+    setBusy(true);
+    setStatus("warn", "重载中…");
+    request("/api/plugin-config/" + encodeURIComponent(state.current) + "/reload", { method: "POST" })
+      .then(function () {
+        return loadPlugins(state.current).then(function () {
+          setStatus("ok", "插件已重载：" + state.current);
+        });
+      })
+      .catch(function (err) {
+        var d = describeError(err);
+        setStatus("err", d.text, d.details);
+      })
+      .then(function () { setBusy(false); });
+  }
+
+  els.select.addEventListener("change", function () {
+    setStatus(null);
+    loadDetail(els.select.value);
+  });
+
+  els.refreshBtn.addEventListener("click", function () {
+    setStatus(null);
+    loadPlugins(state.current);
+  });
+
+  els.connectBtn.addEventListener("click", function () {
+    apiKey = els.apiKey.value.trim();
+    if (apiKey) localStorage.setItem(KEY_STORAGE, apiKey);
+    else localStorage.removeItem(KEY_STORAGE);
+    setStatus(null);
+    loadPlugins(state.current);
+  });
+
+  els.apiKey.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") els.connectBtn.click();
+  });
+
+  loadPlugins();
+})();
+</script>
+</body>
+</html>

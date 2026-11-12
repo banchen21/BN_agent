@@ -70,6 +70,18 @@
 | `memory-plugin` | 长期记忆提取（Engram 风格双时态） | —（通过 snapshot 注入） |
 | `proactive-plugin` | 主动消息推送 | — |
 | `toy-control-plugin` | 跳蛋远程控制 + Web 面板 | `toy_vibrate`, `toy_stop`, `toy_set_pattern`, `toy_status` |
+| `comfyui-qwen-plugin` | Qwen-Image 2.1 文生图 / 参考图编辑（ComfyUI 8188） | `comfyui_generate_image`, `comfyui_edit_image` |
+| `call-livekit-plugin` | LiveKit 实时通话后端：建房、participant token、agent dispatch | —（HTTP `/api/call/*`） |
+
+> **语音/视频通话**：`call-livekit-plugin`（Rust，信令/建房/token）+
+> `call-agent/`（Python sidecar，`agent_name=yueyue`，全双工语音、摄像头帧订阅与
+> `look_at_user` 截图理解）。部署与联调见 `deploy/livekit/README.md` 和
+> `call-agent/README.md`；人设/记忆数据放在 `data/yueyue/`（运行时数据，不入库）。
+>
+> **Qwen 参考图上限（本机实测）**：RTX 4070 Laptop 8GB 在 512²/8 步 LoRA 下
+> 4 张参考图安全，8 张会触发 GPU TDR（驱动重置）。插件通过
+> `max_reference_images`（默认 4，范围 1–16）在请求 ComfyUI 前强制拒绝超限参考图；
+> 显存 ≥12GB 可在 WebUI 配置里调高；TDR 后需整机重启才能恢复 ComfyUI。
 
 ## 快速开始
 
@@ -115,7 +127,8 @@ cargo run -p main-app
 | `LLM_LONG_SUMMARY_BATCH_SIZE` | `80` | 每次后台压缩的旧消息批量上限 |
 | `LLM_LONG_SUMMARY_MAX_CHARS` | `4000` | 长期摘要正文最大字符数 |
 | `LLM_MAX_TOOL_ROUNDS` | `20` | 最大工具调用轮数 |
-| `TOOL_TIMEOUT_SECS` | `180` | 单个工具执行超时(秒)，0=禁用；超时返回错误且不阻塞主流程 |
+| `TOOL_TIMEOUT_SECS` | `180` | 单个工具执行超时(秒)，0=禁用；超时返回错误且不阻塞主流程。本机 `.env` 设为 `0`：Qwen 生图约 5–14 分钟、编辑 7–20+ 分钟，180s 必然误判超时（如需上限建议 ≥1800） |
+| `ASR_TIMEOUT_SECS` | `60` | ASR 调用链整体超时(秒)，覆盖 ffmpeg 转码 + ASR API 请求/响应读取，0=禁用 |
 | `TOKEN_BUDGET_DAILY` | (无) | Token 预算·近 24h 上限；超限拒绝新请求，0/未设=无限 |
 | `TOKEN_BUDGET_WEEKLY` | (无) | Token 预算·近 7d 上限 |
 | `TOKEN_BUDGET_MONTHLY` | (无) | Token 预算·近 30d 上限 |
@@ -145,7 +158,10 @@ cargo run -p main-app
 | `CIRCUIT_BREAKER_DB_PATH` | `data/circuit_breaker.db` | 熔断状态持久化路径（重启恢复 open/half-open） |
 | `RATE_LIMIT_PER_MIN` | `30` | 每分钟每会话请求上限 |
 | `RATE_LIMIT_BURST` | `5` | 令牌桶突发容量 |
-| `API_KEY` | (无) | HTTP API 鉴权密钥；设置后除 `/api/health` 外所有接口需带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），未设=不鉴权 |
+| `API_KEY` | (无) | HTTP API 鉴权密钥；设置后除 `/api/health`、`/ui/config`、`/config` 外所有接口需带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），未设=不鉴权 |
+| `PERSONA_PATH` | `persona.md` | 人设文件路径；可指向 `data/yueyue/persona.md` 等自定义文件 |
+| `PLUGIN_CONFIG_DIR` | `data/plugin_configs` | 插件配置文件目录（每个插件一个 `<plugin-name>.json`） |
+| `HTTP_BIND` | `127.0.0.1:8080` | HTTP API 监听地址（端口冲突时可改；本机 `.env` 现为 `0.0.0.0:18080`，因 8080 被其它服务占用，且手机需局域网访问通话/配置页——暴露到局域网前务必设置 `API_KEY`） |
 | `SKILL_DIR` | `data/skills/` | Skill 文件目录 |
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI API 地址（image-gen-plugin） |
 | `COMFYUI_OUTPUT_DIR` | `output` | ComfyUI 输出目录（image-gen-plugin） |
@@ -153,7 +169,8 @@ cargo run -p main-app
 
 ### HTTP API
 
-> 🔐 设置 `API_KEY` 后，除 `/api/health` 外所有接口需在请求头携带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），否则返回 401；未设置则不鉴权。
+> 🔐 设置 `API_KEY` 后，除 `/api/health`、`/ui/config`、`/config` 外所有接口需在请求头携带 `Authorization: Bearer <key>`（或 `X-API-Key: <key>`），否则返回 401；未设置则不鉴权。
+> 本机（已绑 `0.0.0.0:18080`）的 key 存放在 `.secrets/api_key.txt`（已 gitignore，勿提交、勿打印到日志）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -169,7 +186,7 @@ cargo run -p main-app
 | POST | `/api/chat` | 带工具+历史的完整对话；body: `message`（必填）与可选的 `peer_id`、`user_name`、`source`（`peer_id` 归一化后默认 `web:default`） |
 | POST | `/api/chat/voice` | 语音消息：body `audio_base64`/`mime`（可选 `peer_id`/`user_name`/`source`）；ffmpeg 转 wav → 本地 yueyue ASR → 聊天 → 本地 GSV-TTS；返回 `transcript`/`reply`/`audio_base64`(WAV)/`duration_secs` |
 | GET | `/api/chat/history` | 按 `peer_id` 拉取历史，返回 JSON 数组（元素含 `role`/`content`/`peer_id`）；`limit` 默认 50、上限 500；省略 `peer_id` 时同 `/api/chat` 回退 `web:default` |
-| POST | `/api/chat/append` | 追加历史：body `peer_id` + `messages:[{role,content}]`（通话结束后 call-agent 回写 ASR 与回复文本） |
+| POST | `/api/chat/append` | 追加历史：body `peer_id` + `messages:[{role,content}]`（通话结束后由通话后端回写 ASR 与回复文本） |
 | GET | `/api/chat/sessions` | 列出会话元数据；支持 `peer_id`、`limit` 查询参数 |
 | POST | `/api/chat/sessions/refresh` | 刷新指定 `peer_id` 的标题、摘要和计数 |
 | GET | `/api/tools` | 列出所有已注册工具 |
@@ -187,8 +204,125 @@ cargo run -p main-app
 | GET | `/api/token-usage/budget` | Token 预算状态（是否超限/用量/上限） |
 | POST | `/api/cancel/{chat_id}` | 取消进行中的请求 |
 | GET | `/api/retry/state` | 熔断器状态 |
+| GET | `/api/plugin-config` | 插件配置 schema 列表（无 schema 的插件返回 `editable=false`） |
+| GET | `/api/plugin-config/{name}` | 读取单个插件配置（secret 字段返回 `******`） |
+| PUT | `/api/plugin-config/{name}` | 保存配置并自动重载插件；reload 后会校验插件运行态与工具是否仍注册，失败则回滚配置、恢复旧实例并返回 500 |
+| POST | `/api/plugin-config/{name}/reload` | 重载插件以应用已落盘的配置 |
+| GET | `/ui/config` | 静态插件配置 WebUI（免鉴权；页面内填写 API Key 调用 API） |
 | ANY | `/api/plugin/{name}/{path:.*}` | 代理到插件 API |
 | POST | `/api/shutdown` | 优雅关闭 |
+
+## 插件配置（schema 驱动 + WebUI）
+
+每个插件可以声明一份配置 schema，宿主据此提供读取、校验、WebUI 表单与保存后重载。
+
+### 存储与合并
+
+- 配置存放在 `data/plugin_configs/<plugin-name>.json`（`PLUGIN_CONFIG_DIR` 可覆盖），
+  `<plugin-name>` 必须等于 `PluginInfo.name`。
+- 文件内容为扁平 JSON 对象：`{"field": value, ...}`；文件不存在/损坏/字段非法都不会阻止插件加载，
+  宿主会用 schema 默认值补齐并记录警告。
+- 插件在 `start(ctx)` 中通过 `ctx.config`（`serde_json::Value`）读取已合并默认值的配置。
+- 保存配置后宿主自动 reload，插件 `start()` 重新读取 `ctx.config` 即生效。
+  宿主会校验「插件实例已运行 + 旧实例注册过的工具在新实例中仍注册」；任一不满足即视为失败：
+  回滚配置文件、用旧配置重新拉起旧实例，并返回 500 + `config_rolled_back` / `plugin_restored`，
+  不会出现「接口 200 但插件静默失效」的半加载状态。
+- 插件 `start()` 应把内部初始化失败作为 `Err` 返回；宿主另有工具校验作为兜底。
+- Windows 上立即卸载「启动失败」的 cdylib 可能触发访问冲突，宿主在失败路径会保留该库句柄
+  （进程内泄漏一次，换取稳定）；因此插件启动/reload 失败后若要重新编译该插件 DLL，
+  需重启 main-app 释放文件锁。
+
+### schema 约定 v1
+
+```json
+{
+  "version": 1,
+  "title": "ComfyUI Qwen 生图",
+  "description": "本地 Qwen-Image 出图参数",
+  "fields": {
+    "server_url":  {"type": "string", "default": "http://127.0.0.1:8188", "description": "ComfyUI 地址"},
+    "prompt_neg":  {"type": "text",   "default": "", "description": "默认负面提示词"},
+    "enabled":     {"type": "bool",   "default": true},
+    "timeout":     {"type": "int",    "default": 300, "min": 10, "max": 3600},
+    "cfg":         {"type": "float",  "default": 1.0, "min": 0, "max": 30},
+    "model":       {"type": "select", "default": "qwen-image", "options": ["qwen-image", "qwen-image-edit"]},
+    "tags":        {"type": "list",   "default": []},
+    "api_key":     {"type": "string", "default": "", "secret": true}
+  }
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `type` | `string` / `text` / `bool` / `int` / `float` / `select` / `list`（字符串数组） |
+| `default` | 默认值；缺省按类型生成（select 取第一个 option） |
+| `description` | WebUI 说明文字 |
+| `options` | `select` 必填候选值 |
+| `secret` | true 时 GET 打码为 `******`；PUT 回传 `******` 或省略=保持原值，空串=清空 |
+| `min` / `max` | `int` / `float` 范围校验 |
+| `placeholder` | 输入框占位符 |
+
+### 新增插件接入
+
+```rust
+use std::collections::BTreeMap;
+use plugin_interface::*;
+
+impl Plugin for MyPlugin {
+    fn config_schema(&self) -> Option<PluginConfigSchema> {
+        Some(PluginConfigSchema {
+            title: "我的插件".into(),
+            description: "示例配置".into(),
+            fields: BTreeMap::from([
+                ("url".into(), ConfigField {
+                    field_type: ConfigFieldType::String,
+                    default: serde_json::json!("http://127.0.0.1:9000"),
+                    description: "服务地址".into(),
+                    ..Default::default()
+                }),
+                ("api_key".into(), ConfigField {
+                    field_type: ConfigFieldType::String,
+                    secret: true,
+                    ..Default::default()
+                }),
+            ]),
+            ..Default::default()
+        })
+    }
+
+    fn start(&mut self, ctx: PluginContext) -> Result<(), Box<dyn std::error::Error>> {
+        let url = ctx.config.get("url").and_then(|v| v.as_str())
+            .unwrap_or("http://127.0.0.1:9000");
+        // 建议保留原环境变量作为 fallback，兼容旧部署
+        Ok(())
+    }
+}
+```
+
+没有实现 `config_schema()`（返回默认 `None`）的插件完全兼容：宿主注入空配置/原样透传
+`data/plugin_configs/<name>.json`，WebUI 中显示为不可编辑，加载与重载不受影响。
+
+### API 示例
+
+```bash
+# 列出可配置插件
+curl -H "X-API-Key: $API_KEY" http://127.0.0.1:8080/api/plugin-config
+# 读取（secret 已打码）
+curl -H "X-API-Key: $API_KEY" http://127.0.0.1:8080/api/plugin-config/comfyui-qwen-plugin
+# 保存并重载（****** 表示保持原 secret）
+curl -X PUT -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"values":{"server_url":"http://127.0.0.1:8188","timeout_secs":300}}' \
+  http://127.0.0.1:8080/api/plugin-config/comfyui-qwen-plugin
+# 手动重载
+curl -X POST -H "X-API-Key: $API_KEY" \
+  http://127.0.0.1:8080/api/plugin-config/comfyui-qwen-plugin/reload
+```
+
+浏览器打开 `http://127.0.0.1:18080/ui/config`（别名 `/config`）：输入 `API_KEY` → 选择插件 →
+schema 驱动表单 → 保存并重载。页面本身不包含任何 secret；接口仍受 `API_KEY` 保护，
+调用方式为 `X-API-Key: <key>` 或 `Authorization: Bearer <key>`，本机 key 见 `.secrets/api_key.txt`。
+> 本机 `.env` 中 `HTTP_BIND=0.0.0.0:18080`（8080 被其它服务占用，且手机需局域网访问），
+> 因此实际地址为 `http://127.0.0.1:18080/ui/config`；已启用 `API_KEY`，局域网访问需携带同一 key。
 
 ## 开发一个新插件
 
@@ -278,17 +412,19 @@ parameters:
 bn-agent/
 ├── plugin-interface/        # 共享契约：Plugin trait, ToolRegistry, EventBus
 ├── main-app/                # 主程序入口，HTTP API，Actor 系统
-│   └── src/
-│       ├── main.rs          # 启动入口 + HTTP 路由
-│       ├── llm_actor.rs     # LLM API 封装 + 流式响应
-│       ├── pipeline.rs      # 工具调用循环编排
-│       ├── plugin_manager.rs# 插件加载管理
-│       ├── chat_store.rs    # 对话历史 SQLite
-│       ├── retry_actor.rs   # 重试+熔断
-│       ├── token_usage_actor.rs  # Token 用量追踪
-│       ├── rate_limit_actor.rs   # 频率限制
-│       ├── metrics_actor.rs      # 结构化观测
-│       └── cancellation_actor.rs # 请求取消
+│   ├── src/
+│   │   ├── main.rs          # 启动入口 + HTTP 路由
+│   │   ├── llm_actor.rs     # LLM API 封装 + 流式响应
+│   │   ├── pipeline.rs      # 工具调用循环编排
+│   │   ├── plugin_manager.rs# 插件加载管理
+│   │   ├── plugin_config.rs # 插件配置服务（校验/打码/回滚）
+│   │   ├── chat_store.rs    # 对话历史 SQLite
+│   │   ├── retry_actor.rs   # 重试+熔断
+│   │   ├── token_usage_actor.rs  # Token 用量追踪
+│   │   ├── rate_limit_actor.rs   # 频率限制
+│   │   ├── metrics_actor.rs      # 结构化观测
+│   │   └── cancellation_actor.rs # 请求取消
+│   └── static/config.html   # 插件配置 WebUI（单文件，免构建）
 ├── plugins/
 │   ├── hello-plugin/        # 演示
 │   ├── logger-plugin/       # 日志
@@ -311,5 +447,6 @@ bn-agent/
 │   └── toy-control-plugin/   # 跳蛋远程控制 + Web 面板
 └── data/
     ├── skills/               # Skill .md 文件目录
+    ├── plugin_configs/       # 插件配置 JSON（每个插件一个文件）
     └── jailbreak_prompts.csv # 提示词注入（已 gitignore）
 ```

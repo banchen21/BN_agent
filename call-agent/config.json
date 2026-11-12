@@ -1,0 +1,51 @@
+{
+  "agent_name": "yueyue",
+  "livekit_url": "ws://127.0.0.1:7880",
+  "livekit_plugin_config": "E:/BN_agent/data/plugin_configs/call-livekit-plugin.json",
+  "yueyue_url": "http://127.0.0.1:8877",
+  "data_dir": "E:/BN_agent/data/yueyue",
+  "greeting": "喂？",
+  "worker_http_port": 8081,
+  "log_level": "INFO",
+  "turn": {
+    "framework_interrupt_min_duration": 3.0,
+    "endpointing_min_delay": 0.3,
+    "endpointing_max_delay": 3.0,
+    "vad_min_silence": 0.45,
+    "vad_prefix_padding": 0.4
+  },
+  "bargein": {
+    "duck_gain": 0.45,
+    "restore_after": 0.6,
+    "max_duck": 6.0
+  },
+  "video": {
+    "max_fps": 1.0,
+    "max_width": 960,
+    "jpeg_quality": 80
+  },
+  "vision": {
+    "provider": "magpie",
+    "model": "group/ds-v4.1",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "api_key": "",
+    "api_key_env": "ANTHROPIC_AUTH_TOKEN",
+    "api_key_file": "",
+    "claude_settings_path": "~/.claude/settings.json",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "max_tokens": 1200,
+    "timeout": 45.0,
+    "auto_look": true,
+    "auto_look_keywords": [
+      "看见", "看到", "长什么样", "样子", "穿的", "打扮", "画面", "摄像头", "镜头",
+      "拍照", "截图", "看看我", "看下我", "这是哪", "房间", "环境", "表情",
+      "我手上", "桌上", "自拍", "漂亮", "帅"
+    ],
+    "bn_agent": {
+      "main_app_url": "http://127.0.0.1:18080",
+      "api_key_file": "E:/BN_agent/.secrets/api_key.txt",
+      "tool_name": "image_understand"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.9.10
+    container_name: bn-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7880:7880/tcp"
+      - "7881:7881/tcp"
+      - "7882-7892:7882-7892/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7880/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

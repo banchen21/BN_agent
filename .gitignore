@@ -21,6 +21,9 @@ ehthumbs.db
 .env.local
 .env.*.local
 
+# ─── Local secrets (never commit) ─────────────────────────
+.secrets/
+
 # ─── Logs / Temp ──────────────────────────────────────────
 *.log
 logs/
@@ -54,6 +57,18 @@ data/
 !android-app/app/src/test/java/com/bnagent/shiyu/data/
 !android-app/app/src/test/java/com/bnagent/shiyu/data/**
 weixin-ilink-sdk-rust/
+
+# ─── LiveKit 运行时 ───────────────────────────────────────
+deploy/livekit/bin/
+deploy/livekit/tls/*.key
+deploy/livekit/tls/*.srl
+deploy/livekit/tls/*.csr
+# 真实 key/secret 的本地配置；模板见 livekit.example.yaml
+deploy/livekit/livekit.yaml
+*.pid
+
+# ─── QA 验收产物（证据/截图/临时实例） ────────────────────
+qa/
 
 # ─── Android（android-app） ────────────────────────────────
 android-app/local.properties

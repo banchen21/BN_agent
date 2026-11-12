@@ -1,0 +1,146 @@
+{
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "qwen-image-2.1-Q4_K_M.gguf"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    }
+  },
+  "9": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "lora_name": "p_q_image_2.1_8_steps_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "10": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": [
+        "9",
+        0
+      ],
+      "device": "auto",
+      "dtype": "default"
+    }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "生成尺寸",
+      "hub": {
+        "width": "width",
+        "height": "height"
+      }
+    }
+  },
+  "5": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "prompt": "",
+      "negative_prompt": "",
+      "resolution": 768
+    },
+    "_meta": {
+      "title": "提示词与参考图",
+      "hub": {
+        "positive": "prompt",
+        "negative": "negative_prompt"
+      }
+    }
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "5",
+        1
+      ],
+      "latent_image": [
+        "4",
+        0
+      ],
+      "seed": 42,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    },
+    "_meta": {
+      "title": "采样",
+      "hub": {
+        "latent": "latent_image",
+        "steps": "steps",
+        "cfg": "cfg"
+      }
+    }
+  },
+  "7": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "6",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "7",
+        0
+      ],
+      "filename_prefix": "BN_Agent/Qwen8Step"
+    },
+    "_meta": {
+      "title": "保存图片",
+      "hub": {
+        "output_image": "images"
+      }
+    }
+  }
+}

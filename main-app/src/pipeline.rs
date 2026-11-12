@@ -18,11 +18,11 @@ use plugin_interface::*;
 use std::sync::Arc;
 
 use crate::chat_store::{AppendJsonMessage, ChatStoreActor};
-use crate::metrics_actor::MetricsActor;
+use crate::metrics_actor::{MetricsActor, RecordError, RecordLlmLatency, RecordToolCall};
 use crate::plugin_manager::PluginManager;
-use crate::rate_limit_actor::RateLimitActor;
+use crate::rate_limit_actor::{CheckRateLimit, RateLimitActor};
 use crate::retry_actor::{RetryActor, RetryChatRequest};
-use crate::token_usage_actor::TokenUsageActor;
+use crate::token_usage_actor::{CheckTokenBudget, RecordTokenUsage, TokenUsageActor};
 
 const NO_PROACTIVE_MARKER: &str = "[NO_PROACTIVE]";
 
@@ -41,15 +41,18 @@ pub struct HandleUserMessage {
 // ── Actor ────────────────────────────────────────────────────────────────────
 
 pub struct PipelineActor {
-    retry_addr: Addr<RetryActor>,
-    plugin_manager: Addr<PluginManager>,
+    retry_addr: Recipient<RetryChatRequest>,
+    snapshot_refresher: Recipient<RefreshSnapshotsForPeer>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     snapshots: Arc<Mutex<Vec<String>>>,
-    event_bus: Addr<EventBus>,
-    rate_limit_addr: Addr<RateLimitActor>,
-    token_usage_addr: Addr<TokenUsageActor>,
-    metrics_addr: Addr<MetricsActor>,
-    store_addr: Addr<ChatStoreActor>,
+    event_bus: Recipient<Event>,
+    rate_limit_addr: Recipient<CheckRateLimit>,
+    token_budget_addr: Recipient<CheckTokenBudget>,
+    token_usage_addr: Recipient<RecordTokenUsage>,
+    llm_latency_addr: Recipient<RecordLlmLatency>,
+    tool_call_addr: Recipient<RecordToolCall>,
+    error_addr: Recipient<RecordError>,
+    store_addr: Recipient<AppendJsonMessage>,
 }
 
 impl PipelineActor {
@@ -65,15 +68,49 @@ impl PipelineActor {
         metrics_addr: Addr<MetricsActor>,
         store_addr: Addr<ChatStoreActor>,
     ) -> Self {
+        Self::from_parts(
+            retry_addr.recipient(),
+            plugin_manager.recipient(),
+            tool_registry,
+            snapshots,
+            event_bus.recipient(),
+            rate_limit_addr.recipient(),
+            token_usage_addr.clone().recipient(),
+            token_usage_addr.recipient(),
+            metrics_addr.clone().recipient(),
+            metrics_addr.clone().recipient(),
+            metrics_addr.recipient(),
+            store_addr.recipient(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        retry_addr: Recipient<RetryChatRequest>,
+        snapshot_refresher: Recipient<RefreshSnapshotsForPeer>,
+        tool_registry: Arc<Mutex<ToolRegistry>>,
+        snapshots: Arc<Mutex<Vec<String>>>,
+        event_bus: Recipient<Event>,
+        rate_limit_addr: Recipient<CheckRateLimit>,
+        token_budget_addr: Recipient<CheckTokenBudget>,
+        token_usage_addr: Recipient<RecordTokenUsage>,
+        llm_latency_addr: Recipient<RecordLlmLatency>,
+        tool_call_addr: Recipient<RecordToolCall>,
+        error_addr: Recipient<RecordError>,
+        store_addr: Recipient<AppendJsonMessage>,
+    ) -> Self {
         Self {
             retry_addr,
-            plugin_manager,
+            snapshot_refresher,
             tool_registry,
             snapshots,
             event_bus,
             rate_limit_addr,
+            token_budget_addr,
             token_usage_addr,
-            metrics_addr,
+            llm_latency_addr,
+            tool_call_addr,
+            error_addr,
             store_addr,
         }
     }
@@ -100,15 +137,18 @@ async fn process_message(
     video_mime: Option<String>,
     file_base64: Option<String>,
     file_name: Option<String>,
-    retry_addr: Addr<RetryActor>,
-    plugin_manager: Addr<PluginManager>,
+    retry_addr: Recipient<RetryChatRequest>,
+    snapshot_refresher: Recipient<RefreshSnapshotsForPeer>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     snapshots: Arc<Mutex<Vec<String>>>,
-    event_bus: Addr<EventBus>,
-    rate_limit_addr: Addr<RateLimitActor>,
-    token_usage_addr: Addr<TokenUsageActor>,
-    metrics_addr: Addr<MetricsActor>,
-    store_addr: Addr<ChatStoreActor>,
+    event_bus: Recipient<Event>,
+    rate_limit_addr: Recipient<CheckRateLimit>,
+    token_budget_addr: Recipient<CheckTokenBudget>,
+    token_usage_addr: Recipient<RecordTokenUsage>,
+    llm_latency_addr: Recipient<RecordLlmLatency>,
+    tool_call_addr: Recipient<RecordToolCall>,
+    error_addr: Recipient<RecordError>,
+    store_addr: Recipient<AppendJsonMessage>,
     // 存库时用的真实 user 文本：传 Some(String::new()) 可让本次 user 消息不入库（主动触发用）
     original_user_msg: Option<String>,
     allow_tools: bool,
@@ -116,10 +156,7 @@ async fn process_message(
     drop_reply_marker: Option<String>,
 ) {
     // 1. Rate limit check.
-    let allowed = rate_limit_addr
-        .send(crate::rate_limit_actor::CheckRateLimit)
-        .await
-        .unwrap_or(true);
+    let allowed = rate_limit_addr.send(CheckRateLimit).await.unwrap_or(true);
     if !allowed {
         log::warn!("[Pipeline] rate limited");
         emit_reply(
@@ -134,10 +171,7 @@ async fn process_message(
     }
 
     // 1b. Token budget check.
-    if let Ok(check) = token_usage_addr
-        .send(crate::token_usage_actor::CheckTokenBudget)
-        .await
-    {
+    if let Ok(check) = token_budget_addr.send(CheckTokenBudget).await {
         if !check.allowed {
             let period = check.period.as_deref().unwrap_or("?");
             log::warn!(
@@ -165,7 +199,7 @@ async fn process_message(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     // 3. Refresh peer-scoped snapshots.
-    let _ = plugin_manager
+    let _ = snapshot_refresher
         .send(RefreshSnapshotsForPeer {
             peer_id: peer_id.clone(),
         })
@@ -224,12 +258,12 @@ async fn process_message(
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             log::error!("[Pipeline] LLM error: {}", e);
-            metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+            llm_latency_addr.do_send(RecordLlmLatency {
                 seconds: req_start.elapsed().as_secs_f64(),
                 model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
                 success: false,
             });
-            metrics_addr.do_send(crate::metrics_actor::RecordError {
+            error_addr.do_send(RecordError {
                 category: "llm_api".into(),
             });
             emit_reply(
@@ -251,7 +285,7 @@ async fn process_message(
     let llm_elapsed = req_start.elapsed();
 
     // 6. Record token usage.
-    token_usage_addr.do_send(crate::token_usage_actor::RecordTokenUsage {
+    token_usage_addr.do_send(RecordTokenUsage {
         model: resp.model.clone(),
         prompt_tokens: resp.prompt_tokens,
         completion_tokens: resp.completion_tokens,
@@ -260,7 +294,7 @@ async fn process_message(
     });
 
     // Record metrics.
-    metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+    llm_latency_addr.do_send(RecordLlmLatency {
         seconds: llm_elapsed.as_secs_f64(),
         model: resp.model.clone(),
         success: true,
@@ -419,7 +453,7 @@ async fn process_message(
             };
             let tool_ms = tool_start.elapsed().as_millis() as u64;
 
-            metrics_addr.do_send(crate::metrics_actor::RecordToolCall {
+            tool_call_addr.do_send(RecordToolCall {
                 tool_name: tc.name.clone(),
                 success: result.success,
                 duration_ms: tool_ms,
@@ -523,14 +557,14 @@ async fn process_message(
         match next {
             Ok(Ok(r)) => {
                 let elapsed = req_start.elapsed();
-                token_usage_addr.do_send(crate::token_usage_actor::RecordTokenUsage {
+                token_usage_addr.do_send(RecordTokenUsage {
                     model: r.model.clone(),
                     prompt_tokens: r.prompt_tokens,
                     completion_tokens: r.completion_tokens,
                     prompt_cache_hit_tokens: r.prompt_cache_hit_tokens,
                     prompt_cache_miss_tokens: r.prompt_cache_miss_tokens,
                 });
-                metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+                llm_latency_addr.do_send(RecordLlmLatency {
                     seconds: elapsed.as_secs_f64(),
                     model: r.model.clone(),
                     success: true,
@@ -541,12 +575,12 @@ async fn process_message(
             }
             Ok(Err(e)) => {
                 log::error!("[Pipeline] tool round {} LLM error: {}", tool_round + 1, e);
-                metrics_addr.do_send(crate::metrics_actor::RecordLlmLatency {
+                llm_latency_addr.do_send(RecordLlmLatency {
                     seconds: req_start.elapsed().as_secs_f64(),
                     model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "unknown".into()),
                     success: false,
                 });
-                metrics_addr.do_send(crate::metrics_actor::RecordError {
+                error_addr.do_send(RecordError {
                     category: "llm_api".into(),
                 });
                 break;
@@ -570,13 +604,16 @@ impl Handler<HandleUserMessage> for PipelineActor {
 
     fn handle(&mut self, msg: HandleUserMessage, _ctx: &mut Self::Context) -> Self::Result {
         let retry_addr = self.retry_addr.clone();
-        let plugin_manager = self.plugin_manager.clone();
+        let snapshot_refresher = self.snapshot_refresher.clone();
         let tool_registry = self.tool_registry.clone();
         let snapshots = self.snapshots.clone();
         let event_bus = self.event_bus.clone();
         let rate_limit_addr = self.rate_limit_addr.clone();
+        let token_budget_addr = self.token_budget_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
-        let metrics_addr = self.metrics_addr.clone();
+        let llm_latency_addr = self.llm_latency_addr.clone();
+        let tool_call_addr = self.tool_call_addr.clone();
+        let error_addr = self.error_addr.clone();
         let store_addr = self.store_addr.clone();
         let text = msg.text;
         let source = msg.source;
@@ -596,13 +633,16 @@ impl Handler<HandleUserMessage> for PipelineActor {
                 None,
                 None,
                 retry_addr,
-                plugin_manager,
+                snapshot_refresher,
                 tool_registry,
                 snapshots,
                 event_bus,
                 rate_limit_addr,
+                token_budget_addr,
                 token_usage_addr,
-                metrics_addr,
+                llm_latency_addr,
+                tool_call_addr,
+                error_addr,
                 store_addr,
                 None,
                 true,
@@ -662,13 +702,16 @@ impl Handler<Event> for PipelineActor {
             let text = build_proactive_prompt(&note, &reason, idle_secs);
 
             let retry_addr = self.retry_addr.clone();
-            let plugin_manager = self.plugin_manager.clone();
+            let snapshot_refresher = self.snapshot_refresher.clone();
             let tool_registry = self.tool_registry.clone();
             let snapshots = self.snapshots.clone();
             let event_bus = self.event_bus.clone();
             let rate_limit_addr = self.rate_limit_addr.clone();
+            let token_budget_addr = self.token_budget_addr.clone();
             let token_usage_addr = self.token_usage_addr.clone();
-            let metrics_addr = self.metrics_addr.clone();
+            let llm_latency_addr = self.llm_latency_addr.clone();
+            let tool_call_addr = self.tool_call_addr.clone();
+            let error_addr = self.error_addr.clone();
             let store_addr = self.store_addr.clone();
             actix::spawn(async move {
                 log::info!(
@@ -687,13 +730,16 @@ impl Handler<Event> for PipelineActor {
                     None,
                     None,
                     retry_addr,
-                    plugin_manager,
+                    snapshot_refresher,
                     tool_registry,
                     snapshots,
                     event_bus,
                     rate_limit_addr,
+                    token_budget_addr,
                     token_usage_addr,
-                    metrics_addr,
+                    llm_latency_addr,
+                    tool_call_addr,
+                    error_addr,
                     store_addr,
                     Some(String::new()),
                     false,
@@ -782,13 +828,16 @@ impl Handler<Event> for PipelineActor {
         }
 
         let retry_addr = self.retry_addr.clone();
-        let plugin_manager = self.plugin_manager.clone();
+        let snapshot_refresher = self.snapshot_refresher.clone();
         let tool_registry = self.tool_registry.clone();
         let snapshots = self.snapshots.clone();
         let event_bus = self.event_bus.clone();
         let rate_limit_addr = self.rate_limit_addr.clone();
+        let token_budget_addr = self.token_budget_addr.clone();
         let token_usage_addr = self.token_usage_addr.clone();
-        let metrics_addr = self.metrics_addr.clone();
+        let llm_latency_addr = self.llm_latency_addr.clone();
+        let tool_call_addr = self.tool_call_addr.clone();
+        let error_addr = self.error_addr.clone();
         let store_addr = self.store_addr.clone();
         actix::spawn(async move {
             if !text.is_empty() {
@@ -809,13 +858,16 @@ impl Handler<Event> for PipelineActor {
                 file_base64,
                 file_name,
                 retry_addr,
-                plugin_manager,
+                snapshot_refresher,
                 tool_registry,
                 snapshots,
                 event_bus,
                 rate_limit_addr,
+                token_budget_addr,
                 token_usage_addr,
-                metrics_addr,
+                llm_latency_addr,
+                tool_call_addr,
+                error_addr,
                 store_addr,
                 None,
                 true,
@@ -834,7 +886,7 @@ async fn emit_reply(
     source: &str,
     peer_id: &str,
     request_id: Option<&str>,
-    event_bus: &Addr<EventBus>,
+    event_bus: &Recipient<Event>,
 ) {
     let chat_id = chat_id_from_peer_id(peer_id, source);
     let mut payload = serde_json::json!({
@@ -933,6 +985,313 @@ fn chat_id_from_peer_id(peer_id: &str, source: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token_usage_actor::BudgetCheck;
+
+    #[derive(Default)]
+    struct RetryState {
+        requests: Vec<(ChatRequest, u32)>,
+    }
+
+    struct MockRetry {
+        state: Arc<Mutex<RetryState>>,
+    }
+
+    impl Actor for MockRetry {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<RetryChatRequest> for MockRetry {
+        type Result = Result<LlmResponse, String>;
+
+        fn handle(&mut self, msg: RetryChatRequest, _ctx: &mut Self::Context) -> Self::Result {
+            self.state
+                .lock()
+                .requests
+                .push((msg.request, msg.max_retries));
+            Ok(LlmResponse {
+                content: "mock reply".into(),
+                model: "mock-model".into(),
+                prompt_tokens: 7,
+                completion_tokens: 8,
+                prompt_cache_hit_tokens: 1,
+                prompt_cache_miss_tokens: 2,
+                tool_calls: vec![],
+            })
+        }
+    }
+
+    struct MockSnapshotRefresher {
+        peers: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Actor for MockSnapshotRefresher {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<RefreshSnapshotsForPeer> for MockSnapshotRefresher {
+        type Result = ();
+
+        fn handle(&mut self, msg: RefreshSnapshotsForPeer, _ctx: &mut Self::Context) {
+            self.peers.lock().push(msg.peer_id);
+        }
+    }
+
+    #[derive(Default)]
+    struct TokenState {
+        budget_checks: usize,
+        records: Vec<(String, u32, u32, u32, u32)>,
+    }
+
+    struct MockTokenUsage {
+        state: Arc<Mutex<TokenState>>,
+    }
+
+    impl Actor for MockTokenUsage {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<CheckTokenBudget> for MockTokenUsage {
+        type Result = BudgetCheck;
+
+        fn handle(&mut self, _msg: CheckTokenBudget, _ctx: &mut Self::Context) -> Self::Result {
+            self.state.lock().budget_checks += 1;
+            BudgetCheck {
+                allowed: true,
+                period: None,
+                used: 0,
+                limit: 0,
+            }
+        }
+    }
+
+    impl Handler<RecordTokenUsage> for MockTokenUsage {
+        type Result = ();
+
+        fn handle(&mut self, msg: RecordTokenUsage, _ctx: &mut Self::Context) {
+            self.state.lock().records.push((
+                msg.model,
+                msg.prompt_tokens,
+                msg.completion_tokens,
+                msg.prompt_cache_hit_tokens,
+                msg.prompt_cache_miss_tokens,
+            ));
+        }
+    }
+
+    #[derive(Default)]
+    struct MetricsState {
+        latencies: Vec<(String, bool)>,
+        tool_calls: usize,
+        errors: Vec<String>,
+    }
+
+    struct MockMetrics {
+        state: Arc<Mutex<MetricsState>>,
+    }
+
+    impl Actor for MockMetrics {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<RecordLlmLatency> for MockMetrics {
+        type Result = ();
+
+        fn handle(&mut self, msg: RecordLlmLatency, _ctx: &mut Self::Context) {
+            self.state.lock().latencies.push((msg.model, msg.success));
+        }
+    }
+
+    impl Handler<RecordToolCall> for MockMetrics {
+        type Result = ();
+
+        fn handle(&mut self, _msg: RecordToolCall, _ctx: &mut Self::Context) {
+            self.state.lock().tool_calls += 1;
+        }
+    }
+
+    impl Handler<RecordError> for MockMetrics {
+        type Result = ();
+
+        fn handle(&mut self, msg: RecordError, _ctx: &mut Self::Context) {
+            self.state.lock().errors.push(msg.category);
+        }
+    }
+
+    struct MockRateLimit;
+
+    impl Actor for MockRateLimit {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<CheckRateLimit> for MockRateLimit {
+        type Result = bool;
+
+        fn handle(&mut self, _msg: CheckRateLimit, _ctx: &mut Self::Context) -> Self::Result {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct StoreState {
+        messages: Vec<AppendJsonMessage>,
+    }
+
+    struct MockStore {
+        state: Arc<Mutex<StoreState>>,
+    }
+
+    impl Actor for MockStore {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<AppendJsonMessage> for MockStore {
+        type Result = ();
+
+        fn handle(&mut self, msg: AppendJsonMessage, _ctx: &mut Self::Context) {
+            self.state.lock().messages.push(msg);
+        }
+    }
+
+    #[derive(Message)]
+    #[rtype(result = "Vec<Event>")]
+    struct RecordedEvents;
+
+    struct EventRecorder {
+        events: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl Actor for EventRecorder {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<Event> for EventRecorder {
+        type Result = ();
+
+        fn handle(&mut self, msg: Event, _ctx: &mut Self::Context) {
+            self.events.lock().push(msg);
+        }
+    }
+
+    impl Handler<RecordedEvents> for EventRecorder {
+        type Result = Vec<Event>;
+
+        fn handle(&mut self, _msg: RecordedEvents, _ctx: &mut Self::Context) -> Self::Result {
+            self.events.lock().clone()
+        }
+    }
+
+    #[actix_rt::test]
+    async fn handle_user_message_sends_chat_request_and_routes_reply() {
+        let retry_state = Arc::new(Mutex::new(RetryState::default()));
+        let retry = MockRetry {
+            state: retry_state.clone(),
+        }
+        .start();
+        let refreshed_peers = Arc::new(Mutex::new(Vec::new()));
+        let refresher = MockSnapshotRefresher {
+            peers: refreshed_peers.clone(),
+        }
+        .start();
+        let token_state = Arc::new(Mutex::new(TokenState::default()));
+        let token = MockTokenUsage {
+            state: token_state.clone(),
+        }
+        .start();
+        let metrics_state = Arc::new(Mutex::new(MetricsState::default()));
+        let metrics = MockMetrics {
+            state: metrics_state.clone(),
+        }
+        .start();
+        let store_state = Arc::new(Mutex::new(StoreState::default()));
+        let store = MockStore {
+            state: store_state.clone(),
+        }
+        .start();
+        let snapshots = Arc::new(Mutex::new(vec!["[记忆] snapshot".to_string()]));
+        let event_bus = EventBus::new().start();
+        let recorder = EventRecorder {
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+        .start();
+        event_bus
+            .send(Subscribe {
+                topic: "route.message".into(),
+                recipient: recorder.clone().recipient(),
+            })
+            .await
+            .unwrap();
+
+        let pipeline = PipelineActor::from_parts(
+            retry.recipient(),
+            refresher.recipient(),
+            Arc::new(Mutex::new(ToolRegistry::new())),
+            snapshots,
+            event_bus.clone().recipient(),
+            MockRateLimit.start().recipient(),
+            token.clone().recipient(),
+            token.recipient(),
+            metrics.clone().recipient(),
+            metrics.clone().recipient(),
+            metrics.recipient(),
+            store.recipient(),
+        )
+        .start();
+
+        pipeline
+            .send(HandleUserMessage {
+                text: "hello".into(),
+                source: "telegram".into(),
+                user_name: "Alice".into(),
+                peer_id: "telegram:42".into(),
+            })
+            .await
+            .unwrap();
+        event_bus
+            .send(Event::new("test.flush", serde_json::json!({}), "test"))
+            .await
+            .unwrap();
+        let events = recorder.send(RecordedEvents).await.unwrap();
+
+        let requests = &retry_state.lock().requests;
+        assert_eq!(requests.len(), 1);
+        let (request, max_retries) = &requests[0];
+        assert_eq!(*max_retries, 3);
+        assert_eq!(request.message, "hello");
+        assert_eq!(request.peer_id, "telegram:42");
+        assert_eq!(request.source, "telegram");
+        assert_eq!(request.user_name, "Alice");
+        assert_eq!(request.contexts, vec!["[记忆] snapshot"]);
+        assert!(request.tools.is_empty());
+        assert!(request.stream);
+        assert!(!request.request_id.is_empty());
+
+        assert_eq!(refreshed_peers.lock().as_slice(), &["telegram:42"]);
+        assert_eq!(token_state.lock().budget_checks, 1);
+        assert_eq!(
+            token_state.lock().records,
+            vec![("mock-model".into(), 7, 8, 1, 2)]
+        );
+        assert_eq!(
+            metrics_state.lock().latencies,
+            vec![("mock-model".into(), true)]
+        );
+        assert!(metrics_state.lock().errors.is_empty());
+        assert!(store_state.lock().messages.is_empty());
+
+        let routed = events
+            .iter()
+            .find(|event| event.topic == "route.message")
+            .expect("route.message event");
+        assert_eq!(routed.source, "pipeline");
+        assert_eq!(routed.data["text"], "mock reply");
+        assert_eq!(routed.data["source"], "telegram");
+        assert_eq!(routed.data["peer_id"], "telegram:42");
+        assert_eq!(routed.data["chat_id"], "42");
+        assert_eq!(
+            routed.data["request_id"].as_str(),
+            Some(request.request_id.as_str())
+        );
+    }
 
     #[test]
     fn proactive_prompt_with_note_is_reminder_only() {
