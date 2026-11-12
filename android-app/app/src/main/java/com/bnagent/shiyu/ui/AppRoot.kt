@@ -1,5 +1,6 @@
 package com.bnagent.shiyu.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +9,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -18,8 +21,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,7 +35,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -37,6 +47,7 @@ import com.bnagent.shiyu.data.LocalAppContainer
 import com.bnagent.shiyu.data.StockMedia
 import com.bnagent.shiyu.data.call.CallManager
 import com.bnagent.shiyu.data.call.formatCallDuration
+import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.ui.components.Avatar
 import com.bnagent.shiyu.ui.components.LocalToast
 import com.bnagent.shiyu.ui.components.MainTab
@@ -49,6 +60,10 @@ import com.bnagent.shiyu.ui.navigation.ShiYuRoutes
 import com.bnagent.shiyu.ui.theme.ApplySystemBarAppearance
 import com.bnagent.shiyu.ui.theme.ShiYuCallColors
 import com.bnagent.shiyu.ui.theme.ShiYuTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * 应用根组件：
@@ -78,6 +93,31 @@ fun ShiYuApp() {
         container.conversationRepository.conversation(callState.conversationId)
     }.collectAsStateWithLifecycle(initialValue = null)
 
+    // Agent 主动来电：本地没有推送通道，前台每 4s 轮询一次（通话中/来电弹窗期间暂停）。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
+    var incomingInvite by remember { mutableStateOf<CallSession?>(null) }
+    val inviteConversation by remember(incomingInvite?.peerId) {
+        container.conversationRepository.conversation(
+            incomingInvite?.peerId.orEmpty().removePrefix("android:"),
+        )
+    }.collectAsStateWithLifecycle(initialValue = null)
+
+    LaunchedEffect(callManager, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                if (incomingInvite == null && !callManager.uiState.value.isActive) {
+                    val invite = runCatching {
+                        val server = container.settingsRepository.serverSettings.first()
+                        container.agentClient.incomingCall(server)
+                    }.getOrNull()
+                    if (invite != null) incomingInvite = invite
+                }
+                delay(INCOMING_POLL_MS)
+            }
+        }
+    }
+
     val isCallRoute = route?.startsWith(ShiYuRoutes.CALL_PREFIX) == true
     val showMiniCall = callState.isActive && !isCallRoute
     val showTabBar = route == ShiYuRoutes.CHATS ||
@@ -93,6 +133,20 @@ fun ShiYuApp() {
     ApplySystemBarAppearance(darkChrome = settings.darkTheme || isCallRoute)
 
     val toastState = rememberToastHostState()
+
+    // 对方（Agent）主动挂断：提示；若正停在通话页，退回该会话聊天页。
+    LaunchedEffect(callManager) {
+        callManager.endedByPeer.collect { ended ->
+            toastState.show("对方已挂断")
+            val current = navController.currentBackStackEntry?.destination?.route
+            if (current?.startsWith(ShiYuRoutes.CALL_PREFIX) == true) {
+                navController.navigate(ShiYuRoutes.chat(ended.conversationId)) {
+                    popUpTo(navController.graph.findStartDestination().id) { inclusive = false }
+                    launchSingleTop = true
+                }
+            }
+        }
+    }
 
     CompositionLocalProvider(LocalToast provides toastState) {
         Box(
@@ -137,6 +191,34 @@ fun ShiYuApp() {
                         )
                     },
                     modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
+            incomingInvite?.let { invite ->
+                IncomingCallScreen(
+                    invite = invite,
+                    name = inviteConversation?.name.orEmpty().ifBlank { "齐悦" },
+                    avatar = inviteConversation?.avatar.orEmpty(),
+                    onAccept = {
+                        callManager.acceptInvite(invite)
+                        incomingInvite = null
+                        val convId = invite.peerId.removePrefix("android:").ifBlank { "yueyue" }
+                        val route = if (invite.mediaType.equals("video", ignoreCase = true)) {
+                            ShiYuRoutes.callVideo(convId)
+                        } else {
+                            ShiYuRoutes.callVoice(convId)
+                        }
+                        navController.navigate(route) { launchSingleTop = true }
+                    },
+                    onDecline = {
+                        incomingInvite = null
+                        scope.launch {
+                            runCatching {
+                                val server = container.settingsRepository.serverSettings.first()
+                                container.agentClient.declineCall(server, invite.room)
+                            }
+                        }
+                        toastState.show("已拒绝来电")
+                    },
                 )
             }
             ToastHost(state = toastState)
@@ -223,3 +305,108 @@ private fun MiniCallBar(
 
 private val MiniCallBarBg = Color(0xF2101416)
 private val MiniCallStatusColor = Color(0xFFC9D3D7)
+
+private const val INCOMING_POLL_MS = 4_000L
+
+/** Agent 来电全屏页：接听 / 拒绝。 */
+@Composable
+private fun IncomingCallScreen(
+    invite: CallSession,
+    name: String,
+    avatar: String,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    val isVideo = invite.mediaType.equals("video", ignoreCase = true)
+    BackHandler(onBack = onDecline)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ShiYuCallColors.background),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(64.dp))
+            Avatar(
+                name = name,
+                size = 112.dp,
+                model = StockMedia.drawableFor(avatar),
+                circle = true,
+            )
+            Spacer(Modifier.height(20.dp))
+            Text(
+                text = name,
+                color = ShiYuCallColors.name,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 30.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "邀请你${if (isVideo) "视频通话" else "语音通话"}…",
+                color = ShiYuCallColors.status,
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            Row(horizontalArrangement = Arrangement.spacedBy(56.dp)) {
+                IncomingCallButton(
+                    icon = ShiYuIcons.Hangup,
+                    label = "拒绝",
+                    container = ShiYuCallColors.hangup,
+                    onClick = onDecline,
+                )
+                IncomingCallButton(
+                    icon = if (isVideo) ShiYuIcons.Video else ShiYuIcons.Phone,
+                    label = "接听",
+                    container = AnswerGreen,
+                    onClick = onAccept,
+                )
+            }
+            Spacer(Modifier.height(36.dp))
+        }
+    }
+}
+
+@Composable
+private fun IncomingCallButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    container: Color,
+    onClick: () -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(CircleShape)
+                .background(container)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = Color.White,
+                modifier = Modifier.size(27.dp),
+            )
+        }
+        Text(
+            text = label,
+            color = ShiYuCallColors.controlLabel,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+        )
+    }
+}
+
+private val AnswerGreen = Color(0xFF2FBE6E)

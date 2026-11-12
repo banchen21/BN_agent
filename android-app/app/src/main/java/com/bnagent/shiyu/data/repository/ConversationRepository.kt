@@ -296,6 +296,30 @@ class ConversationRepository(
         store.update { it.appendOutgoing(conversationId, timed, time) }
     }
 
+    /**
+     * 写入一条通话记录（通话结束后由 CallManager 调用）。
+     *
+     * @param mine true = 我发起的通话（右侧气泡），false = Agent 来电（左侧气泡）。
+     * @param durationSeconds 接通时长；0 表示未接通。
+     */
+    suspend fun appendCallRecord(
+        conversationId: String,
+        video: Boolean,
+        durationSeconds: Int,
+        mine: Boolean,
+    ) {
+        if (store.state.first().conversation(conversationId) == null) return
+        val time = now().format(TIME_FORMAT)
+        val record = Message.Call(
+            id = newId(),
+            sender = if (mine) MessageSender.ME else MessageSender.THEM,
+            video = video,
+            durationSeconds = durationSeconds,
+            time = time,
+        )
+        store.update { it.appendAgentReply(conversationId, record, time) }
+    }
+
     /** 创建 LiveKit 通话房间并取 token；把当前会话的近期聊天记录一起带给 Agent。 */
     suspend fun startCall(conversationId: String, mediaType: String): CallSession {
         val server = settingsRepository.serverSettings.first()

@@ -61,6 +61,7 @@ import com.bnagent.shiyu.domain.model.Message
 import com.bnagent.shiyu.domain.model.MessageSender
 import com.bnagent.shiyu.domain.model.MessageStatus
 import com.bnagent.shiyu.domain.model.durationLabel
+import com.bnagent.shiyu.domain.model.summary
 import com.bnagent.shiyu.ui.components.Avatar
 import com.bnagent.shiyu.ui.components.ShiYuIcons
 import com.bnagent.shiyu.ui.theme.ShiYuTheme
@@ -241,6 +242,7 @@ private fun MessageRow(
                 is Message.Image -> ImageBubble(message, isMine, imageWidth, onImageClick)
                 is Message.File -> FileBubble(message, onDownloadClick)
                 is Message.Voice -> VoiceBubble(message, isMine, playing, onVoiceClick)
+                is Message.Call -> CallBubble(message, isMine)
                 is Message.System -> Unit
             }
             val status = message.status
@@ -300,6 +302,38 @@ private fun TextBubble(message: Message.Text, isMine: Boolean) {
     ) {
         Text(
             text = message.content,
+            color = if (isMine) colors.bubbleOutInk else colors.bubbleInInk,
+            fontSize = dimens.chatFontSize,
+            lineHeight = dimens.chatLineHeight,
+        )
+    }
+}
+
+// ─── 通话记录气泡 ─────────────────────────────────────────────────────
+
+/** 通话记录：与文本气泡同形状，图标 + 「语音通话：mm:ss」/「视频通话：mm:ss」。 */
+@Composable
+private fun CallBubble(message: Message.Call, isMine: Boolean) {
+    val colors = ShiYuTheme.colors
+    val dimens = ShiYuTheme.dimens
+    val shape = ShiYuTheme.bubbleShape(isMine = isMine, tail = true)
+    Row(
+        modifier = Modifier
+            .clip(shape)
+            .background(if (isMine) colors.bubbleOut else colors.bubbleIn)
+            .then(if (isMine) Modifier else Modifier.border(1.dp, colors.line, shape))
+            .padding(horizontal = 13.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = if (message.video) ShiYuIcons.Video else ShiYuIcons.Phone,
+            contentDescription = null,
+            tint = if (isMine) colors.bubbleOutInk else colors.bubbleInInk,
+            modifier = Modifier.size(17.dp),
+        )
+        Text(
+            text = message.summary,
             color = if (isMine) colors.bubbleOutInk else colors.bubbleInInk,
             fontSize = dimens.chatFontSize,
             lineHeight = dimens.chatLineHeight,

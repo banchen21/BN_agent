@@ -31,6 +31,12 @@
   右上角为**最小化**（系统返回键同）：只退出通话页、不挂断，通话由进程级 `CallManager` 继续；
   全应用顶部出现通话悬浮条（计时 + 挂断），点按悬浮条可回到通话页。挂断只在底部红色按钮 / 悬浮条挂断按钮。
   语音通话中可随时开/关摄像头；视频画面支持拖动小窗、点击小窗交换大小屏；Agent 大屏画面使用悦悦自拍。
+- **通话记录与 Agent 来电**：通话结束后在消息列表写入通话记录气泡（「语音通话：mm:ss」/「视频通话：mm:ss」，
+  我发起在右侧、Agent 来电在左侧），会话预览同步；Agent 可由 call-agent 通过 `POST /api/call/invite`
+  登记来电，App 在前台每 4s 轮询 `GET /api/call/incoming`，弹出全屏来电页（接听 / 拒绝，
+  拒绝走 `POST /api/call/decline`）；接听后直接用邀请里的 token 入会。通话中 Agent 主动离开
+  （LLM 输出 `<end_call/>` 或 `<call_back/>`）时，App 自动结束通话、提示「对方已挂断」并回到聊天页；
+  `<call_back/>` 会在 Agent 挂断后登记一条新的来电，实现「挂断后回拨」。
   通话会把当前会话最近 16 条聊天记录随 `/api/call/start` 带给 Agent，保持通话与文字聊天的主体一致性；
   通话结束后 call-agent 会把本通电话的 ASR 文本与回复回写 `/api/chat/append`，
   仅用于下一次聊天/通话的上下文，不在消息列表里生成文字气泡（避免干扰）。
@@ -108,6 +114,10 @@ adb reverse --remove-all
 - 每个会话固定 `peer_id = android:<会话 id>`（如 `android:lin`），后端据此维护**每会话独立的 agent 上下文**。
 - `GET /api/health`：健康检查（免鉴权）。
 - `GET /api/chat/history?peer_id=...`：按会话拉取历史（源码已实现；见下方旧实例说明）。
+- `POST /api/call/start` / `POST /api/call/end`：建房 / 删房（通话页）。
+- `POST /api/call/invite`：Agent 侧登记来电（call-agent 在请求回拨时调用）。
+- `GET /api/call/incoming`：取走待接来电（`{"invite": {...}}` 或 `{"invite": null}`）。
+- `POST /api/call/decline`：拒接来电，删除房间。
 - 客户端超时：连接 15s，读写与整体调用 60s；错误统一映射为中文 toast。
 
 ### 5. ⚠ 当前 18080 运行的是改动前旧二进制
