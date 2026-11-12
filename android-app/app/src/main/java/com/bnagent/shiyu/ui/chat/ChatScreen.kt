@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,15 +109,6 @@ fun ChatScreen(
         }.onFailure {
             toast?.show("当前设备没有可用的相机应用")
         }
-    }
-    // 通话中发的图片：经数据通道转给 Agent。
-    val callManager = container.callManager
-    val callActive = callManager.uiState.collectAsStateWithLifecycle()
-    DisposableEffect(callManager, id) {
-        vm.outgoingImageToAgent = { file ->
-            if (callActive.value.isActive) callManager.sendImageToAgent(file)
-        }
-        onDispose { vm.outgoingImageToAgent = null }
     }
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {

@@ -3,14 +3,12 @@ package com.bnagent.shiyu.data.call
 import android.app.Application
 import android.content.Context
 import android.media.AudioManager
-import com.bnagent.shiyu.data.ShiYuJson
 import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.data.repository.ConversationRepository
 import io.livekit.android.LiveKit
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
-import io.livekit.android.room.track.DataPublishReliability
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
@@ -19,7 +17,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -29,8 +26,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.Serializable
-import java.io.File
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -78,10 +73,6 @@ class CallManager(
     /** 对方（Agent）主动结束通话；UI 负责回聊天页并提示。 */
     private val _endedByPeer = MutableSharedFlow<CallUiState>(extraBufferCapacity = 1)
     val endedByPeer: SharedFlow<CallUiState> = _endedByPeer.asSharedFlow()
-
-    /** 通话中收到的图片（已保存到本地文件）。 */
-    private val _incomingImages = MutableSharedFlow<IncomingImage>(extraBufferCapacity = 4)
-    val incomingImages: SharedFlow<IncomingImage> = _incomingImages.asSharedFlow()
 
     /** 当前通话的 LiveKit Room；未在通话中为 null（渲染器据此初始化）。 */
     private val _room = MutableStateFlow<Room?>(null)
@@ -248,70 +239,6 @@ class CallManager(
         }
     }
 
-    /**
-     * 通话中 Agent 发图：数据通道只带下载路径，客户端带鉴权下载后
-     * 写入会话图片消息，并在通话页弹一层浮层展示。
-     */
-    private fun handleIncomingImage(bytes: ByteArray) {
-        val payload = runCatching {
-            ShiYuJson.decodeFromString(IncomingImage.serializer(), bytes.decodeToString())
-        }.getOrNull() ?: return
-        if (payload.type != "image" || payload.path.isBlank()) return
-        val conversationId = _uiState.value.conversationId
-        if (conversationId.isBlank()) return
-        scope.launch {
-            val data = repository.fetchCallImage(payload.path) ?: return@launch
-            val file = saveImage(data) ?: return@launch
-            repository.appendIncomingImage(conversationId, file.absolutePath, payload.caption)
-            _incomingImages.emit(
-                payload.copy(path = file.absolutePath),
-            )
-        }
-    }
-
-    /** 通话中收到对方自行拍摄的照片（`shiyu.photo` 原始 JPEG）：写入聊天并弹浮层。 */
-    private fun handleIncomingPhoto(jpeg: ByteArray) {
-        if (jpeg.size < 2 || jpeg[0] != 0xFF.toByte() || jpeg[1] != 0xD8.toByte()) return
-        val conversationId = _uiState.value.conversationId
-        scope.launch {
-            val file = saveImage(jpeg) ?: return@launch
-            if (conversationId.isNotBlank()) {
-                repository.appendIncomingImage(conversationId, file.absolutePath, "通话中收到的照片")
-            }
-            _incomingImages.emit(
-                IncomingImage(type = "image", path = file.absolutePath),
-            )
-        }
-    }
-
-    /**
-     * 我把一张图片发给 Agent：
-     * - 通话中：经 LiveKit 数据通道（topic `shiyu.photo`）把 JPEG 发给 call-agent，进入对话上下文；
-     * - 非通话状态：交给文字聊天后端（带图片的 `/api/chat`）。
-     */
-    fun sendImageToAgent(file: File) {
-        val state = _uiState.value
-        val room = _room.value
-        if (!state.isActive || room == null) return
-        scope.launch {
-            val data: ByteArray? =
-                runCatching { withContext(Dispatchers.IO) { file.readBytes() } }.getOrNull()
-            val sent = data != null && data.size <= MAX_PHOTO_BYTES && runCatching {
-                room.localParticipant.publishData(
-                    data = data,
-                    reliability = DataPublishReliability.RELIABLE,
-                    topic = PHOTO_TOPIC,
-                )
-            }.getOrNull()?.isSuccess == true
-            _events.tryEmit(if (sent) "照片已发给对方" else "照片没能发给对方")
-        }
-    }
-
-    private fun saveImage(bytes: ByteArray): File? = runCatching {
-        val dir = File(application.filesDir, "call_images").apply { mkdirs() }
-        File(dir, "img_${System.currentTimeMillis()}.jpg").apply { writeBytes(bytes) }
-    }.getOrNull()
-
     private fun observeRoom(room: Room) {
         roomEventsJob?.cancel()
         roomEventsJob = scope.launch {
@@ -332,12 +259,6 @@ class CallManager(
                         // 1:1 通话里对方（Agent）离开即视为对方挂断。
                         if (event.participant.identity != room.localParticipant.identity) {
                             endByPeer()
-                        }
-                    }
-                    is RoomEvent.DataReceived -> {
-                        when (event.topic) {
-                            IMAGE_TOPIC -> handleIncomingImage(event.data)
-                            PHOTO_TOPIC -> handleIncomingPhoto(event.data)
                         }
                     }
                     is RoomEvent.Disconnected -> {
@@ -438,24 +359,9 @@ class CallManager(
         val video: Boolean = false,
     )
 
-    /** 通话中收到的图片：数据通道里带服务端相对路径，发出前替换为本地文件路径。 */
-    @Serializable
-    data class IncomingImage(
-        val type: String = "",
-        val path: String = "",
-        val caption: String = "",
-    )
-
     private companion object {
         private const val TICK_MS = 1_000L
         private const val HEARTBEAT_MS = 4_000L
-        private const val IMAGE_TOPIC = "shiyu.image"
-
-        /** 我发给 Agent 的照片（JPEG 原始字节）。 */
-        private const val PHOTO_TOPIC = "shiyu.photo"
-
-        /** LiveKit 数据消息单包上限约 15KB 级，照片先压缩到 1.5MB 内避免被拒。 */
-        private const val MAX_PHOTO_BYTES = 1_500_000
     }
 }
 

@@ -25,14 +25,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -78,8 +76,6 @@ import com.bnagent.shiyu.ui.theme.ShiYuType
 import io.livekit.android.renderer.SurfaceViewRenderer
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.VideoTrack
-import kotlinx.coroutines.delay
-import java.io.File
 import kotlin.math.roundToInt
 
 /**
@@ -141,10 +137,6 @@ fun VoiceCallScreen(
     }
     LaunchedEffect(state.error) {
         state.error?.let { toast?.show("通话连接失败：$it") }
-    }
-    var incomingPhoto by remember { mutableStateOf<CallManager.IncomingImage?>(null) }
-    LaunchedEffect(Unit) {
-        callManager.incomingImages.collect { incomingPhoto = it }
     }
 
     Box(Modifier.fillMaxSize().background(ShiYuCallColors.background)) {
@@ -242,9 +234,6 @@ fun VoiceCallScreen(
                     )
                 }
             }
-        }
-        incomingPhoto?.let { photo ->
-            CallPhotoOverlay(photo = photo, onDismiss = { incomingPhoto = null })
         }
     }
 }
@@ -454,10 +443,6 @@ fun VideoCallScreen(
     LaunchedEffect(state.error) {
         state.error?.let { toast?.show("通话连接失败：$it") }
     }
-    var incomingPhoto by remember { mutableStateOf<CallManager.IncomingImage?>(null) }
-    LaunchedEffect(Unit) {
-        callManager.incomingImages.collect { incomingPhoto = it }
-    }
 
     var localLarge by remember { mutableStateOf(false) }
     var pipOffset by remember { mutableStateOf(Offset.Zero) }
@@ -661,10 +646,6 @@ fun VideoCallScreen(
                 modifier = Modifier.padding(start = 6.dp),
             )
         }
-
-        incomingPhoto?.let { photo ->
-            CallPhotoOverlay(photo = photo, onDismiss = { incomingPhoto = null })
-        }
     }
 }
 
@@ -742,48 +723,6 @@ private fun HangupButton(
             tint = Color.White,
             modifier = Modifier.size(iconSize),
         )
-    }
-}
-
-/** 通话中收到的图片：居中浮层，点按关闭，8 秒自动消失。 */
-@Composable
-private fun CallPhotoOverlay(
-    photo: CallManager.IncomingImage,
-    onDismiss: () -> Unit,
-) {
-    LaunchedEffect(photo.path) {
-        delay(8_000)
-        onDismiss()
-    }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xB306090B))
-            .clickable(onClick = onDismiss),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.padding(horizontal = 24.dp),
-        ) {
-            AsyncImage(
-                model = File(photo.path),
-                contentDescription = photo.caption.ifBlank { "收到的图片" },
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .widthIn(max = 320.dp)
-                    .heightIn(max = 440.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(ShiYuCallColors.videoLocalBg),
-            )
-            Text(
-                text = photo.caption.ifBlank { "齐悦发来一张图片 · 轻点关闭" },
-                color = Color.White,
-                fontSize = 12.5.sp,
-                lineHeight = 17.sp,
-            )
-        }
     }
 }
 

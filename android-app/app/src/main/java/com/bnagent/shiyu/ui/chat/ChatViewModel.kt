@@ -61,9 +61,6 @@ class ChatViewModel(
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val events: SharedFlow<String> = _events
 
-    /** 我给 Agent 发的图片（相册选图 / 拍照）本地路径；通话中由通话层经数据通道转给 Agent。 */
-    var outgoingImageToAgent: ((File) -> Unit)? = null
-
     /** 等待后端回复中：头部「正在输入…」+ 最后一条我方消息显示「发送中…」。 */
     var typing by mutableStateOf(false)
         private set
@@ -167,7 +164,6 @@ class ChatViewModel(
                     ),
                 )
             }.onFailure { _events.tryEmit("图片发送失败，请稍后重试") }
-            deliverImageToAgent(path)
         }
     }
 
@@ -197,13 +193,7 @@ class ChatViewModel(
                     ),
                 )
             }.onFailure { _events.tryEmit("照片发送失败，请稍后重试") }
-            deliverImageToAgent(path)
         }
-    }
-
-    /** 通话中把图片经 LiveKit 数据通道转给 Agent（通话层未注册时为 no-op）。 */
-    private fun deliverImageToAgent(path: String) {
-        runCatching { outgoingImageToAgent?.invoke(File(path)) }
     }
 
     // ─── 录音 ─────────────────────────────────────────────────────────

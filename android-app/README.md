@@ -14,7 +14,7 @@
   搜索（名字+预览）；右上角「+」暂为占位（toast），底栏未读总数不含静音会话。
 - **聊天**：文本走真实后端（乐观插入 → 等待期间「正在输入」→ 回复 / 失败标记「发送失败」+ toast）；
   图片走系统 Photo Picker 或「+ → 拍照」（系统相机，FileProvider 写入 cache），支持全屏查看器；
-  通话中拍的图/选的图还会经 LiveKit 数据通道（topic `shiyu.photo`）发给 Agent，进入通话对话上下文，Agent 可用视觉能力回应；文件（演示文件池，下载按钮提示「演示环境，暂不下载」）；
+  通话中拍的图/选的图作为普通聊天图片消息发到主后端，由 Agent 读取并看到图片内容；文件（演示文件池，下载按钮提示「演示环境，暂不下载」）；
   语音为真实录音（MediaRecorder）→ 上传 `POST /api/chat/voice`（后端本地 SenseVoice ASR → LLM → 本地 GSV-TTS），
   返回转写文本与可播放的语音回复（MediaPlayer）；群聊显示发送者名；含日期分隔、已读/已送达状态、
   清空聊天确认弹窗；聊天内可进个人资料 / 气泡与主题 / 通话。
@@ -34,9 +34,8 @@
   点一下回到通话页，点红色按钮挂断），由前台服务保活、不影响音视频；需要用户允许「显示在其他应用上层」。
   挂断只在底部红色按钮 / 悬浮条 / 浮窗挂断按钮。
   语音通话中可随时开/关摄像头；视频画面支持拖动小窗（限制在屏幕内）、点击小窗交换大小屏；Agent 大屏画面使用悦悦自拍。
-- **通话中发图**：call-agent 根据 LLM 的 `<send_photo>` 标签调用后端 `comfyui_generate_image` 生成图片，
-  经 LiveKit 数据通道（topic `shiyu.image`）把下载路径发给客户端；App 用 `GET /api/call/image/{name}` 下载后
-  追加一条对方图片消息，并在通话页弹出可点掉的图片浮层（约 1-3 分钟出图）。
+- **通话中发图**：Agent 在通话中生成的图片通过主后端的图片消息下发，App 按普通聊天图片消息展示，
+  不再走 LiveKit 数据通道。
 - **通话记录与 Agent 来电**：通话结束后在消息列表写入通话记录气泡（「语音通话：mm:ss」/「视频通话：mm:ss」，
   我发起在右侧、Agent 来电在左侧），会话预览同步；Agent 可由 call-agent 通过 `POST /api/call/invite`
   登记来电，App 在前台每 4s 轮询 `GET /api/call/incoming`，弹出全屏来电页（接听 / 拒绝，
@@ -196,7 +195,7 @@ app/src/main/java/com/bnagent/shiyu/
 
 - **通话浮窗需要「显示在其他应用上层」权限**：未授权时退到桌面不会显示浮窗（有一次性提示），通话仍由前台服务保活。
   浮窗位置固定在右上区域（暂不支持拖动浮窗本身）。
-- **通话依赖本机 LiveKit**：7880/tcp 信令、7881/tcp 与 7882-7892/udp 媒体、call-agent 8081；
+- **通话依赖本机 LiveKit**：7880/tcp 信令、7881/tcp 与 7882-7892/udp 媒体；
   LAN 联调使用 `ws://<PC>:7880`（绕过 Caddy 自签证书），生产环境应改为 wss + 可信证书。
 - **语音消息依赖本机 yueyue 8877**：`/api/asr`（SenseVoice）+ `/api/tts`（GSV-TTS），后端用 ffmpeg 把 m4a 转 16k wav。
 - **LLM Key**：`LLM_API_KEY` 失效会导致 `/api/chat` 与语音回复 502；需更换 key 并重启后端。

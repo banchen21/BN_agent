@@ -320,26 +320,6 @@ class ConversationRepository(
         store.update { it.appendAgentReply(conversationId, record, time) }
     }
 
-    /** 下载 Agent 通话中发来的图片（相对路径，如 `/api/call/image/x.png`）。失败返回 null。 */
-    suspend fun fetchCallImage(path: String): ByteArray? =
-        runCatching {
-            agentClient.fetchImage(settingsRepository.serverSettings.first(), path)
-        }.getOrNull()
-
-    /** 追加一条对方发来的图片消息（通话中收到）。 */
-    suspend fun appendIncomingImage(conversationId: String, filePath: String, alt: String?) {
-        if (store.state.first().conversation(conversationId) == null) return
-        val time = now().format(TIME_FORMAT)
-        val message = Message.Image(
-            id = newId(),
-            sender = MessageSender.THEM,
-            asset = filePath,
-            alt = alt?.takeIf { it.isNotBlank() } ?: "通话中收到的图片",
-            time = time,
-        )
-        store.update { it.appendAgentReply(conversationId, message, time) }
-    }
-
     /** 创建 LiveKit 通话房间并取 token；把当前会话的近期聊天记录一起带给 Agent。 */
     suspend fun startCall(conversationId: String, mediaType: String): CallSession {
         val server = settingsRepository.serverSettings.first()
