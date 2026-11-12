@@ -197,6 +197,7 @@ class AgentClient(
             identity = dto.identity,
             mediaType = dto.mediaType,
             expiresInSecs = dto.expiresInSecs,
+            peerId = peerId,
         )
     }
 
@@ -209,6 +210,46 @@ class AgentClient(
         val request = buildRequest(
             settings = settings,
             path = PATH_CALL_END,
+            body = payload.toRequestBody(JSON_MEDIA_TYPE),
+        )
+        runCatching { execute(request, timeoutSeconds = 15) }
+    }
+
+    /**
+     * 轮询 Agent 主动发起的来电；没有待接来电时返回 null。
+     * 服务端返回即消费该邀请（接听后用返回的 token 直接入会）。
+     */
+    suspend fun incomingCall(settings: ServerSettings): CallSession? {
+        val request = buildRequest(settings = settings, path = PATH_CALL_INCOMING)
+        val body = execute(request, timeoutSeconds = 15)
+        val dto = try {
+            json.decodeFromString(IncomingCallResponseDto.serializer(), body)
+        } catch (e: SerializationException) {
+            throw AgentException.InvalidResponse("/api/call/incoming 响应解析失败：${e.message}", e)
+        }
+        val invite = dto.invite ?: return null
+        if (invite.token.isBlank() || invite.room.isBlank()) return null
+        return CallSession(
+            url = invite.url,
+            urlLocal = invite.urlLocal,
+            token = invite.token,
+            room = invite.room,
+            identity = invite.identity,
+            mediaType = invite.mediaType,
+            expiresInSecs = invite.expiresInSecs,
+            peerId = invite.peerId,
+        )
+    }
+
+    /** 拒绝 Agent 来电：让后端删除房间；失败不阻断本地流程。 */
+    suspend fun declineCall(settings: ServerSettings, room: String) {
+        val payload = json.encodeToString(
+            CallEndRequestDto.serializer(),
+            CallEndRequestDto(room = room),
+        )
+        val request = buildRequest(
+            settings = settings,
+            path = PATH_CALL_DECLINE,
             body = payload.toRequestBody(JSON_MEDIA_TYPE),
         )
         runCatching { execute(request, timeoutSeconds = 15) }
@@ -310,6 +351,8 @@ class AgentClient(
         private const val PATH_AGENTS = "/api/agents"
         private const val PATH_CALL_START = "/api/call/start"
         private const val PATH_CALL_END = "/api/call/end"
+        private const val PATH_CALL_INCOMING = "/api/call/incoming"
+        private const val PATH_CALL_DECLINE = "/api/call/decline"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
@@ -367,7 +410,7 @@ data class CallHistoryMessage(
     val content: String,
 )
 
-/** LiveKit 通话会话（/api/call/start 返回）。 */
+/** LiveKit 通话会话（/api/call/start 返回，或 Agent 来电邀请）。 */
 data class CallSession(
     val url: String,
     val urlLocal: String,
@@ -376,6 +419,8 @@ data class CallSession(
     val identity: String,
     val mediaType: String,
     val expiresInSecs: Long,
+    /** Agent 来电时带上的后端 peer_id（如 `android:yueyue`）。 */
+    val peerId: String = "",
 ) {
     /**
      * 本机 LAN 联调用的信令地址：服务端返回 wss://host:7443（Caddy 自签证书），
@@ -491,6 +536,13 @@ internal data class CallStartResponseDto(
     val identity: String = "",
     val mediaType: String = "audio",
     @SerialName("expiresInSecs") val expiresInSecs: Long = 0,
+    // 仅 /api/call/incoming 的邀请里带（发起方 peer_id）
+    val peerId: String = "",
+)
+
+@Serializable
+internal data class IncomingCallResponseDto(
+    val invite: CallStartResponseDto? = null,
 )
 
 @Serializable

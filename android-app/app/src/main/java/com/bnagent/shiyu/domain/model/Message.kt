@@ -111,6 +111,19 @@ sealed interface Message {
         override val who: String? = null,
     ) : Message
 
+    /** 通话记录：语音 / 视频 + 接通时长（0 = 未接通）。 */
+    @Serializable
+    @SerialName("call")
+    data class Call(
+        override val id: String,
+        override val sender: MessageSender,
+        val video: Boolean,
+        val durationSeconds: Int,
+        override val time: String? = null,
+        override val status: MessageStatus? = null,
+        override val who: String? = null,
+    ) : Message
+
     @Serializable
     @SerialName("system")
     data class System(
@@ -129,12 +142,24 @@ sealed interface Message {
 val Message.Voice.durationLabel: String
     get() = String.format(Locale.ROOT, "%d:%02d", durationSeconds / 60, durationSeconds % 60)
 
+/** 通话时长展示：`mm:ss`（与通话页计时一致）。 */
+val Message.Call.durationLabel: String
+    get() = String.format(Locale.ROOT, "%02d:%02d", durationSeconds / 60, durationSeconds % 60)
+
+/** 通话记录气泡文案：`语音通话：03:53` / `视频通话：未接通`。 */
+val Message.Call.summary: String
+    get() {
+        val kind = if (video) "视频通话" else "语音通话"
+        return if (durationSeconds > 0) "$kind：$durationLabel" else "$kind：未接通"
+    }
+
 /** 设计规格 5.3 的 previewOf 规则（不含群聊「谁：」前缀）。 */
 fun Message.previewText(): String = when (this) {
     is Message.Text -> content
     is Message.Image -> "图片 · ${alt?.takeIf { it.isNotBlank() } ?: "图片消息"}"
     is Message.File -> "文件 · $fileName"
     is Message.Voice -> "语音 · $durationLabel"
+    is Message.Call -> summary
     is Message.System -> text
 }
 
@@ -150,6 +175,7 @@ fun Message.withStatus(status: MessageStatus?): Message = when (this) {
     is Message.Image -> copy(status = status)
     is Message.File -> copy(status = status)
     is Message.Voice -> copy(status = status)
+    is Message.Call -> copy(status = status)
     is Message.System -> this
 }
 
@@ -159,5 +185,6 @@ fun Message.withTime(time: String?): Message = when (this) {
     is Message.Image -> copy(time = time)
     is Message.File -> copy(time = time)
     is Message.Voice -> copy(time = time)
+    is Message.Call -> copy(time = time)
     is Message.System -> this
 }
