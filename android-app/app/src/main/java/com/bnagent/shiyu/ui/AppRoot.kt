@@ -136,7 +136,19 @@ fun ShiYuApp() {
     // App 在前台时用内置悬浮条；离开 App（退到桌面/其他应用）时改由系统级浮窗承接通话。
     val overlayContext = LocalContext.current.applicationContext
     val appLifecycle = lifecycleOwner.lifecycle
-    val appActive = appLifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+    // 只有真正回到前台（RESUMED）才算：WINDOWING 模式下退到桌面时 Activity 仍会停在 STARTED。
+    var appActive by remember { mutableStateOf(appLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+    DisposableEffect(appLifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> appActive = true
+                Lifecycle.Event.ON_PAUSE -> appActive = false
+                else -> Unit
+            }
+        }
+        appLifecycle.addObserver(observer)
+        onDispose { appLifecycle.removeObserver(observer) }
+    }
     var pendingOverlayGrant by remember { mutableStateOf(false) }
     val showOverlay: () -> Unit = {
         if (Settings.canDrawOverlays(overlayContext)) {
@@ -187,6 +199,16 @@ fun ShiYuApp() {
         PendingCallOpen.consume()?.takeIf { it.isNotBlank() }?.let { id ->
             val video = callManager.uiState.value.video
             navController.navigate(callRouteFor(id, video)) { launchSingleTop = true }
+        }
+    }
+    // 通话进行中回到 App 时统一落在通话页：避免通话页与聊天页同时在栈上，互相误触发。
+    val inCallConversation = if (callState.isActive) callState.conversationId else null
+    LaunchedEffect(inCallConversation, route, appActive) {
+        val id = inCallConversation ?: return@LaunchedEffect
+        if (!appActive || route.isNullOrEmpty()) return@LaunchedEffect
+        if (route.startsWith(ShiYuRoutes.CALL_PREFIX)) return@LaunchedEffect
+        navController.navigate(callRouteFor(id, callState.video)) {
+            launchSingleTop = true
         }
     }
     // 从授权页回来：若用户已允许浮窗，再补开服务。
