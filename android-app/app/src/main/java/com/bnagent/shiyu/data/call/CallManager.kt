@@ -3,6 +3,7 @@ package com.bnagent.shiyu.data.call
 import android.app.Application
 import android.content.Context
 import android.media.AudioManager
+import com.bnagent.shiyu.data.ShiYuJson
 import com.bnagent.shiyu.data.remote.CallSession
 import com.bnagent.shiyu.data.repository.ConversationRepository
 import io.livekit.android.LiveKit
@@ -26,6 +27,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import java.io.File
 import java.util.Locale
 
 /**
@@ -58,6 +61,10 @@ class CallManager(
     /** 对方（Agent）主动结束通话；UI 负责回聊天页并提示。 */
     private val _endedByPeer = MutableSharedFlow<CallUiState>(extraBufferCapacity = 1)
     val endedByPeer: SharedFlow<CallUiState> = _endedByPeer.asSharedFlow()
+
+    /** 通话中收到的图片（已保存到本地文件）。 */
+    private val _incomingImages = MutableSharedFlow<IncomingImage>(extraBufferCapacity = 4)
+    val incomingImages: SharedFlow<IncomingImage> = _incomingImages.asSharedFlow()
 
     /** 当前通话的 LiveKit Room；未在通话中为 null（渲染器据此初始化）。 */
     private val _room = MutableStateFlow<Room?>(null)
@@ -220,6 +227,32 @@ class CallManager(
         }
     }
 
+    /**
+     * 通话中 Agent 发图：数据通道只带下载路径，客户端带鉴权下载后
+     * 写入会话图片消息，并在通话页弹一层浮层展示。
+     */
+    private fun handleIncomingImage(bytes: ByteArray) {
+        val payload = runCatching {
+            ShiYuJson.decodeFromString(IncomingImage.serializer(), bytes.decodeToString())
+        }.getOrNull() ?: return
+        if (payload.type != "image" || payload.path.isBlank()) return
+        val conversationId = _uiState.value.conversationId
+        if (conversationId.isBlank()) return
+        scope.launch {
+            val data = repository.fetchCallImage(payload.path) ?: return@launch
+            val file = saveImage(data) ?: return@launch
+            repository.appendIncomingImage(conversationId, file.absolutePath, payload.caption)
+            _incomingImages.emit(
+                payload.copy(path = file.absolutePath),
+            )
+        }
+    }
+
+    private fun saveImage(bytes: ByteArray): File? = runCatching {
+        val dir = File(application.filesDir, "call_images").apply { mkdirs() }
+        File(dir, "img_${System.currentTimeMillis()}.jpg").apply { writeBytes(bytes) }
+    }.getOrNull()
+
     private fun observeRoom(room: Room) {
         roomEventsJob?.cancel()
         roomEventsJob = scope.launch {
@@ -241,6 +274,9 @@ class CallManager(
                         if (event.participant.identity != room.localParticipant.identity) {
                             endByPeer()
                         }
+                    }
+                    is RoomEvent.DataReceived -> {
+                        if (event.topic == IMAGE_TOPIC) handleIncomingImage(event.data)
                     }
                     is RoomEvent.Disconnected -> {
                         if (_uiState.value.connected) {
@@ -324,8 +360,17 @@ class CallManager(
         val video: Boolean = false,
     )
 
+    /** 通话中收到的图片：数据通道里带服务端相对路径，发出前替换为本地文件路径。 */
+    @Serializable
+    data class IncomingImage(
+        val type: String = "",
+        val path: String = "",
+        val caption: String = "",
+    )
+
     private companion object {
         private const val TICK_MS = 1_000L
+        private const val IMAGE_TOPIC = "shiyu.image"
     }
 }
 
