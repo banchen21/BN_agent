@@ -96,16 +96,22 @@ class ChatViewModel(
      * 发送文本到 Agent（peer_id = android:<convId>，仓库内部处理）。
      * 本地乐观消息由仓库立即插入；等待期间 typing=true，失败抛 AgentException 并保留 FAILED 状态。
      */
+    /** 最近发送的一张本地图片（选图/拍照），下一条文字会和它一起发给 Agent。 */
+    private var pendingImagePath: String? = null
+
     fun sendText(raw: String) {
         val content = raw.trim()
         if (content.isEmpty()) return
         // 「要语音 / 发条语音」这类消息：让后端把回复合成语音发回来。
         val voiceReply = WANTS_VOICE.any { content.contains(it) }
+        // 刚发的图片会挂在这条文字上一并送给 Agent（她说的话出现在图片之后）。
+        val imagePath = pendingImagePath
         viewModelScope.launch {
             pendingSends++
             typing = true
             try {
-                repository.sendText(conversationId, content, voiceReply)
+                repository.sendText(conversationId, content, voiceReply, imagePath)
+                if (imagePath != null) pendingImagePath = null
             } catch (e: AgentException) {
                 _events.tryEmit(e.userMessage)
             } catch (e: Exception) {
@@ -156,12 +162,16 @@ class ChatViewModel(
                 _events.tryEmit("无法读取所选图片，请重试")
                 return@launch
             }
-            sendImageToAgent(path, "图片发送失败，请稍后重试")
+            sendImageOnly(path, "图片发送失败，请稍后重试")
         }
     }
 
-    /** 本地落一条我方图片消息，并把图片一起发给 Agent（连文字回复一起出现）。 */
-    private suspend fun sendImageToAgent(path: String, failureHint: String) {
+    /**
+     * 图片只落成本地气泡（和以前一致）：不自动发起对话、不自动带出那句默认提问。
+     * 想让她看图时，用户自己配一句话发出去即可（文字 + 图片一起发送）。
+     */
+    private suspend fun sendImageOnly(path: String, failureHint: String) {
+        pendingImagePath = path
         runCatching {
             repository.sendAttachment(
                 conversationId,
@@ -171,15 +181,8 @@ class ChatViewModel(
                     asset = path,
                 ),
             )
-            pendingSends++
-            typing = true
-            try {
-                repository.sendText(conversationId, "", imagePath = path)
-            } finally {
-                pendingSends = (pendingSends - 1).coerceAtLeast(0)
-                typing = pendingSends > 0
-            }
         }.onFailure {
+            if (pendingImagePath == path) pendingImagePath = null
             _events.tryEmit(failureHint)
         }
     }
@@ -200,7 +203,7 @@ class ChatViewModel(
                 _events.tryEmit("读取照片失败，请重试")
                 return@launch
             }
-            sendImageToAgent(path, "照片发送失败，请稍后重试")
+            sendImageOnly(path, "照片发送失败，请稍后重试")
         }
     }
 
