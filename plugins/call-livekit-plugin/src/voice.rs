@@ -4,6 +4,9 @@
 //! 按「有人声 / 静音」切出句子，`pcm16_to_wav` 负责编码成 ASR 接口要的 WAV。
 
 /// 线性插值重采样（单声道）。`from_rate == 0` 时返回空。
+///
+/// 语音合成常见 32k/24k，直接抽到 48k 时会把 8k 以上的噪声（齿音、气声）折回来，
+/// 听起来像「沙哑/信号不好」。先做一个简单的 2 点滑动平均当低通，再做插值。
 pub fn resample_mono(input: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
     if from_rate == 0 || to_rate == 0 || input.is_empty() {
         return Vec::new();
@@ -11,15 +14,26 @@ pub fn resample_mono(input: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
     if from_rate == to_rate {
         return input.to_vec();
     }
+    // 上采样且源采样率低于 48k 时，预滤波（等效截止在源奈奎斯特附近）。
+    let filtered: Vec<i16> = if to_rate > from_rate && from_rate <= 32_000 && input.len() > 1 {
+        let mut out = Vec::with_capacity(input.len());
+        out.push(input[0]);
+        for pair in input.windows(2) {
+            out.push(((pair[0] as i32 + pair[1] as i32) / 2) as i16);
+        }
+        out
+    } else {
+        input.to_vec()
+    };
     let ratio = from_rate as f64 / to_rate as f64;
-    let out_len = ((input.len() as f64) / ratio).floor() as usize;
+    let out_len = ((filtered.len() as f64) / ratio).floor() as usize;
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
         let pos = i as f64 * ratio;
         let idx = pos.floor() as usize;
         let frac = pos - idx as f64;
-        let a = input[idx.min(input.len() - 1)] as f64;
-        let b = input[(idx + 1).min(input.len() - 1)] as f64;
+        let a = filtered[idx.min(filtered.len() - 1)] as f64;
+        let b = filtered[(idx + 1).min(filtered.len() - 1)] as f64;
         out.push((a + (b - a) * frac).round().clamp(-32768.0, 32767.0) as i16);
     }
     out
@@ -138,6 +152,8 @@ pub struct Vad {
     speech_frames: u32,
     /// 当前句中总共的帧数（用于超长截断）。
     total_frames: u32,
+    /// 环境底噪（RMS，静音时自适应更新）。
+    noise_floor: f64,
     in_speech: bool,
 }
 
@@ -146,7 +162,7 @@ impl Vad {
         Self {
             sample_rate,
             frame_ms: 20,
-            energy_threshold: 380.0,
+            energy_threshold: 220.0,
             min_speech_ms: 200,
             min_silence_ms: 600,
             max_utterance_ms: 30_000,
@@ -155,6 +171,7 @@ impl Vad {
             silent_frames: 0,
             speech_frames: 0,
             total_frames: 0,
+            noise_floor: 0.0,
             in_speech: false,
         }
     }
@@ -184,7 +201,13 @@ impl Vad {
         let mut done = Vec::new();
         while self.pending.len() >= frame_len {
             let frame: Vec<i16> = self.pending.drain(..frame_len).collect();
-            if let Some(sentence) = self.process_frame(&frame) {
+            // 自适应底噪：静音时缓慢跟随环境噪声，阈值取 max(基础值, 底噪×3)。
+            let energy = rms(&frame);
+            if !self.in_speech {
+                self.noise_floor = self.noise_floor * 0.95 + energy * 0.05;
+            }
+            let threshold = self.energy_threshold.max(self.noise_floor * 3.0);
+            if let Some(sentence) = self.process_frame_with(&frame, threshold) {
                 done.push(sentence);
             }
         }
@@ -212,9 +235,9 @@ impl Vad {
         self.in_speech = false;
     }
 
-    fn process_frame(&mut self, frame: &[i16]) -> Option<Vec<i16>> {
+    fn process_frame_with(&mut self, frame: &[i16], threshold: f64) -> Option<Vec<i16>> {
         let energy = rms(frame);
-        let voiced = energy >= self.energy_threshold;
+        let voiced = energy >= threshold;
         if !self.in_speech && !voiced {
             return None;
         }

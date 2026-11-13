@@ -593,7 +593,7 @@ pub fn agent_identity(room: &str) -> String {
 }
 
 async fn publish_tts_track(room: &Room) -> Result<mpsc::Sender<Vec<i16>>, String> {
-    let source = NativeAudioSource::new(AudioSourceOptions::default(), 48_000, 1, 1000);
+    let source = NativeAudioSource::new(AudioSourceOptions::default(), 48_000, 1, 2000);
     let track =
         LocalAudioTrack::create_audio_track(TTS_TRACK_NAME, RtcAudioSource::Native(source.clone()));
     let options = TrackPublishOptions {
@@ -870,16 +870,16 @@ async fn speak(
     pcm48.extend(std::iter::repeat(0i16).take(14_400));
 
     let _permit = session.speaking.clone().acquire_owned().await.ok();
-    for (i, chunk) in pcm48.chunks(480).enumerate() {
+    for chunk in pcm48.chunks(480) {
         if session.generation.load(Ordering::SeqCst) != generation || session.is_ended() {
             session.info("悦悦被打断，停止播报");
             return;
         }
+        // 不需要人为限速：NativeAudioSource 自带 queue_size_ms 缓冲，
+        // 之前的「每 5 帧睡 50ms」会把喂音速度降到约 19k 样本/秒（<24k），
+        // 缓冲一空就变成断续/沙哑。
         if tts.send(chunk.to_vec()).await.is_err() {
             return;
-        }
-        if i % 5 == 4 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
