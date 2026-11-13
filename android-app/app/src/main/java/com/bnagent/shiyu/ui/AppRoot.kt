@@ -172,12 +172,14 @@ fun ShiYuApp() {
         CallFloatingService.stop(overlayContext)
         CallFloatingService.isRunning = false
     }
-    DisposableEffect(callState.isActive) {
-        if (callState.isActive) showOverlay() else hideOverlay()
+    // 系统浮窗与前台服务都只在「已接通」后才启用：呼出/接通中不建任何额外窗口，
+    // 否则它会在通话页上叠一层，既挡住 PiP 又拖慢渲染。
+    DisposableEffect(callState.connected) {
+        if (callState.connected) showOverlay() else hideOverlay()
         onDispose { }
     }
-    LaunchedEffect(callState.isActive, appActive) {
-        if (!callState.isActive) return@LaunchedEffect
+    LaunchedEffect(callState.connected, appActive) {
+        if (!callState.connected) return@LaunchedEffect
         if (appActive) {
             // 从后台回到 App（或从授权页返回）：收起系统浮窗，用内置悬浮条。
             CallFloatingOverlay.hide()

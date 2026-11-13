@@ -212,6 +212,11 @@ object CallFloatingOverlay {
         conversation: ConversationRepository,
     ) {
         val appContext = context.applicationContext
+        // 只有真正接通后才允许建窗：呼出/接通中绝不能叠在通话页上。
+        if (!manager.uiState.value.connected) {
+            hide()
+            return
+        }
         if (!android.provider.Settings.canDrawOverlays(appContext)) {
             // 用户关了浮窗权限：收起浮窗，从通知点回 App 时再恢复通话页。
             hide()
