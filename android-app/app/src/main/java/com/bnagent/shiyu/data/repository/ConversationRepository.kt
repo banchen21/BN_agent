@@ -170,32 +170,49 @@ class ConversationRepository(
      * @return 后端回复消息。
      * @throws AgentException 网络 / 鉴权 / 服务端错误（此时我方消息保留并标记为「发送失败」）。
      */
-    suspend fun sendText(
-        conversationId: String,
-        text: String,
-        voiceReply: Boolean = false,
-        imagePath: String? = null,
-    ): Message {
-        val content = text.trim().ifEmpty {
-            if (imagePath != null) DEFAULT_IMAGE_PROMPT else ""
-        }
+    suspend fun sendText(conversationId: String, text: String, voiceReply: Boolean = false): Message {
+        val content = text.trim()
         require(content.isNotEmpty()) { "消息不能为空" }
-        // 「要语音」时后端把回复合成 WAV 一并返回，这里落成语音气泡。
+        return sendTurn(conversationId, content, voiceReply, imagePath = null)
+    }
 
+    /**
+     * 把一张图片当作一条消息发给 Agent（调用方已落了本地图片气泡）。
+     * 后端把图片作为用户输入处理，界面上只会多出她的回复。
+     */
+    suspend fun sendImageToAgent(conversationId: String, imagePath: String): Message {
+        if (store.state.first().conversation(conversationId) == null) {
+            throw IllegalArgumentException("会话不存在：$conversationId")
+        }
+        return sendTurn(conversationId, "", voiceReply = false, imagePath = imagePath)
+    }
+
+    private suspend fun sendTurn(
+        conversationId: String,
+        content: String,
+        voiceReply: Boolean,
+        imagePath: String?,
+    ): Message {
         val snapshot = store.state.first()
         if (snapshot.conversation(conversationId) == null) {
             throw IllegalArgumentException("会话不存在：$conversationId")
         }
         val server = settingsRepository.serverSettings.first()
         val sentTime = now().format(TIME_FORMAT)
-        val mine = Message.Text(
-            id = newId(),
-            sender = MessageSender.ME,
-            content = content,
-            time = sentTime,
-            status = MessageStatus.SENT,
-        )
-        store.update { it.appendOutgoing(conversationId, mine, sentTime) }
+        // 纯图片消息：本地气泡已由调用方插入，这里只在有文字时补一条我方文字。
+        val mine = if (content.isNotBlank()) {
+            val outgoing = Message.Text(
+                id = newId(),
+                sender = MessageSender.ME,
+                content = content,
+                time = sentTime,
+                status = MessageStatus.SENT,
+            )
+            store.update { it.appendOutgoing(conversationId, outgoing, sentTime) }
+            outgoing
+        } else {
+            null
+        }
 
         val reply = try {
             agentClient.chat(
@@ -209,7 +226,7 @@ class ConversationRepository(
                 },
             )
         } catch (error: AgentException) {
-            store.update { it.markMessageFailed(conversationId, mine.id) }
+            if (mine != null) store.update { it.markMessageFailed(conversationId, mine.id) }
             throw error
         }
 
@@ -501,6 +518,3 @@ private fun ChatState.setVoiceTranscript(
     }
     return copy(messages = messages + (conversationId to updated))
 }
-
-/** 只发图片不配文字时，带给 Agent 的默认提问。 */
-private const val DEFAULT_IMAGE_PROMPT = "你看得出来这张图里是什么吗？"

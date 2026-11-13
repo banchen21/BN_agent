@@ -664,10 +664,17 @@ pub(crate) async fn run_chat_ex(
 
     let request_id = uuid::Uuid::new_v4().to_string();
 
+    // 只发了一张图：给她一句系统侧提示，界面上不会多出任何用户文字。
+    let outbound_message = if message.trim().is_empty() && image_base64.is_some() {
+        "（对方给你发来一张图片）".to_string()
+    } else {
+        message.to_string()
+    };
+
     match retry_addr
         .send(retry_actor::RetryChatRequest {
             request: ChatRequest {
-                message: message.to_string(),
+                message: outbound_message,
                 peer_id,
                 tools,
                 skip_store: false,
