@@ -131,7 +131,8 @@ fun ShiYuApp() {
     }
 
     val isCallRoute = route?.startsWith(ShiYuRoutes.CALL_PREFIX) == true
-    val showMiniCall = callState.isActive && !isCallRoute
+    // 悬浮条只在「通话已接通且不在通话页」时出现：呼出/接通中不应该弹出来。
+    val showMiniCall = callState.connected && !isCallRoute
 
     // App 在前台时用内置悬浮条；离开 App（退到桌面/其他应用）时改由系统级浮窗承接通话。
     val overlayContext = LocalContext.current.applicationContext
