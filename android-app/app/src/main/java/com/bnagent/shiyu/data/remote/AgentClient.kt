@@ -45,12 +45,14 @@ class AgentClient(
         peerId: String,
         message: String,
         userName: String,
+        voice: Boolean = false,
     ): ChatReply {
         val payload = ChatRequestDto(
             message = message,
             peerId = peerId,
             userName = userName,
             source = SOURCE,
+            voice = voice,
         )
         val request = buildRequest(
             settings = settings,
@@ -68,11 +70,16 @@ class AgentClient(
         if (content.isEmpty()) {
             throw AgentException.InvalidResponse("/api/chat 返回了空消息")
         }
+        val audio = dto.audioBase64.takeIf { it.isNotBlank() }?.let {
+            runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull()
+        }
         return ChatReply(
             content = content,
             model = dto.model,
             promptTokens = dto.promptTokens,
             completionTokens = dto.completionTokens,
+            audio = audio,
+            durationSeconds = dto.durationSeconds,
         )
     }
 
@@ -388,12 +395,14 @@ data class AgentInfo(
     val online: Boolean,
 )
 
-/** 后端回复。 */
+/** 后端回复；语音回复时附带合成好的 WAV。 */
 data class ChatReply(
     val content: String,
     val model: String,
     val promptTokens: Long,
     val completionTokens: Long,
+    val audio: ByteArray? = null,
+    val durationSeconds: Int = 0,
 )
 
 /** 语音消息后端结果：转写 + 文字回复 + 可选回语音频（WAV）。 */
@@ -479,6 +488,8 @@ internal data class ChatRequestDto(
     @SerialName("peer_id") val peerId: String,
     @SerialName("user_name") val userName: String,
     val source: String,
+    /** 后端本轮用语音回复（返回 audio_base64）。 */
+    val voice: Boolean = false,
 )
 
 @Serializable
@@ -487,6 +498,8 @@ internal data class ChatResponseDto(
     val model: String = "",
     @SerialName("prompt_tokens") val promptTokens: Long = 0,
     @SerialName("completion_tokens") val completionTokens: Long = 0,
+    @SerialName("audio_base64") val audioBase64: String = "",
+    @SerialName("duration_secs") val durationSeconds: Int = 0,
 )
 
 @Serializable

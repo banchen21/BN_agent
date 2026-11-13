@@ -170,9 +170,10 @@ class ConversationRepository(
      * @return 后端回复消息。
      * @throws AgentException 网络 / 鉴权 / 服务端错误（此时我方消息保留并标记为「发送失败」）。
      */
-    suspend fun sendText(conversationId: String, text: String): Message {
+    suspend fun sendText(conversationId: String, text: String, voiceReply: Boolean = false): Message {
         val content = text.trim()
         require(content.isNotEmpty()) { "消息不能为空" }
+        // 「要语音」时后端把回复合成 WAV 一并返回，这里落成语音气泡。
 
         val snapshot = store.state.first()
         if (snapshot.conversation(conversationId) == null) {
@@ -195,6 +196,7 @@ class ConversationRepository(
                 peerId = AgentClient.peerIdFor(conversationId),
                 message = content,
                 userName = snapshot.profile.name,
+                voice = voiceReply,
             )
         } catch (error: AgentException) {
             store.update { it.markMessageFailed(conversationId, mine.id) }
@@ -202,12 +204,27 @@ class ConversationRepository(
         }
 
         val replyTime = now().format(TIME_FORMAT)
-        val replyMessage = Message.Text(
-            id = newId(),
-            sender = MessageSender.THEM,
-            content = reply.content,
-            time = replyTime,
-        )
+        // 「要语音」时后端会合成 WAV：落成可播放的语音气泡（转写为文字回复）。
+        val replyAudio = reply.audio?.let {
+            runCatching { VoiceFileStore.saveAgentReply(appContext, conversationId, it) }.getOrNull()
+        }
+        val replyMessage: Message = if (replyAudio != null) {
+            Message.Voice(
+                id = newId(),
+                sender = MessageSender.THEM,
+                durationSeconds = reply.durationSeconds.coerceAtLeast(1),
+                filePath = replyAudio.absolutePath,
+                transcript = reply.content,
+                time = replyTime,
+            )
+        } else {
+            Message.Text(
+                id = newId(),
+                sender = MessageSender.THEM,
+                content = reply.content,
+                time = replyTime,
+            )
+        }
         store.update { it.appendAgentReply(conversationId, replyMessage, replyTime) }
         return replyMessage
     }

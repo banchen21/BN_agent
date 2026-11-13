@@ -563,6 +563,9 @@ struct ChatPayload {
     user_name: Option<String>,
     /// 消息来源渠道（如 `android`、`web`）。
     source: Option<String>,
+    /// 客户端明确要求这一轮用语音回复（返回 audio_base64）。
+    #[serde(default)]
+    voice: Option<bool>,
 }
 
 /// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
@@ -590,6 +593,18 @@ pub(crate) async fn run_chat(
     user_name: String,
     source: String,
 ) -> Result<LlmResponse, (u16, String)> {
+    run_chat_ex(state, message, peer_id, user_name, source, false).await
+}
+
+/// 同 [`run_chat`]；`force_voice` 为客户端显式要求语音回复。
+pub(crate) async fn run_chat_ex(
+    state: &AppState,
+    message: &str,
+    peer_id: String,
+    user_name: String,
+    source: String,
+    force_voice: bool,
+) -> Result<LlmResponse, (u16, String)> {
     let retry_addr = state
         .retry_addr
         .clone()
@@ -604,13 +619,23 @@ pub(crate) async fn run_chat(
         .await;
     let is_android = source == "android";
     let mut contexts: Vec<String> = state.snapshots.lock().clone();
+    // 客户端不执行工具；但「要语音」这类请求要把语音消息发回去。
+    let mut want_voice = false;
     if is_android {
-        // 聊天客户端不执行工具，也不应看到工具/系统指令语法。
-        contexts.push(
-            "【聊天客户端】请直接以自然语言回复用户；不要输出任何工具调用、XML/JSON 标签、\
-             系统指令或定时任务语法。"
-                .to_string(),
-        );
+        want_voice = force_voice || android_wants_voice(state, &peer_id, message).await;
+        if want_voice {
+            contexts.push(
+                "【聊天客户端·语音回复】用户想要听到你的声音，这次回复会被合成语音消息发给他。\
+                 请只输出要念出来的话：口语、短句，不要表情符号、旁白、动作描写，不要输出任何标签或工具调用语法。"
+                    .to_string(),
+            );
+        } else {
+            contexts.push(
+                "【聊天客户端】请直接以自然语言回复用户；不要输出任何工具调用、XML/JSON 标签、\
+                 系统指令或定时任务语法。"
+                    .to_string(),
+            );
+        }
     }
 
     // Android 客户端是纯聊天界面，不执行工具调用；暴露工具会让模型返回
@@ -657,7 +682,11 @@ pub(crate) async fn run_chat(
         })
         .await
     {
-        Ok(Ok(resp)) => {
+        Ok(Ok(mut resp)) => {
+            if want_voice {
+                // 语音回合：模型偶尔会带 <qq_voice> 之类标签，只留要念的正文。
+                resp.content = strip_markup(&resp.content);
+            }
             // Record token usage if available.
             if let Some(ref tu) = state.token_usage_addr {
                 tu.do_send(token_usage_actor::RecordTokenUsage {
@@ -677,15 +706,43 @@ pub(crate) async fn run_chat(
 
 async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl Responder {
     let peer_id = normalize_peer_id(body.peer_id.as_deref().unwrap_or(""));
-    match run_chat(
+    let source = body.source.clone().unwrap_or_default();
+    let force_voice = body.voice.unwrap_or(false);
+    match run_chat_ex(
         &state,
         &body.message,
         peer_id,
         body.user_name.clone().unwrap_or_default(),
-        body.source.clone().unwrap_or_default(),
+        source.clone(),
+        force_voice,
     )
     .await
     {
+        Ok(resp) if force_voice => {
+            // 客户端要求语音：合成 WAV 一起返回；失败保留文字。
+            let mut resp = resp;
+            let reply = resp.content.trim().to_string();
+            match voice_api::synthesize(&reply).await {
+                Ok(wav) => {
+                    let duration = voice_api::wav_duration_secs(&wav)
+                        .map(|secs| secs.round().max(1.0) as u32)
+                        .unwrap_or(1);
+                    let mut value = serde_json::to_value(&resp).unwrap_or_default();
+                    value["audio_base64"] = serde_json::json!(
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wav)
+                    );
+                    value["audio_mime"] = serde_json::json!("audio/wav");
+                    value["duration_secs"] = serde_json::json!(duration);
+                    HttpResponse::Ok().json(value)
+                }
+                Err(e) => {
+                    log::warn!("[chat] 语音回复合成失败，返回文字：{e}");
+                    let mut value = serde_json::to_value(&resp).unwrap_or_default();
+                    value["tts_error"] = serde_json::json!(e);
+                    HttpResponse::Ok().json(value)
+                }
+            }
+        }
         Ok(resp) => HttpResponse::Ok().json(resp),
         Err((code, message)) => HttpResponse::build(
             actix_web::http::StatusCode::from_u16(code)
@@ -694,6 +751,74 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         .json(serde_json::json!({ "error": message })),
     }
 }
+
+/// 去掉模型输出里的所有标签（如 `<qq_voice>…</qq_voice>`、`<tool_call>`），只留正文。
+fn strip_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        let Some(rel_end) = rest[start..].find('>') else { break };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + rel_end + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// 用户是否明确要求「用语音回」（要语音 / 发条语音 / 说给我听 …）。
+fn wants_voice_reply(message: &str) -> bool {
+    const HINTS: [&str; 8] = [
+        "要语音", "发语音", "语音回", "用语音", "发条语音", "发个语音", "语音消息", "说给我听",
+    ];
+    HINTS.iter().any(|h| message.contains(h))
+}
+
+/// 让模型判断这一轮要不要用语音回复（只看最近一句，成本低）。
+async fn android_wants_voice(state: &AppState, peer_id: &str, message: &str) -> bool {
+    if wants_voice_reply(message) {
+        return true;
+    }
+    let Some(retry) = state.retry_addr.clone() else {
+        return false;
+    };
+    let prompt = format!(
+        "用户在聊天里说：「{message}」\n请只回答 YES 或 NO：这句话是在要求我用语音（声音）回复吗？"
+    );
+    let request = ChatRequest {
+        message: prompt,
+        peer_id: format!("{peer_id}#voice-intent"),
+        tools: Vec::new(),
+        skip_store: true,
+        contexts: vec!["你是意图分类器，只输出 YES 或 NO。".to_string()],
+        jailbreak_index: None,
+        image_base64: None,
+        video_base64: None,
+        video_mime: None,
+        file_base64: None,
+        file_name: None,
+        stream: true,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        source: "internal".to_string(),
+        user_name: String::new(),
+        max_tokens: Some(8),
+        original_user_msg: None,
+        assistant_tool_calls: vec![],
+        tool_results: vec![],
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        retry.send(retry_actor::RetryChatRequest {
+            request,
+            max_retries: 0,
+        }),
+    )
+    .await
+    {
+        Ok(Ok(Ok(resp))) => resp.content.trim().to_ascii_uppercase().starts_with("YES"),
+        _ => false,
+    }
+}
+
 
 // ── Chat history (per peer) ──────────────────────────────────────────────────
 

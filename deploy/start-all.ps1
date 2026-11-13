@@ -40,14 +40,8 @@ if (-not (Test-Port 18080)) {
     Write-Host 'main-app: started'
 } else { Write-Host 'main-app: already listening' }
 
-# 4) call-agent worker 8081
-if (-not (Test-Port 8081)) {
-    Start-Process -FilePath 'E:\BN_agent\call-agent\.venv\Scripts\python.exe' `
-        -ArgumentList 'agent_main.py', 'start' `
-        -WorkingDirectory 'E:\BN_agent\call-agent' -WindowStyle Hidden `
-        -RedirectStandardOutput "$logDir\agent.out.log" -RedirectStandardError "$logDir\agent.err.log"
-    Write-Host 'call-agent: started'
-} else { Write-Host 'call-agent: already listening' }
+# 4) 通话由 main-app 的 call-livekit-plugin 直接接房（官方 Rust livekit SDK），
+#    不再需要独立的 call-agent worker 进程。
 
 # 5) yueyue 8877 / GSV-TTS 9880 / qwen 8190
 if (-not (Test-Port 8877)) {

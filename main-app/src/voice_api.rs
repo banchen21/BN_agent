@@ -221,7 +221,7 @@ async fn transcribe(wav: Vec<u8>) -> Result<String, String> {
         .to_string())
 }
 
-async fn synthesize(text: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn synthesize(text: &str) -> Result<Vec<u8>, String> {
     let url = std::env::var("VOICE_TTS_URL").unwrap_or_else(|_| DEFAULT_TTS_URL.to_string());
     let response = reqwest::Client::new()
         .post(&url)
@@ -246,7 +246,7 @@ async fn synthesize(text: &str) -> Result<Vec<u8>, String> {
 }
 
 /// 解析 PCM WAV 时长（秒）：按 `fmt ` 的 byte_rate 与 `data` 长度计算。
-fn wav_duration_secs(bytes: &[u8]) -> Option<f64> {
+pub(crate) fn wav_duration_secs(bytes: &[u8]) -> Option<f64> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }

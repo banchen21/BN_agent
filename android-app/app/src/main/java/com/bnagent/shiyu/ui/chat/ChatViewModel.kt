@@ -99,11 +99,13 @@ class ChatViewModel(
     fun sendText(raw: String) {
         val content = raw.trim()
         if (content.isEmpty()) return
+        // 「要语音 / 发条语音」这类消息：让后端把回复合成语音发回来。
+        val voiceReply = WANTS_VOICE.any { content.contains(it) }
         viewModelScope.launch {
             pendingSends++
             typing = true
             try {
-                repository.sendText(conversationId, content)
+                repository.sendText(conversationId, content, voiceReply)
             } catch (e: AgentException) {
                 _events.tryEmit(e.userMessage)
             } catch (e: Exception) {
@@ -368,3 +370,7 @@ class ChatViewModel(
         super.onCleared()
     }
 }
+
+private val WANTS_VOICE = listOf(
+    "要语音", "发语音", "语音回", "用语音", "发条语音", "发个语音", "语音消息", "说给我听",
+)
