@@ -566,6 +566,11 @@ struct ChatPayload {
     /// 客户端明确要求这一轮用语音回复（返回 audio_base64）。
     #[serde(default)]
     voice: Option<bool>,
+    /// 客户端随消息附带的图片（base64，可带 data: 前缀）。
+    #[serde(default)]
+    image_base64: Option<String>,
+    #[serde(default)]
+    image_mime: Option<String>,
 }
 
 /// 归一化多会话 peer_id：trim → 仅保留 `[A-Za-z0-9_.:-]` → 最多 128 字符；
@@ -593,7 +598,7 @@ pub(crate) async fn run_chat(
     user_name: String,
     source: String,
 ) -> Result<LlmResponse, (u16, String)> {
-    run_chat_ex(state, message, peer_id, user_name, source, false).await
+    run_chat_ex(state, message, peer_id, user_name, source, false, None, None).await
 }
 
 /// 同 [`run_chat`]；`force_voice` 为客户端显式要求语音回复。
@@ -604,6 +609,8 @@ pub(crate) async fn run_chat_ex(
     user_name: String,
     source: String,
     force_voice: bool,
+    image_base64: Option<String>,
+    image_mime: Option<String>,
 ) -> Result<LlmResponse, (u16, String)> {
     let retry_addr = state
         .retry_addr
@@ -622,7 +629,9 @@ pub(crate) async fn run_chat_ex(
     // 客户端不执行工具；但「要语音」这类请求要把语音消息发回去。
     let mut want_voice = false;
     if is_android {
-        want_voice = force_voice || android_wants_voice(state, &peer_id, message).await;
+        want_voice = force_voice
+            || (image_base64.is_none()
+                && android_wants_voice(state, &peer_id, message).await);
         if want_voice {
             contexts.push(
                 "【聊天客户端·语音回复】用户想要听到你的声音，这次回复会被合成语音消息发给他。\
@@ -664,11 +673,11 @@ pub(crate) async fn run_chat_ex(
                 skip_store: false,
                 contexts,
                 jailbreak_index: None,
-                image_base64: None,
+                image_base64: image_base64.clone(),
                 video_base64: None,
                 video_mime: None,
                 file_base64: None,
-                file_name: None,
+                file_name: image_mime.clone(),
                 stream: true,
                 request_id,
                 source,
@@ -715,6 +724,8 @@ async fn chat(state: web::Data<AppState>, body: web::Json<ChatPayload>) -> impl 
         body.user_name.clone().unwrap_or_default(),
         source.clone(),
         force_voice,
+        body.image_base64.clone(),
+        body.image_mime.clone(),
     )
     .await
     {

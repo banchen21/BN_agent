@@ -156,16 +156,31 @@ class ChatViewModel(
                 _events.tryEmit("无法读取所选图片，请重试")
                 return@launch
             }
-            runCatching {
-                repository.sendAttachment(
-                    conversationId,
-                    Message.Image(
-                        id = UUID.randomUUID().toString(),
-                        sender = MessageSender.ME,
-                        asset = path,
-                    ),
-                )
-            }.onFailure { _events.tryEmit("图片发送失败，请稍后重试") }
+            sendImageToAgent(path, "图片发送失败，请稍后重试")
+        }
+    }
+
+    /** 本地落一条我方图片消息，并把图片一起发给 Agent（连文字回复一起出现）。 */
+    private suspend fun sendImageToAgent(path: String, failureHint: String) {
+        runCatching {
+            repository.sendAttachment(
+                conversationId,
+                Message.Image(
+                    id = UUID.randomUUID().toString(),
+                    sender = MessageSender.ME,
+                    asset = path,
+                ),
+            )
+            pendingSends++
+            typing = true
+            try {
+                repository.sendText(conversationId, "", imagePath = path)
+            } finally {
+                pendingSends = (pendingSends - 1).coerceAtLeast(0)
+                typing = pendingSends > 0
+            }
+        }.onFailure {
+            _events.tryEmit(failureHint)
         }
     }
 
@@ -185,16 +200,7 @@ class ChatViewModel(
                 _events.tryEmit("读取照片失败，请重试")
                 return@launch
             }
-            runCatching {
-                repository.sendAttachment(
-                    conversationId,
-                    Message.Image(
-                        id = UUID.randomUUID().toString(),
-                        sender = MessageSender.ME,
-                        asset = path,
-                    ),
-                )
-            }.onFailure { _events.tryEmit("照片发送失败，请稍后重试") }
+            sendImageToAgent(path, "照片发送失败，请稍后重试")
         }
     }
 

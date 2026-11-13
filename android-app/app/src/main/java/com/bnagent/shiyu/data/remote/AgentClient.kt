@@ -46,6 +46,8 @@ class AgentClient(
         message: String,
         userName: String,
         voice: Boolean = false,
+        image: ByteArray? = null,
+        imageMime: String = "image/jpeg",
     ): ChatReply {
         val payload = ChatRequestDto(
             message = message,
@@ -53,6 +55,8 @@ class AgentClient(
             userName = userName,
             source = SOURCE,
             voice = voice,
+            imageBase64 = image?.let { java.util.Base64.getEncoder().encodeToString(it) } ?: "",
+            imageMime = imageMime,
         )
         val request = buildRequest(
             settings = settings,
@@ -490,6 +494,9 @@ internal data class ChatRequestDto(
     val source: String,
     /** 后端本轮用语音回复（返回 audio_base64）。 */
     val voice: Boolean = false,
+    /** 随消息附带的图片（base64）；空串表示没有。 */
+    @SerialName("image_base64") val imageBase64: String = "",
+    @SerialName("image_mime") val imageMime: String = "",
 )
 
 @Serializable

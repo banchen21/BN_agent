@@ -170,8 +170,15 @@ class ConversationRepository(
      * @return 后端回复消息。
      * @throws AgentException 网络 / 鉴权 / 服务端错误（此时我方消息保留并标记为「发送失败」）。
      */
-    suspend fun sendText(conversationId: String, text: String, voiceReply: Boolean = false): Message {
-        val content = text.trim()
+    suspend fun sendText(
+        conversationId: String,
+        text: String,
+        voiceReply: Boolean = false,
+        imagePath: String? = null,
+    ): Message {
+        val content = text.trim().ifEmpty {
+            if (imagePath != null) DEFAULT_IMAGE_PROMPT else ""
+        }
         require(content.isNotEmpty()) { "消息不能为空" }
         // 「要语音」时后端把回复合成 WAV 一并返回，这里落成语音气泡。
 
@@ -197,6 +204,9 @@ class ConversationRepository(
                 message = content,
                 userName = snapshot.profile.name,
                 voice = voiceReply,
+                image = imagePath?.let { p ->
+                    runCatching { java.io.File(p).readBytes() }.getOrNull()
+                },
             )
         } catch (error: AgentException) {
             store.update { it.markMessageFailed(conversationId, mine.id) }
@@ -491,3 +501,6 @@ private fun ChatState.setVoiceTranscript(
     }
     return copy(messages = messages + (conversationId to updated))
 }
+
+/** 只发图片不配文字时，带给 Agent 的默认提问。 */
+private const val DEFAULT_IMAGE_PROMPT = "你看得出来这张图里是什么吗？"
